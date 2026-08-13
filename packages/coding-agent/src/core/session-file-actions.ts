@@ -25,7 +25,7 @@ async function deleteSessionArtifacts(sessionPath: string): Promise<void> {
 /** Remove the session `.jsonl`, trying the `trash` CLI first, then falling back to unlink. */
 async function removeSessionFile(sessionPath: string): Promise<DeleteSessionFileResult> {
 	const trashArgs = sessionPath.startsWith("-") ? ["--", sessionPath] : [sessionPath];
-	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8" });
+	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8", windowsHide: true });
 
 	const getTrashErrorHint = (): string | null => {
 		const parts: string[] = [];

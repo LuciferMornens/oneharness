@@ -10,6 +10,12 @@ Install the latest stable release on Linux or macOS:
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
+On Windows, use PowerShell:
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
 To try the latest beta built from `main`:
 
 ```bash
@@ -32,6 +38,15 @@ git clone https://github.com/PrimeIntellect-ai/prime-agent
 cd prime-agent
 npm ci
 ./prime-agent.sh
+```
+
+On Windows:
+
+```powershell
+git clone https://github.com/PrimeIntellect-ai/prime-agent
+Set-Location prime-agent
+npm ci
+.\prime-agent.ps1
 ```
 
 The source runner preserves the directory from which it is invoked, so you can also call `/path/to/prime-agent/prime-agent.sh` from another project.

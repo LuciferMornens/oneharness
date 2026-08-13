@@ -7,8 +7,9 @@ if (!existsSync(script)) {
 	process.exit(0);
 }
 
-const result = spawnSync(process.execPath, [script], { stdio: "inherit" });
+const result = spawnSync(process.execPath, [script], { stdio: "inherit", windowsHide: true });
 if (result.error) {
-	console.error(`prime-agent: postinstall setup skipped: ${result.error.message}`);
+	console.error(`prime-agent: postinstall setup failed: ${result.error.message}`);
+	process.exit(1);
 }
-process.exit(0);
+process.exit(result.status ?? 1);

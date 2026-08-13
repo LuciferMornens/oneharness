@@ -21,7 +21,7 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 }
 
 import { getEnvApiKey } from "../env-api-keys.js";
-import { clampThinkingLevel } from "../models.js";
+import { resolveSimpleThinkingLevel, resolveThinkingLevel } from "../models.js";
 import { registerSessionResourceCleanup } from "../session-resources.js";
 import type {
 	Api,
@@ -69,6 +69,7 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 
 export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	reasoningEffortValue?: string;
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
@@ -326,12 +327,19 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
 
 	return streamOpenAICodexResponses(model, context, {
 		...base,
-		reasoningEffort,
+		reasoningEffort: resolvedReasoning?.enabled
+			? (resolvedReasoning.level as Exclude<typeof resolvedReasoning.level, "off">)
+			: resolvedReasoning
+				? "none"
+				: undefined,
+		reasoningEffortValue:
+			resolvedReasoning && typeof resolvedReasoning.providerValue === "string"
+				? resolvedReasoning.providerValue
+				: undefined,
 	} satisfies OpenAICodexResponsesOptions);
 };
 
@@ -375,10 +383,11 @@ function buildRequestBody(
 
 	if (options?.reasoningEffort !== undefined) {
 		const effort =
-			options.reasoningEffort === "none"
-				? (model.thinkingLevelMap?.off ?? "none")
-				: (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort);
-		if (effort !== null) {
+			options.reasoningEffortValue ??
+			(options.reasoningEffort === "none"
+				? resolveSimpleThinkingLevel(model, undefined)?.providerValue
+				: resolveThinkingLevel(model, options.reasoningEffort)?.providerValue);
+		if (typeof effort === "string") {
 			body.reasoning = {
 				effort,
 				summary: options.reasoningSummary ?? "auto",

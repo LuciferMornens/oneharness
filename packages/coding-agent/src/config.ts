@@ -81,6 +81,15 @@ function makeSelfUpdateCommandStep(command: string, args: string[]): SelfUpdateC
 	};
 }
 
+function appendSelfUpdateCommandStep(command: SelfUpdateCommand, step: SelfUpdateCommandStep): SelfUpdateCommand {
+	const steps = [...(command.steps ?? [command]), step];
+	return {
+		...command,
+		display: steps.map((current) => current.display).join(" && "),
+		steps,
+	};
+}
+
 export function detectInstallMethod(): InstallMethod {
 	if (isBunBinary) {
 		return "bun-binary";
@@ -210,6 +219,7 @@ function readCommandOutput(
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
 		shell: shouldUseWindowsShell(command),
+		windowsHide: true,
 	});
 	if (result.status === 0) return result.stdout.trim() || undefined;
 	if (options.requireSuccess) {
@@ -315,6 +325,21 @@ export function getSelfUpdateCommand(
 	const command = getSelfUpdateCommandForMethod(method, packageName, updateSpec, npmCommand, updatePackageName);
 	if (!command || !isManagedByGlobalPackageManager(method, packageName, npmCommand) || !isSelfUpdatePathWritable()) {
 		return undefined;
+	}
+	if (process.platform === "win32" && method === "npm") {
+		const [npmExecutable = "npm", ...npmArgs] = npmCommand ?? [];
+		const prefix = readCommandOutput(npmExecutable, [...npmArgs, "prefix", "-g"], { requireSuccess: true });
+		if (!prefix) {
+			throw new Error("npm prefix -g returned no global prefix while preparing the self-update");
+		}
+		return appendSelfUpdateCommandStep(
+			command,
+			makeSelfUpdateCommandStep(process.execPath, [
+				"-e",
+				"require('node:fs').rmSync(process.argv[1],{force:true})",
+				join(prefix, `${APP_NAME}.ps1`),
+			]),
+		);
 	}
 	return command;
 }

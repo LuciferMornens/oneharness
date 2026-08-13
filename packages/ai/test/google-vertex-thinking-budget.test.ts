@@ -61,6 +61,20 @@ async function captureMinimalReasoningPayload(
 	return capturedPayload;
 }
 
+async function captureDefaultReasoningPayload(): Promise<GenerateContentParameters> {
+	let capturedPayload: GenerateContentParameters | undefined;
+	const stream = streamSimpleGoogleVertex(stableFlashLite, context, {
+		apiKey: "fake-key",
+		onPayload: (payload) => {
+			capturedPayload = payload as GenerateContentParameters;
+			return payload;
+		},
+	});
+	await stream.result();
+	if (!capturedPayload) throw new Error("Expected Vertex payload to be captured");
+	return capturedPayload;
+}
+
 describe("Google Vertex thinking budget payload", () => {
 	it.each(flashLiteModels)("uses the supported minimal budget for $id", async (model) => {
 		const payload = await captureMinimalReasoningPayload(model);
@@ -69,5 +83,10 @@ describe("Google Vertex thinking budget payload", () => {
 			includeThoughts: true,
 			thinkingBudget: 512,
 		});
+	});
+
+	it("requests zero thinking budget when reasoning is omitted", async () => {
+		const payload = await captureDefaultReasoningPayload();
+		expect(payload.config?.thinkingConfig).toEqual({ thinkingBudget: 0 });
 	});
 });

@@ -21,7 +21,7 @@ import {
 	ToolResultStatus,
 } from "@aws-sdk/client-bedrock-runtime";
 import type { DocumentType } from "@smithy/types";
-import { calculateCost, clampThinkingLevel } from "../models.js";
+import { calculateCost, getReasoningCapabilities, resolveThinkingLevel } from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -321,41 +321,49 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const base = buildBaseOptions(model, options, undefined);
-	if (!options?.reasoning || options.reasoning === "off") {
-		return streamBedrock(model, context, { ...base, reasoning: undefined } satisfies BedrockOptions);
+	const resolvedReasoning = resolveThinkingLevel(model, options?.reasoning);
+	if (!resolvedReasoning) return streamBedrock(model, context, base satisfies BedrockOptions);
+	if (!resolvedReasoning.enabled) return streamBedrock(model, context, base satisfies BedrockOptions);
+	const reasoning = resolvedReasoning.level as ThinkingLevel;
+	const thinkingBudgets = options?.thinkingBudgets;
+	const reasoningControl = getReasoningCapabilities(model)?.control;
+	const adaptiveThinking =
+		isAnthropicClaudeModel(model) &&
+		(supportsAdaptiveThinking(model.id, model.name) || model.reasoningCapabilities?.control === "effort");
+
+	if (adaptiveThinking) {
+		return streamBedrock(model, context, {
+			...base,
+			reasoning,
+			thinkingBudgets,
+		} satisfies BedrockOptions);
 	}
 
-	if (isAnthropicClaudeModel(model)) {
-		if (supportsAdaptiveThinking(model.id, model.name)) {
-			return streamBedrock(model, context, {
-				...base,
-				reasoning: options.reasoning,
-				thinkingBudgets: options.thinkingBudgets,
-			} satisfies BedrockOptions);
-		}
-
-		const adjusted = adjustMaxTokensForThinking(
-			base.maxTokens || 0,
-			model.maxTokens,
-			options.reasoning,
-			options.thinkingBudgets,
-		);
+	if (reasoningControl !== "fixed") {
+		const level = clampReasoning(reasoning)!;
+		const capabilityBudget =
+			typeof resolvedReasoning.providerValue === "number" ? resolvedReasoning.providerValue : undefined;
+		const requestedBudget = thinkingBudgets?.[level] ?? capabilityBudget;
+		const adjusted = adjustMaxTokensForThinking(base.maxTokens || 0, model.maxTokens, reasoning, {
+			...thinkingBudgets,
+			...(requestedBudget !== undefined ? { [level]: requestedBudget } : {}),
+		});
 
 		return streamBedrock(model, context, {
 			...base,
 			maxTokens: adjusted.maxTokens,
-			reasoning: options.reasoning,
+			reasoning,
 			thinkingBudgets: {
-				...(options.thinkingBudgets || {}),
-				[clampReasoning(options.reasoning)!]: adjusted.thinkingBudget,
+				...(thinkingBudgets || {}),
+				[level]: adjusted.thinkingBudget,
 			},
 		} satisfies BedrockOptions);
 	}
 
 	return streamBedrock(model, context, {
 		...base,
-		reasoning: options.reasoning,
-		thinkingBudgets: options.thinkingBudgets,
+		reasoning,
+		thinkingBudgets,
 	} satisfies BedrockOptions);
 };
 
@@ -499,16 +507,16 @@ function getModelMatchCandidates(modelId: string, modelName?: string): string[] 
 function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean {
 	const candidates = getModelMatchCandidates(modelId, modelName);
 	return candidates.some(
-		(s) =>
-			s.includes("opus-4-6") ||
-			s.includes("opus-4-7") ||
-			s.includes("opus-4-8") ||
-			s.includes("opus-5") ||
-			s.includes("sonnet-4-6") ||
-			s.includes("sonnet-5") ||
-			s.includes("fable-5") ||
-			s.includes("mythos-5") ||
-			s.includes("mythos-preview"),
+		(candidate) =>
+			candidate.includes("opus-4-6") ||
+			candidate.includes("opus-4-7") ||
+			candidate.includes("opus-4-8") ||
+			candidate.includes("opus-5") ||
+			candidate.includes("sonnet-4-6") ||
+			candidate.includes("sonnet-5") ||
+			candidate.includes("fable-5") ||
+			candidate.includes("mythos-5") ||
+			candidate.includes("mythos-preview"),
 	);
 }
 
@@ -524,11 +532,9 @@ function mapThinkingLevelToEffort(
 	model: Model<"bedrock-converse-stream">,
 	level: SimpleStreamOptions["reasoning"],
 ): "low" | "medium" | "high" | "xhigh" | "max" {
-	// Clamp to what the model actually supports so callers that bypass
-	// clampThinkingLevel (e.g. passing reasoning: "xhigh" directly) can't send an
-	// effort the model lacks — xhigh on a max-only model resolves to max, not xhigh.
-	const effective = level ? clampThinkingLevel(model, level) : undefined;
-	const mapped = effective ? model.thinkingLevelMap?.[effective] : undefined;
+	const resolved = resolveThinkingLevel(model, level);
+	const effective = resolved?.level;
+	const mapped = resolved?.providerValue;
 	if (typeof mapped === "string") return mapped as "low" | "medium" | "high" | "xhigh" | "max";
 
 	switch (effective) {
@@ -916,7 +922,9 @@ function buildAdditionalModelRequestFields(
 		// GovCloud Bedrock currently rejects the Claude thinking.display field.
 		// Omit it there until the GovCloud Converse schema catches up.
 		const display = isGovCloudBedrockTarget(model, options) ? undefined : (options.thinkingDisplay ?? "summarized");
-		const result: Record<string, any> = supportsAdaptiveThinking(model.id, model.name)
+		const adaptiveThinking =
+			supportsAdaptiveThinking(model.id, model.name) || model.reasoningCapabilities?.control === "effort";
+		const result: Record<string, any> = adaptiveThinking
 			? {
 					thinking: { type: "adaptive", ...(display !== undefined ? { display } : {}) },
 					output_config: { effort: mapThinkingLevelToEffort(model, options.reasoning) },
@@ -944,7 +952,7 @@ function buildAdditionalModelRequestFields(
 					};
 				})();
 
-		if (!supportsAdaptiveThinking(model.id, model.name) && (options.interleavedThinking ?? true)) {
+		if (!adaptiveThinking && (options.interleavedThinking ?? true)) {
 			result.anthropic_beta = ["interleaved-thinking-2025-05-14"];
 		}
 

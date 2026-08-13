@@ -541,6 +541,44 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.session.cycleThinkingLevel()).toBeUndefined();
 	});
 
+	it("uses exact model reasoning levels when switching and cycling", async () => {
+		const harness = await createHarness({
+			models: [
+				{
+					id: "extended-effort",
+					reasoning: true,
+					reasoningCapabilities: {
+						control: "effort",
+						levels: { off: "off", high: "high", xhigh: "xhigh" },
+					},
+				},
+				{
+					id: "deepseek-v4",
+					reasoning: true,
+					reasoningCapabilities: {
+						control: "effort",
+						levels: { off: "off", low: "low", high: "high", max: "max" },
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		const extended = harness.getModel("extended-effort")!;
+		const deepseek = harness.getModel("deepseek-v4")!;
+		harness.session.setScopedModels([{ model: extended }, { model: deepseek, thinkingLevel: "xhigh" }]);
+		expect(harness.session.scopedModels[1]?.thinkingLevel).toBe("max");
+		harness.session.setThinkingLevel("xhigh");
+
+		const switched = await harness.session.cycleModel();
+
+		expect(switched?.model.id).toBe("deepseek-v4");
+		expect(switched?.thinkingLevel).toBe("max");
+		expect(harness.session.thinkingLevel).toBe("max");
+		expect(harness.session.getAvailableThinkingLevels()).toEqual(["off", "low", "high", "max"]);
+		expect(harness.session.cycleThinkingLevel()).toBe("off");
+		expect(harness.session.cycleThinkingLevel()).toBe("low");
+	});
+
 	it("throws when setModel is called without configured auth", async () => {
 		const harness = await createHarness({
 			models: [

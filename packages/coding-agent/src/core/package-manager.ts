@@ -28,7 +28,7 @@ import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
-import { shouldUseWindowsShell } from "../utils/child-process.js";
+import { shouldUseWindowsShell, signalProcessGroupOrProcess } from "../utils/child-process.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
 import { canonicalizePath, isLocalPath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
@@ -2383,6 +2383,7 @@ export class DefaultPackageManager implements PackageManager {
 			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
 			shell: shouldUseWindowsShell(command),
 			env: getEnv(),
+			windowsHide: true,
 		});
 	}
 
@@ -2397,6 +2398,7 @@ export class DefaultPackageManager implements PackageManager {
 			stdio: ["ignore", "pipe", "pipe"],
 			shell: shouldUseWindowsShell(command),
 			env: options?.env ? { ...baseEnv, ...options.env } : baseEnv,
+			windowsHide: true,
 		});
 	}
 
@@ -2414,7 +2416,11 @@ export class DefaultPackageManager implements PackageManager {
 				typeof options?.timeoutMs === "number"
 					? setTimeout(() => {
 							timedOut = true;
-							child.kill();
+							if (process.platform === "win32" && child.pid !== undefined) {
+								signalProcessGroupOrProcess(child.pid, "SIGTERM");
+							} else {
+								child.kill();
+							}
 						}, options.timeoutMs)
 					: undefined;
 
@@ -2464,6 +2470,7 @@ export class DefaultPackageManager implements PackageManager {
 			encoding: "utf-8",
 			shell: shouldUseWindowsShell(command),
 			env: getEnv(),
+			windowsHide: true,
 		});
 		if (result.error || result.status !== 0) {
 			throw new Error(

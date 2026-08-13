@@ -62,7 +62,7 @@ export function getAssistantTexts(harness: Harness): string[] {
 export interface HarnessOptions {
 	api?: string;
 	provider?: string;
-	models?: FauxModelDefinition[];
+	models?: Array<FauxModelDefinition & Pick<Partial<Model<string>>, "reasoningCapabilities" | "thinkingLevelMap">>;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -112,6 +112,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		provider: options.provider,
 		models: options.models,
 	});
+	for (const registeredModel of fauxProvider.models) {
+		const definition = options.models?.find((candidate) => candidate.id === registeredModel.id);
+		registeredModel.reasoningCapabilities = definition?.reasoningCapabilities;
+		registeredModel.thinkingLevelMap = definition?.thinkingLevelMap;
+	}
 	fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();
 	const toolMap = options.tools ? Object.fromEntries(options.tools.map((tool) => [tool.name, tool])) : undefined;
@@ -138,6 +143,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				name: registeredModel.name,
 				api: registeredModel.api,
 				reasoning: registeredModel.reasoning,
+				reasoningCapabilities: registeredModel.reasoningCapabilities,
+				thinkingLevelMap: registeredModel.thinkingLevelMap,
 				input: registeredModel.input,
 				cost: registeredModel.cost,
 				contextWindow: registeredModel.contextWindow,

@@ -1,5 +1,13 @@
 import { MODELS } from "./models.generated.js";
-import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.js";
+import type {
+	Api,
+	KnownProvider,
+	Model,
+	ModelReasoningCapabilities,
+	ModelThinkingLevel,
+	ThinkingLevelValue,
+	Usage,
+} from "./types.js";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
@@ -63,14 +71,37 @@ export function calculateCost<TApi extends Api>(
 
 const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
-	if (!model.reasoning) return ["off"];
+const LEGACY_TOGGLE_CAPABILITIES: ModelReasoningCapabilities = {
+	control: "toggle",
+	levels: { off: "off", high: "high" },
+};
 
+export interface ResolvedThinkingLevel {
+	level: ModelThinkingLevel;
+	enabled: boolean;
+	providerValue: ThinkingLevelValue;
+}
+
+/** Return the route's single authoritative reasoning capability contract. */
+export function getReasoningCapabilities<TApi extends Api>(model: Model<TApi>): ModelReasoningCapabilities | undefined {
+	if (!model.reasoning) return undefined;
+	if (model.reasoningCapabilities) return model.reasoningCapabilities;
+
+	// Custom models created before reasoningCapabilities existed remain usable,
+	// but a missing map is deliberately conservative rather than advertising
+	// every generic effort name.
+	if (model.thinkingLevelMap) {
+		return { control: "effort", levels: model.thinkingLevelMap };
+	}
+	return LEGACY_TOGGLE_CAPABILITIES;
+}
+
+export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
+	const capabilities = getReasoningCapabilities(model);
+	if (!capabilities) return ["off"];
 	return EXTENDED_THINKING_LEVELS.filter((level) => {
-		const mapped = model.thinkingLevelMap?.[level];
-		if (mapped === null) return false;
-		if (level === "xhigh" || level === "max") return mapped !== undefined;
-		return true;
+		const value = capabilities.levels[level];
+		return typeof value === "string" || typeof value === "number";
 	});
 }
 
@@ -93,6 +124,47 @@ export function clampThinkingLevel<TApi extends Api>(
 		if (availableLevels.includes(candidate)) return candidate;
 	}
 	return availableLevels[0] ?? "off";
+}
+
+/** Resolve a requested UI level to its supported level and exact provider value. */
+export function resolveThinkingLevel<TApi extends Api>(
+	model: Model<TApi>,
+	level: ModelThinkingLevel | undefined,
+): ResolvedThinkingLevel | undefined {
+	if (level === undefined) return undefined;
+	const capabilities = getReasoningCapabilities(model);
+	if (!capabilities) return undefined;
+	const resolvedLevel = clampThinkingLevel(model, level);
+	const providerValue = capabilities.levels[resolvedLevel];
+	if (typeof providerValue !== "string" && typeof providerValue !== "number") return undefined;
+	return { level: resolvedLevel, enabled: resolvedLevel !== "off", providerValue };
+}
+
+/** Resolve a provider's native off value without overriding an explicit capability contract. */
+export function resolveThinkingOffValue<TApi extends Api>(
+	model: Model<TApi>,
+	contractlessValue: ThinkingLevelValue,
+): ThinkingLevelValue | undefined {
+	if (!model.reasoning) return undefined;
+	if (model.reasoningCapabilities) {
+		const value = model.reasoningCapabilities.levels.off;
+		return typeof value === "string" || typeof value === "number" ? value : undefined;
+	}
+
+	const legacyValue = model.thinkingLevelMap?.off;
+	if (legacyValue === null) return undefined;
+	return typeof legacyValue === "string" || typeof legacyValue === "number" ? legacyValue : contractlessValue;
+}
+
+/** Resolve a simple-stream selection, defaulting to off only when the route exposes a native off value. */
+export function resolveSimpleThinkingLevel<TApi extends Api>(
+	model: Model<TApi>,
+	level: ModelThinkingLevel | undefined,
+): ResolvedThinkingLevel | undefined {
+	if (level !== undefined) return resolveThinkingLevel(model, level);
+	const offValue = getReasoningCapabilities(model)?.levels.off;
+	if (typeof offValue !== "string" && typeof offValue !== "number") return undefined;
+	return { level: "off", enabled: false, providerValue: offValue };
 }
 
 /**

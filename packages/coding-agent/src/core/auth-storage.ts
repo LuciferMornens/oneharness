@@ -6,7 +6,7 @@
  * try to refresh tokens simultaneously.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	findEnvKeys,
 	getEnvApiKey,
@@ -15,7 +15,19 @@ import {
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
 import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import {
+	chmodSync,
+	closeSync,
+	existsSync,
+	fsyncSync,
+	linkSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
@@ -72,6 +84,10 @@ export type AuthStorageOptions = {
 	usePrimeCliConfig?: boolean;
 };
 
+export type AuthStorageMutationResult = {
+	legacyCleanupError?: Error;
+};
+
 type LockResult<T> = {
 	result: T;
 	next?: string;
@@ -100,6 +116,18 @@ type AuthApiKeyResult = {
 	sourceToken?: AuthSourceToken;
 };
 
+type OAuthTokenRefreshResult = { apiKey: string; newCredentials: OAuthCredentials };
+type OAuthRefreshPreparation =
+	| { currentData: AuthStorageData; status: "missing" }
+	| { currentData: AuthStorageData; status: "fresh"; credentials: OAuthCredential }
+	| {
+			currentData: AuthStorageData;
+			status: "expired";
+			credentials: OAuthCredential;
+			oauthCreds: Record<string, OAuthCredentials>;
+	  };
+type OAuthRefreshCommit = { currentData: AuthStorageData; refreshed: OAuthTokenRefreshResult | null };
+
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
@@ -116,9 +144,45 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 
 	private ensureFileExists(): void {
-		if (!existsSync(this.authPath)) {
-			writeFileSync(this.authPath, "{}", "utf-8");
-			chmodSync(this.authPath, 0o600);
+		if (existsSync(this.authPath)) {
+			return;
+		}
+		const tempPath = `${this.authPath}.${process.pid}.${randomUUID()}.tmp`;
+		try {
+			this.writeDurableTempFile(tempPath, "{}");
+			try {
+				linkSync(tempPath, this.authPath);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+					throw error;
+				}
+			}
+		} finally {
+			rmSync(tempPath, { force: true });
+		}
+	}
+
+	private writeDurableTempFile(tempPath: string, content: string): void {
+		let descriptor: number | undefined;
+		try {
+			descriptor = openSync(tempPath, "wx", 0o600);
+			writeFileSync(descriptor, content, "utf-8");
+			fsyncSync(descriptor);
+		} finally {
+			if (descriptor !== undefined) {
+				closeSync(descriptor);
+			}
+		}
+	}
+
+	private writeAtomically(content: string): void {
+		const tempPath = `${this.authPath}.${process.pid}.${randomUUID()}.tmp`;
+		try {
+			this.writeDurableTempFile(tempPath, content);
+			chmodSync(tempPath, 0o600);
+			renameSync(tempPath, this.authPath);
+		} finally {
+			rmSync(tempPath, { force: true });
 		}
 	}
 
@@ -159,8 +223,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
-				chmodSync(this.authPath, 0o600);
+				this.writeAtomically(next);
 			}
 			return result;
 		} finally {
@@ -204,8 +267,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				writeFileSync(this.authPath, next, "utf-8");
-				chmodSync(this.authPath, 0o600);
+				this.writeAtomically(next);
 			}
 			throwIfCompromised();
 			return result;
@@ -642,7 +704,7 @@ export class AuthStorage {
 
 	private persistProviderChange(provider: string, credential: AuthCredential | undefined): void {
 		if (this.loadError) {
-			return;
+			throw this.loadError;
 		}
 
 		try {
@@ -658,6 +720,7 @@ export class AuthStorage {
 			});
 		} catch (error) {
 			this.recordError(error);
+			throw error;
 		}
 	}
 
@@ -672,18 +735,34 @@ export class AuthStorage {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
-		this.clearStaleAuthSource(provider, "stored");
-		this.data[provider] = credential;
+		try {
+			this.setPersisted(provider, credential);
+		} catch {
+			// Compatibility path: persistence errors remain available through drainErrors().
+		}
+	}
+
+	setPersisted(provider: string, credential: AuthCredential): void {
 		this.persistProviderChange(provider, credential);
+		this.data[provider] = credential;
+		this.clearStaleAuthSource(provider, "stored");
 	}
 
 	/**
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
-		this.clearStaleAuthSource(provider, "stored");
-		delete this.data[provider];
+		try {
+			this.removePersisted(provider);
+		} catch {
+			// Compatibility path: persistence errors remain available through drainErrors().
+		}
+	}
+
+	removePersisted(provider: string): void {
 		this.persistProviderChange(provider, undefined);
+		delete this.data[provider];
+		this.clearStaleAuthSource(provider, "stored");
 	}
 
 	/**
@@ -738,14 +817,15 @@ export class AuthStorage {
 		}
 
 		const credentials = await provider.login(callbacks);
-		this.set(providerId, { type: "oauth", ...credentials });
+		this.setPersisted(providerId, { type: "oauth", ...credentials });
 	}
 
 	/**
 	 * Logout from a provider.
 	 */
-	logout(provider: string): void {
+	logout(provider: string): AuthStorageMutationResult {
 		if (provider === PRIME_INFERENCE_PROVIDER_ID && this.isPrimeCliConfigEnabled()) {
+			this.removePersisted(provider);
 			try {
 				clearPrimeCliCredentials(this.getEnabledPrimeCliConfigPath());
 				this.clearStaleAuthSource(provider, "prime_cli");
@@ -753,34 +833,37 @@ export class AuthStorage {
 				this.recordError(error);
 				throw error;
 			}
+			return {};
 		}
-		this.remove(provider);
+		this.removePersisted(provider);
+		return {};
 	}
 
 	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
 	 */
-	private async refreshOAuthTokenWithLock(
-		providerId: OAuthProviderId,
-	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
+	private async refreshOAuthTokenWithLock(providerId: OAuthProviderId): Promise<OAuthTokenRefreshResult | null> {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			return null;
 		}
 
-		const result = await this.storage.withLockAsync(async (current) => {
+		const prepared = this.storage.withLock<OAuthRefreshPreparation>((current) => {
 			const currentData = this.parseStorageData(current);
-			this.data = currentData;
-			this.loadError = null;
-
 			const cred = currentData[providerId];
 			if (cred?.type !== "oauth") {
-				return { result: null };
+				return { result: { currentData, status: "missing" as const } };
 			}
 
 			if (Date.now() < cred.expires) {
-				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
+				return {
+					result: {
+						currentData,
+						status: "fresh" as const,
+						credentials: cred,
+					},
+				};
 			}
 
 			const oauthCreds: Record<string, OAuthCredentials> = {};
@@ -789,22 +872,62 @@ export class AuthStorage {
 					oauthCreds[key] = value;
 				}
 			}
+			return {
+				result: {
+					currentData,
+					status: "expired" as const,
+					credentials: cred,
+					oauthCreds,
+				},
+			};
+		});
 
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-			if (!refreshed) {
-				return { result: null };
+		this.data = prepared.currentData;
+		this.loadError = null;
+		if (prepared.status === "missing") {
+			return null;
+		}
+		if (prepared.status === "fresh") {
+			return { apiKey: provider.getApiKey(prepared.credentials), newCredentials: prepared.credentials };
+		}
+
+		const refreshed = await getOAuthApiKey(providerId, prepared.oauthCreds);
+		if (!refreshed) {
+			return null;
+		}
+
+		const committed = this.storage.withLock<OAuthRefreshCommit>((current) => {
+			const currentData = this.parseStorageData(current);
+			const currentCredential = currentData[providerId];
+			if (currentCredential?.type !== "oauth") {
+				return { result: { currentData, refreshed: null } };
 			}
-
+			if (Date.now() < currentCredential.expires) {
+				return {
+					result: {
+						currentData,
+						refreshed: {
+							apiKey: provider.getApiKey(currentCredential),
+							newCredentials: currentCredential,
+						},
+					},
+				};
+			}
+			if (JSON.stringify(currentCredential) !== JSON.stringify(prepared.credentials)) {
+				return { result: { currentData, refreshed: null } };
+			}
 			const merged: AuthStorageData = {
 				...currentData,
 				[providerId]: { type: "oauth", ...refreshed.newCredentials },
 			};
-			this.data = merged;
-			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
+			return {
+				result: { currentData: merged, refreshed },
+				next: JSON.stringify(merged, null, 2),
+			};
 		});
-
-		return result;
+		this.data = committed.currentData;
+		this.loadError = null;
+		return committed.refreshed;
 	}
 
 	/**
@@ -988,13 +1111,13 @@ export class AuthStorage {
 		if (credential?.type !== "api_key") {
 			return;
 		}
-		this.set(PRIME_INFERENCE_PROVIDER_ID, {
+		this.setPersisted(PRIME_INFERENCE_PROVIDER_ID, {
 			...credential,
 			primeTeam: team ? this.toPrimeTeamCredential(team) : null,
 		});
 	}
 
-	setPrimeInferenceApiKey(apiKey: string): void {
+	setPrimeInferenceApiKey(apiKey: string): AuthStorageMutationResult {
 		if (this.isPrimeCliConfigEnabled()) {
 			try {
 				const configPath = this.getEnabledPrimeCliConfigPath();
@@ -1012,18 +1135,23 @@ export class AuthStorage {
 				throw error;
 			}
 			if (this.data[PRIME_INFERENCE_PROVIDER_ID]) {
-				this.remove(PRIME_INFERENCE_PROVIDER_ID);
+				try {
+					this.removePersisted(PRIME_INFERENCE_PROVIDER_ID);
+				} catch (error) {
+					return { legacyCleanupError: error instanceof Error ? error : new Error(String(error)) };
+				}
 			}
-			return;
+			return {};
 		}
 
 		const existingCredential = this.data[PRIME_INFERENCE_PROVIDER_ID];
 		const existingPrimeTeam = existingCredential?.type === "api_key" ? existingCredential.primeTeam : undefined;
-		this.set(PRIME_INFERENCE_PROVIDER_ID, {
+		this.setPersisted(PRIME_INFERENCE_PROVIDER_ID, {
 			type: "api_key",
 			key: apiKey,
 			...(existingPrimeTeam !== undefined ? { primeTeam: existingPrimeTeam } : {}),
 		});
+		return {};
 	}
 
 	getPrimeInferenceTeamSelection(): PrimeTeamCredential | null | undefined {

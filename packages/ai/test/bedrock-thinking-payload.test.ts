@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
-import { type BedrockOptions, streamBedrock } from "../src/providers/amazon-bedrock.js";
+import { type BedrockOptions, streamBedrock, streamSimpleBedrock } from "../src/providers/amazon-bedrock.js";
 import type { Context, Model } from "../src/types.js";
 
 interface BedrockThinkingPayload {
@@ -47,6 +47,35 @@ async function capturePayload(
 }
 
 describe("Bedrock thinking payload", () => {
+	it("uses numeric capability budgets in max-token adjustment and clamps the budget below max tokens", async () => {
+		const baseModel = getModel("amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+		const model: Model<"bedrock-converse-stream"> = {
+			...baseModel,
+			maxTokens: 4096,
+			reasoningCapabilities: { control: "budget", levels: { off: 0, high: 10000 } },
+		};
+		let payload: BedrockThinkingPayload | undefined;
+		const stream = streamSimpleBedrock(model, makeContext(), {
+			reasoning: "high",
+			maxTokens: 1000,
+			signal: AbortSignal.abort(),
+			onPayload: (value) => {
+				payload = value as BedrockThinkingPayload;
+				return value;
+			},
+		});
+		await stream.result();
+
+		expect(payload?.inferenceConfig?.maxTokens).toBe(4096);
+		expect(payload?.additionalModelRequestFields?.thinking).toMatchObject({
+			type: "enabled",
+			budget_tokens: 3072,
+		});
+		expect(payload?.additionalModelRequestFields?.thinking?.budget_tokens).toBeLessThan(
+			payload?.inferenceConfig?.maxTokens ?? 0,
+		);
+	});
+
 	it("uses adaptive thinking for Claude Opus 4.7 when reasoning is enabled", async () => {
 		const baseModel = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
 		const model: Model<"bedrock-converse-stream"> = {

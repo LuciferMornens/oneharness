@@ -12,7 +12,11 @@ import {
 	type DaemonRuntimeIdentity,
 } from "../modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
-import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
+import {
+	acquireDaemonShutdownAdmission,
+	type DaemonSupervisorProcess,
+	listDaemonSupervisorProcesses,
+} from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
 import { signalProcessGroupOrProcess } from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
@@ -53,7 +57,7 @@ export interface DaemonInfo {
 	schemaId?: string;
 	buildId?: string;
 	executablePath?: string;
-	pidSource?: "listener" | "hello";
+	pidSource?: "listener" | "owner" | "hello";
 	sessionCount?: number;
 	status: DaemonStatus;
 	isDefault: boolean;
@@ -82,7 +86,7 @@ const MAX_COMM_LENGTH = 15;
 /** Normalize a socket path so process-scan and dir-sweep entries merge cleanly. */
 function normalizeSocketPath(socketPath: string): string {
 	if (process.platform === "win32") {
-		return socketPath;
+		return socketPath.toLowerCase();
 	}
 	return resolve(socketPath);
 }
@@ -200,9 +204,17 @@ function scanListeningDaemons(): DiscoveredDaemonProcess[] {
 	return enrichUptimes(mergeDiscoveredDaemonProcesses(byName, byPid));
 }
 
-function isDaemonProcessListening(pid: number, socketPath: string): boolean {
+async function isDaemonProcessListening(pid: number, socketPath: string): Promise<boolean> {
 	const target = normalizeSocketPath(socketPath);
-	return scanListeningDaemons().some((daemon) => daemon.pid === pid && daemon.socketPath === target);
+	if (scanListeningDaemons().some((daemon) => daemon.pid === pid && daemon.socketPath === target)) {
+		return true;
+	}
+	if (process.platform !== "win32") {
+		return false;
+	}
+	return (await listDaemonSupervisorProcesses()).some(
+		(owner) => owner.pid === pid && normalizeSocketPath(owner.socketPath) === target,
+	);
 }
 
 function enrichUptimes(daemons: DiscoveredDaemonProcess[]): DiscoveredDaemonProcess[] {
@@ -343,6 +355,10 @@ export function verifyHelloSupervisorPid(
 
 /** Discover every daemon on the machine and probe each for version + session count. */
 export async function discoverDaemons(): Promise<DaemonInfo[]> {
+	const ownerBySocket = new Map<string, DaemonSupervisorProcess>();
+	for (const owner of await listDaemonSupervisorProcesses()) {
+		ownerBySocket.set(normalizeSocketPath(owner.socketPath), owner);
+	}
 	const processBySocket = new Map<string, DiscoveredDaemonProcess>();
 	for (const daemon of scanListeningDaemons()) {
 		if (isWorkerSocketPath(daemon.socketPath)) {
@@ -356,14 +372,20 @@ export async function discoverDaemons(): Promise<DaemonInfo[]> {
 	);
 	const sockets = new Set<string>([
 		...processBySocket.keys(),
+		...ownerBySocket.keys(),
 		...scanSocketDir().filter((socketPath) => !isWorkerSocketPath(socketPath)),
 		...workerSockets,
 	]);
 	const defaultSocket = normalizeSocketPath(defaultDaemonSocketPath());
+	if (process.platform === "win32") {
+		sockets.add(defaultSocket);
+	}
 
 	const infos = await Promise.all(
 		[...sockets].map(async (socketPath): Promise<DaemonInfo> => {
-			const proc = processBySocket.get(socketPath);
+			const listener = processBySocket.get(socketPath);
+			const owner = ownerBySocket.get(socketPath);
+			const proc = listener ?? owner;
 			const probe = await probeDaemon(socketPath);
 			const pid = proc?.pid ?? verifyHelloSupervisorPid(probe.supervisorPid, probe.supervisorProcessStartId);
 			const hasTrackedWorkers = workerSockets.has(socketPath);
@@ -375,14 +397,16 @@ export async function discoverDaemons(): Promise<DaemonInfo[]> {
 			return {
 				socketPath,
 				pid,
-				uptimeSeconds: proc?.uptimeSeconds,
+				uptimeSeconds: listener?.uptimeSeconds,
 				version: probe.version,
 				protocolVersion: probe.protocolVersion,
 				schemaId: probe.schemaId,
 				buildId: probe.runtime?.buildId,
 				executablePath:
 					probe.runtime?.launcherPath ?? probe.runtime?.entrypointPath ?? probe.runtime?.executablePath,
-				...(pid !== undefined ? { pidSource: proc ? ("listener" as const) : ("hello" as const) } : {}),
+				...(pid !== undefined
+					? { pidSource: listener ? ("listener" as const) : owner ? ("owner" as const) : ("hello" as const) }
+					: {}),
 				sessionCount: probe.sessionCount,
 				status,
 				isDefault: socketPath === defaultSocket,
@@ -391,7 +415,7 @@ export async function discoverDaemons(): Promise<DaemonInfo[]> {
 		}),
 	);
 
-	return sortDaemons(infos);
+	return sortDaemons(process.platform === "win32" ? infos.filter((info) => info.status !== "orphan-file") : infos);
 }
 
 export function sortDaemons(infos: DaemonInfo[]): DaemonInfo[] {
@@ -619,7 +643,7 @@ async function runShutdownAllConverging(
 						stopped,
 						failed,
 					);
-				} else if (isDaemonProcessListening(pid!, socketPath)) {
+				} else if (await isDaemonProcessListening(pid!, socketPath)) {
 					await assertAdmission();
 					await forceKillDaemon(pid!);
 					handledPids.add(pid!);
@@ -850,11 +874,7 @@ async function terminateVerifiedListener(
 		if (getProcessStartId(listener.pid) !== processStartId) {
 			return false;
 		}
-		try {
-			process.kill(listener.pid, "SIGKILL");
-		} catch {
-			// The verified process exited between the identity check and signal.
-		}
+		signalProcessGroupOrProcess(listener.pid, "SIGKILL");
 	}
 	return getProcessStartId(listener.pid) !== processStartId;
 }
@@ -881,8 +901,10 @@ function recordShutdownFailure(
 }
 
 export function isWorkerSocketPath(socketPath: string): boolean {
+	if (process.platform === "win32") {
+		return normalizeSocketPath(socketPath).startsWith("\\\\.\\pipe\\prime-agent-worker-");
+	}
 	return (
-		process.platform !== "win32" &&
 		resolve(dirname(socketPath)) === resolve(defaultDaemonSocketDir()) &&
 		basename(socketPath).startsWith("worker-") &&
 		basename(socketPath).endsWith(".sock")
@@ -1181,11 +1203,7 @@ function removeSocketFile(socketPath: string): boolean {
 }
 
 function killDaemon(pid: number): void {
-	try {
-		process.kill(pid, "SIGTERM");
-	} catch {
-		// Process already gone or not permitted; the socket file cleanup still runs.
-	}
+	signalProcessGroupOrProcess(pid, "SIGTERM");
 }
 
 async function forceKillDaemon(pid: number): Promise<void> {
@@ -1197,11 +1215,7 @@ async function forceKillDaemon(pid: number): Promise<void> {
 		}
 		await delay(50);
 	}
-	try {
-		process.kill(pid, "SIGKILL");
-	} catch {
-		// Process already exited between the liveness check and the kill.
-	}
+	signalProcessGroupOrProcess(pid, "SIGKILL");
 }
 
 function isProcessAlive(pid: number): boolean {

@@ -7,7 +7,7 @@ import type {
 	FunctionTool,
 } from "@mistralai/mistralai/models/components";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost, clampThinkingLevel } from "../models.js";
+import { calculateCost, getReasoningCapabilities, resolveSimpleThinkingLevel } from "../models.js";
 import type {
 	AssistantMessage,
 	Context,
@@ -42,6 +42,7 @@ export interface MistralOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any" | "required" | { type: "function"; function: { name: string } };
 	promptMode?: "reasoning";
 	reasoningEffort?: MistralReasoningEffort;
+	reasoningEffortValue?: MistralReasoningEffort;
 }
 
 /**
@@ -121,15 +122,16 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoning = clampedReasoning === "off" ? undefined : clampedReasoning;
-	const shouldUseReasoning = model.reasoning && reasoning !== undefined;
+	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
+	const shouldUseReasoning = resolvedReasoning?.enabled === true;
 
 	return streamMistral(model, context, {
 		...base,
-		promptMode: shouldUseReasoning && usesPromptModeReasoning(model) ? "reasoning" : undefined,
+		promptMode: shouldUseReasoning && getReasoningCapabilities(model)?.control === "toggle" ? "reasoning" : undefined,
 		reasoningEffort:
-			shouldUseReasoning && usesReasoningEffort(model) ? mapReasoningEffort(model, reasoning) : undefined,
+			resolvedReasoning && getReasoningCapabilities(model)?.control === "effort"
+				? (resolvedReasoning.providerValue as MistralReasoningEffort)
+				: undefined,
 	} satisfies MistralOptions);
 };
 
@@ -591,21 +593,6 @@ function buildToolResultText(text: string, hasImages: boolean, supportsImages: b
 	}
 
 	return isError ? "[tool error] (no tool output)" : "(no tool output)";
-}
-
-function usesReasoningEffort(model: Model<"mistral-conversations">): boolean {
-	return model.id === "mistral-small-2603" || model.id === "mistral-small-latest" || model.id === "mistral-medium-3.5";
-}
-
-function usesPromptModeReasoning(model: Model<"mistral-conversations">): boolean {
-	return model.reasoning && !usesReasoningEffort(model);
-}
-
-function mapReasoningEffort(
-	model: Model<"mistral-conversations">,
-	level: Exclude<SimpleStreamOptions["reasoning"], undefined>,
-): MistralReasoningEffort {
-	return (model.thinkingLevelMap?.[level] ?? "high") as MistralReasoningEffort;
 }
 
 function mapToolChoice(

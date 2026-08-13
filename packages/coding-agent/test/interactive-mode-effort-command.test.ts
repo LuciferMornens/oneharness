@@ -8,17 +8,25 @@ import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 type EffortCommandContext = {
 	connectionState?: {
+		sessionId?: string;
 		thinkingLevel: ThinkingLevel;
 		availableThinkingLevels: ThinkingLevel[];
 	};
-	agentConnection: { setThinkingLevel: (level: ThinkingLevel) => Promise<void> };
+	agentConnection: {
+		setThinkingLevel: (level: ThinkingLevel) => Promise<void>;
+		getState: () => Promise<{
+			sessionId: string;
+			thinkingLevel: ThinkingLevel;
+			availableThinkingLevels: ThinkingLevel[];
+		}>;
+	};
 	footer: { invalidate: () => void };
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
 	patchConnectionState: (patch: Record<string, unknown>) => void;
 	updateEditorBorderColor: () => void;
 	getAvailableThinkingLevels: () => ThinkingLevel[];
-	applyThinkingLevel: (level: ThinkingLevel) => void;
+	applyThinkingLevel: (level: ThinkingLevel, showConfirmation?: boolean) => void;
 	showThinkingSelector: (levels?: ThinkingLevel[]) => void;
 	showSelector: (create: (done: () => void) => { component: Component; focus: Component }) => void;
 	ui: { requestRender: () => void };
@@ -29,10 +37,14 @@ type InteractiveModePrototype = {
 	getThinkingLevelCompletions(this: EffortCommandContext, prefix: string): AutocompleteItem[] | null;
 	handleEffortCommand(this: EffortCommandContext, arg: string): void;
 	showThinkingSelector(this: EffortCommandContext, levels?: ThinkingLevel[]): void;
-	applyThinkingLevel(this: EffortCommandContext, level: ThinkingLevel): void;
+	applyThinkingLevel(this: EffortCommandContext, level: ThinkingLevel, showConfirmation?: boolean): void;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
+
+type EffortCommandOverrides = Omit<Partial<EffortCommandContext>, "agentConnection"> & {
+	agentConnection?: Partial<EffortCommandContext["agentConnection"]>;
+};
 
 type FastCommandContext = {
 	connectionState?: { sessionId: string; serviceTier: ServiceTier; thinkingLevel: ThinkingLevel };
@@ -100,24 +112,41 @@ function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5"
 	return context;
 }
 
-function makeContext(overrides: Partial<EffortCommandContext> = {}): EffortCommandContext {
+function makeContext(overrides: EffortCommandOverrides = {}): EffortCommandContext {
+	const { agentConnection: overriddenConnection, ...contextOverrides } = overrides;
 	const context: EffortCommandContext = {
 		connectionState: {
+			sessionId: "session-1",
 			thinkingLevel: "medium",
 			availableThinkingLevels: ["off", "low", "medium", "high"],
 		},
-		agentConnection: { setThinkingLevel: vi.fn(async () => {}) },
+		agentConnection: undefined as never,
 		footer: { invalidate: vi.fn() },
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		patchConnectionState: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
 		getAvailableThinkingLevels: () => interactiveModePrototype.getAvailableThinkingLevels.call(context),
-		applyThinkingLevel: (level) => interactiveModePrototype.applyThinkingLevel.call(context, level),
+		applyThinkingLevel: (level, showConfirmation) =>
+			interactiveModePrototype.applyThinkingLevel.call(context, level, showConfirmation),
 		showThinkingSelector: (levels) => interactiveModePrototype.showThinkingSelector.call(context, levels),
 		showSelector: vi.fn(),
 		ui: { requestRender: vi.fn() },
-		...overrides,
+		...contextOverrides,
+	};
+	let effectiveLevel = context.connectionState?.thinkingLevel ?? "off";
+	context.agentConnection = {
+		setThinkingLevel: vi.fn(async (level: ThinkingLevel) => {
+			await overriddenConnection?.setThinkingLevel?.(level);
+			effectiveLevel = level;
+		}),
+		getState:
+			overriddenConnection?.getState ??
+			vi.fn(async () => ({
+				sessionId: context.connectionState?.sessionId ?? "session-1",
+				thinkingLevel: effectiveLevel,
+				availableThinkingLevels: context.connectionState?.availableThinkingLevels ?? ["off"],
+			})),
 	};
 	return context;
 }
@@ -135,6 +164,20 @@ describe("InteractiveMode /effort", () => {
 
 			expect(items?.map((item) => item.value)).toEqual(["off", "low", "medium", "high"]);
 			expect(items?.find((item) => item.value === "medium")?.description).toContain("(current)");
+		});
+
+		it("lists only the exact levels exposed by the selected model", () => {
+			const context = makeContext({
+				connectionState: {
+					thinkingLevel: "max",
+					availableThinkingLevels: ["off", "low", "high", "max"],
+				},
+			});
+
+			const items = interactiveModePrototype.getThinkingLevelCompletions.call(context, "");
+
+			expect(items?.map((item) => item.value)).toEqual(["off", "low", "high", "max"]);
+			expect(items?.map((item) => item.value)).not.toContain("xhigh");
 		});
 
 		it("filters by the typed prefix", () => {
@@ -163,7 +206,10 @@ describe("InteractiveMode /effort", () => {
 			await vi.waitFor(() => expect(context.showStatus).toHaveBeenCalledWith("Thinking level: high"));
 
 			expect(setThinkingLevel).toHaveBeenCalledWith("high");
-			expect(context.patchConnectionState).toHaveBeenCalledWith({ thinkingLevel: "high" });
+			expect(context.patchConnectionState).toHaveBeenCalledWith({
+				thinkingLevel: "high",
+				availableThinkingLevels: ["off", "low", "medium", "high"],
+			});
 			expect(context.footer.invalidate).toHaveBeenCalledWith();
 			expect(context.updateEditorBorderColor).toHaveBeenCalledWith();
 			expect(context.showError).not.toHaveBeenCalled();
@@ -225,6 +271,26 @@ describe("InteractiveMode /effort", () => {
 
 			expect(context.patchConnectionState).not.toHaveBeenCalled();
 		});
+
+		it("uses the effective level and dynamic list returned by the connection", async () => {
+			const context = makeContext({
+				agentConnection: {
+					getState: vi.fn(async () => ({
+						sessionId: "session-1",
+						thinkingLevel: "max" as ThinkingLevel,
+						availableThinkingLevels: ["off", "low", "high", "max"] as ThinkingLevel[],
+					})),
+				},
+			});
+
+			interactiveModePrototype.applyThinkingLevel.call(context, "xhigh");
+			await vi.waitFor(() => expect(context.showStatus).toHaveBeenCalledWith("Thinking level: max"));
+
+			expect(context.patchConnectionState).toHaveBeenCalledWith({
+				thinkingLevel: "max",
+				availableThinkingLevels: ["off", "low", "high", "max"],
+			});
+		});
 	});
 
 	describe("model switch refresh", () => {
@@ -232,6 +298,7 @@ describe("InteractiveMode /effort", () => {
 			type ModelState = {
 				sessionId: string;
 				model: unknown;
+				thinkingLevel: ThinkingLevel;
 				serviceTier: ServiceTier;
 				availableThinkingLevels: ThinkingLevel[];
 			};
@@ -264,8 +331,9 @@ describe("InteractiveMode /effort", () => {
 						async (): Promise<ModelState> => ({
 							sessionId: "session-1",
 							model,
+							thinkingLevel: "max",
 							serviceTier: "priority",
-							availableThinkingLevels: ["off", "low", "medium", "high"],
+							availableThinkingLevels: ["off", "low", "high", "max"],
 						}),
 					),
 				},
@@ -281,9 +349,9 @@ describe("InteractiveMode /effort", () => {
 
 			const patch = patchConnectionState.mock.calls[0][0];
 			expect(patch.model).toBe(model);
+			expect(patch.thinkingLevel).toBe("max");
 			expect(patch.serviceTier).toBe("priority");
-			expect(patch.availableThinkingLevels).toContain("high");
-			expect(patch.availableThinkingLevels.length).toBeGreaterThan(1);
+			expect(patch.availableThinkingLevels).toEqual(["off", "low", "high", "max"]);
 			// Provider rebuild keeps the /effort argument hint in sync with the model.
 			expect(setupAutocompleteProvider).toHaveBeenCalledTimes(1);
 		});

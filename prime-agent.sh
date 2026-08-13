@@ -78,4 +78,10 @@ if [[ ! -x "$TSX_BIN" ]]; then
   exit 1
 fi
 
-"$TSX_BIN" "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
+TSCONFIG="$SCRIPT_DIR/tsconfig.json"
+if [[ ! -f "$TSCONFIG" ]]; then
+  echo "TypeScript configuration not found at $TSCONFIG." >&2
+  exit 1
+fi
+
+exec "$TSX_BIN" --tsconfig "$TSCONFIG" "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}

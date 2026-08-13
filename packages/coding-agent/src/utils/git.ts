@@ -253,6 +253,7 @@ function runGit(cwd: string, args: string[]): string | null {
 		cwd,
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
+		windowsHide: true,
 	});
 	if (result.status !== 0 || typeof result.stdout !== "string") return null;
 	return result.stdout.trim() || null;

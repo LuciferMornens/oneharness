@@ -34,6 +34,10 @@ interface ProcessIdentity {
 	processStartId?: string;
 }
 
+export interface DaemonSupervisorProcess extends ProcessIdentity {
+	socketPath: string;
+}
+
 interface DaemonSupervisorOwnerRecord extends ProcessIdentity {
 	version: 1;
 	role: "supervisor";
@@ -420,6 +424,23 @@ export async function acquireDaemonShutdownAdmission(): Promise<DaemonShutdownAd
 export async function isDaemonShutdownAdmissionActive(): Promise<boolean> {
 	const registryDir = defaultDaemonSupervisorRegistryDir();
 	return withDaemonSupervisorRegistryGuard(registryDir, () => readActiveShutdownAdmission(registryDir) !== undefined);
+}
+
+export async function listDaemonSupervisorProcesses(): Promise<DaemonSupervisorProcess[]> {
+	const registryDir = defaultDaemonSupervisorRegistryDir();
+	return withDaemonSupervisorRegistryGuard(registryDir, () =>
+		listOwnerDirectories(registryDir)
+			.map((directory) => readOwnerRecord(directory))
+			.filter(
+				(owner): owner is DaemonSupervisorOwnerRecord =>
+					owner?.processStartId !== undefined && matchesExactProcessIdentity(owner),
+			)
+			.map((owner) => ({
+				pid: owner.pid,
+				...(owner.processStartId ? { processStartId: owner.processStartId } : {}),
+				socketPath: owner.socketPath,
+			})),
+	);
 }
 
 export async function persistDaemonStartupFenceFromOwner(

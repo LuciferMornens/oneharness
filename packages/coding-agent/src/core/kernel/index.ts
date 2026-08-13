@@ -1,5 +1,5 @@
 // TODO: reconsider persistent kernel vs stateless `python -c` once RLM-1 weights land.
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +29,7 @@ const READY_TIMEOUT_MS = 5000;
 // Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
+const KERNEL_STDERR_TAIL_MAX_CHARS = 65536;
 const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 // How often to poll a forked kernel's pid for unexpected death.
@@ -639,8 +640,12 @@ export class KernelManager {
 		return this.options.sessionId;
 	}
 
+	private appendKernelStderr(message: string): void {
+		this.kernelStderr = `${this.kernelStderr}${message}`.slice(-KERNEL_STDERR_TAIL_MAX_CHARS);
+	}
+
 	private appendKernelDiagnostic(message: string): void {
-		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
+		this.appendKernelStderr(`[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`);
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
@@ -724,12 +729,12 @@ export class KernelManager {
 				cwd: this.options.cwd,
 				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
 				stdio: ["ignore", "pipe", "pipe"],
+				windowsHide: true,
 			});
 			this.kernel = kernel;
 
 			kernel.stderr?.on("data", (buf: Buffer) => {
-				const s = buf.toString();
-				this.kernelStderr += s;
+				this.appendKernelStderr(buf.toString());
 			});
 
 			kernel.on("error", (err) => {
@@ -1378,7 +1383,23 @@ export class KernelManager {
 		this.iopubPumpPromise = undefined;
 		try {
 			if (this.kernel) {
-				this.kernel.kill(killSignal);
+				if (
+					process.platform === "win32" &&
+					this.kernel.pid !== undefined &&
+					this.kernel.exitCode === null &&
+					this.kernel.signalCode === null
+				) {
+					const result = spawnSync("taskkill.exe", ["/PID", String(this.kernel.pid), "/T", "/F"], {
+						stdio: "ignore",
+						timeout: 5000,
+						windowsHide: true,
+					});
+					if (result.error || result.status !== 0) {
+						this.kernel.kill(killSignal);
+					}
+				} else if (process.platform !== "win32") {
+					this.kernel.kill(killSignal);
+				}
 			} else if (this.kernelPid !== undefined && !this.forkedKernelDied()) {
 				// Only signal a forked kernel confirmed still alive: a dead pid may have
 				// been recycled by the OS, and a kill would then hit an unrelated process.

@@ -8,6 +8,7 @@ import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
+const CATALOG_IDLE_TIMEOUT_MS = 30_000;
 
 interface SessionInfoWire extends Omit<SessionInfo, "created" | "modified"> {
 	created: string;
@@ -295,6 +296,8 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 export class DaemonCatalogClient {
 	private child?: ChildProcess;
 	private starting?: Promise<void>;
+	private stopping?: Promise<void>;
+	private idleTimer?: ReturnType<typeof setTimeout>;
 	private readonly pending = new Map<
 		string,
 		{
@@ -308,11 +311,15 @@ export class DaemonCatalogClient {
 	constructor(private readonly onDiagnostic: (message: string) => void) {}
 
 	async start(): Promise<void> {
-		if (this.child?.connected) {
-			return;
+		this.clearIdleTimer();
+		if (this.stopping) {
+			await this.stopping;
 		}
 		if (this.starting) {
 			return this.starting;
+		}
+		if (this.child?.connected) {
+			return;
 		}
 		this.starting = this.spawnCatalog().finally(() => {
 			this.starting = undefined;
@@ -381,13 +388,32 @@ export class DaemonCatalogClient {
 	}
 
 	async stop(): Promise<void> {
+		this.clearIdleTimer();
+		if (this.stopping) {
+			return this.stopping;
+		}
+		if (this.starting) {
+			await this.starting.catch(() => undefined);
+		}
 		const child = this.child;
 		if (!child) {
 			return;
 		}
-		await this.request({ type: "request", id: randomUUID(), command: "shutdown" }).catch(() => undefined);
-		child.disconnect();
-		this.child = undefined;
+		const stopping = this.stopChild(child);
+		const tracked = stopping.finally(() => {
+			if (this.stopping === tracked) this.stopping = undefined;
+		});
+		this.stopping = tracked;
+		return tracked;
+	}
+
+	private async stopChild(child: ChildProcess): Promise<void> {
+		await this.request({ type: "request", id: randomUUID(), command: "shutdown" }, undefined, false).catch(
+			() => undefined,
+		);
+		this.clearIdleTimer();
+		if (child.connected) child.disconnect();
+		if (this.child === child) this.child = undefined;
 	}
 
 	private async spawnCatalog(): Promise<void> {
@@ -396,6 +422,7 @@ export class DaemonCatalogClient {
 			cwd: process.cwd(),
 			env: createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" }),
 			stdio: ["ignore", "ignore", "ignore", "ipc"],
+			windowsHide: true,
 		});
 		this.child = child;
 		child.on("message", (value: unknown) => this.handleMessage(value));
@@ -434,8 +461,12 @@ export class DaemonCatalogClient {
 		});
 	}
 
-	private async request<T = void>(request: CatalogRequest, callbacks?: CatalogListCallbacks): Promise<T> {
-		await this.start();
+	private async request<T = void>(
+		request: CatalogRequest,
+		callbacks?: CatalogListCallbacks,
+		startIfNeeded = true,
+	): Promise<T> {
+		if (startIfNeeded) await this.start();
 		const child = this.child;
 		if (!child?.connected) {
 			throw new Error("Daemon catalog is not connected");
@@ -494,6 +525,7 @@ export class DaemonCatalogClient {
 		} else {
 			pending.reject(new Error(value.error));
 		}
+		this.scheduleIdleStop();
 	}
 
 	private handleClose(child: ChildProcess, error: Error): void {
@@ -501,11 +533,28 @@ export class DaemonCatalogClient {
 			return;
 		}
 		this.child = undefined;
+		this.clearIdleTimer();
 		this.onDiagnostic(error.message);
 		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timeout);
 			pending.reject(error);
 			this.pending.delete(id);
 		}
+	}
+
+	private scheduleIdleStop(): void {
+		this.clearIdleTimer();
+		if (!this.child?.connected || this.pending.size > 0) return;
+		this.idleTimer = setTimeout(() => {
+			this.idleTimer = undefined;
+			if (this.pending.size === 0) void this.stop();
+		}, CATALOG_IDLE_TIMEOUT_MS);
+		this.idleTimer.unref();
+	}
+
+	private clearIdleTimer(): void {
+		if (!this.idleTimer) return;
+		clearTimeout(this.idleTimer);
+		this.idleTimer = undefined;
 	}
 }

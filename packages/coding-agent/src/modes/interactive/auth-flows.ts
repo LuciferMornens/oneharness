@@ -10,7 +10,7 @@
 import * as path from "node:path";
 import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import { getAuthPath, getDocsPath } from "../../config.js";
+import { appendRotatingLog, getAgentLogPath, getAuthPath, getDocsPath } from "../../config.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import {
 	checkPrimeAgentTracesAccess,
@@ -48,6 +48,7 @@ export type AuthenticationResult =
 			authType: "oauth" | "api_key";
 			/** "service" credentials (e.g. web search) don't affect model selection. */
 			kind?: "provider" | "service";
+			catalogRefreshDeferred?: boolean;
 	  }
 	| { status: "cancelled" }
 	| { status: "failed" };
@@ -122,6 +123,39 @@ export interface ProviderLoginOptions {
 
 export class ProviderAuthFlows {
 	constructor(private readonly host: ProviderAuthFlowsHost) {}
+
+	private logDeferredAuthIssue(providerId: string, reason: string, error: unknown): void {
+		const errorType = error instanceof Error ? error.name : typeof error;
+		const errorCode =
+			typeof error === "object" && error !== null && "code" in error
+				? String((error as { code?: unknown }).code)
+				: undefined;
+		try {
+			appendRotatingLog(
+				getAgentLogPath(),
+				`[${new Date().toISOString()}] auth-refresh: deferred provider=${JSON.stringify(providerId)} reason=${reason} errorType=${JSON.stringify(errorType)}${errorCode ? ` errorCode=${JSON.stringify(errorCode)}` : ""}`,
+			);
+		} catch {
+			// Credential persistence already succeeded; diagnostics are best effort.
+		}
+	}
+
+	private async refreshAfterAuthChange(providerId: string): Promise<boolean> {
+		try {
+			this.host.modelRegistry.refresh();
+			await this.host.onAuthChanged?.();
+			return false;
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : "";
+			const reason = errorMessage.includes("get_model_catalog")
+				? errorMessage.includes("not connected")
+					? "model-catalog-daemon-disconnected"
+					: "model-catalog-request-failed"
+				: "post-auth-refresh-failed";
+			this.logDeferredAuthIssue(providerId, reason, error);
+			return true;
+		}
+	}
 
 	/** Runs the provider selector followed by the matching login dialog. */
 	/**
@@ -220,13 +254,14 @@ export class ProviderAuthFlows {
 
 					try {
 						this.host.modelRegistry.authStorage.logout(providerOption.id);
-						this.host.modelRegistry.refresh();
-						await this.host.onAuthChanged?.();
+						const catalogRefreshDeferred = await this.refreshAfterAuthChange(providerOption.id);
 						const message =
 							providerOption.authType === "oauth"
 								? `Logged out of ${providerOption.name}`
 								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
-						this.host.showStatus(message);
+						this.host.showStatus(
+							`${message}${catalogRefreshDeferred ? " Model catalog refresh deferred until the agent connection is available." : ""}`,
+						);
 						resolve(providerOption.id);
 					} catch (error: unknown) {
 						this.host.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -327,12 +362,12 @@ export class ProviderAuthFlows {
 		kind: "provider" | "service" = "provider",
 		credentialPath: string = getAuthPath(),
 	): Promise<AuthenticationResult> {
-		this.host.modelRegistry.refresh();
-
 		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
-		await this.host.onAuthChanged?.();
+		const catalogRefreshDeferred = await this.refreshAfterAuthChange(providerId);
 		this.host.showStatus(
-			`${actionLabel}. Credentials saved to ${credentialPath}${statusSuffix ? `. ${statusSuffix}` : ""}`,
+			`${actionLabel}. Credentials saved to ${credentialPath}${statusSuffix ? `. ${statusSuffix}` : ""}${
+				catalogRefreshDeferred ? ". Model catalog refresh deferred until the agent connection is available." : ""
+			}`,
 		);
 		this.host.onLoginCompleted?.();
 		return {
@@ -341,6 +376,7 @@ export class ProviderAuthFlows {
 			providerName,
 			authType,
 			kind,
+			...(catalogRefreshDeferred ? { catalogRefreshDeferred: true } : {}),
 		};
 	}
 
@@ -348,14 +384,18 @@ export class ProviderAuthFlows {
 		providerId: string,
 		providerName: string,
 	): Promise<AuthenticationResult> {
-		this.host.modelRegistry.refresh();
-		await this.host.onAuthChanged?.();
-		this.host.showStatus(`${providerName} uses external credentials. Select a model after configuring them.`);
+		const catalogRefreshDeferred = await this.refreshAfterAuthChange(providerId);
+		this.host.showStatus(
+			`${providerName} uses external credentials. Select a model after configuring them.${
+				catalogRefreshDeferred ? " Model catalog refresh deferred until the agent connection is available." : ""
+			}`,
+		);
 		return {
 			status: "success",
 			providerId,
 			providerName,
 			authType: "api_key",
+			...(catalogRefreshDeferred ? { catalogRefreshDeferred: true } : {}),
 		};
 	}
 
@@ -500,22 +540,37 @@ export class ProviderAuthFlows {
 		dialog: LoginDialogComponent,
 		closeDialog: () => void,
 	): Promise<AuthenticationResult> {
-		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey);
+		const saveResult = this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey);
+		if (saveResult.legacyCleanupError) {
+			this.logDeferredAuthIssue(
+				PRIME_INFERENCE_PROVIDER_ID,
+				"legacy-auth-cleanup-failed",
+				saveResult.legacyCleanupError,
+			);
+		}
 		const teamStatus = await this.selectPrimeInferenceTeam(apiKey, dialog);
+		const statusSuffix = [
+			teamStatus,
+			saveResult.legacyCleanupError
+				? "Legacy auth.json cleanup deferred; the Prime CLI credential was saved"
+				: undefined,
+		]
+			.filter((value): value is string => value !== undefined)
+			.join(". ");
 
 		closeDialog();
 		return await this.completeProviderAuthentication(
 			PRIME_INFERENCE_PROVIDER_ID,
 			PRIME_INFERENCE_PROVIDER_NAME,
 			"api_key",
-			teamStatus,
+			statusSuffix || undefined,
 			"provider",
 			this.host.modelRegistry.authStorage.getPrimeCliConfigPath() ?? getAuthPath(),
 		);
 	}
 
 	private async completePrimeAgentTracesLogin(apiKey: string, closeDialog: () => void): Promise<AuthenticationResult> {
-		this.host.modelRegistry.authStorage.set(PRIME_AGENT_TRACES_PROVIDER_ID, {
+		this.host.modelRegistry.authStorage.setPersisted(PRIME_AGENT_TRACES_PROVIDER_ID, {
 			type: "api_key",
 			key: apiKey,
 		});
@@ -780,7 +835,7 @@ export class ProviderAuthFlows {
 				throw new Error("API key cannot be empty.");
 			}
 
-			this.host.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+			this.host.modelRegistry.authStorage.setPersisted(providerId, { type: "api_key", key: apiKey });
 
 			closeDialog();
 			return await this.completeProviderAuthentication(providerId, providerName, "api_key", undefined, kind);

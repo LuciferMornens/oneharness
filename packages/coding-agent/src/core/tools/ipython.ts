@@ -4,6 +4,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
+import { getShellConfig } from "../../utils/shell.js";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
@@ -143,7 +144,7 @@ for _prime_agent_skill_name in ${JSON.stringify(importNames)}:
 const ipythonSchema = Type.Object({
 	code: Type.String({
 		description:
-			"Python scratchpad code or `%%bash` shell cells to execute in the agent kernel. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
+			"Python scratchpad code or `%%bash` shell cells to execute in the agent kernel. `%%bash` uses the configured execution shell, which may require PowerShell syntax on Windows. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
 	}),
 });
 
@@ -296,8 +297,49 @@ export interface IpythonToolOptions {
 	provisioner?: IpythonKernelProvisioner;
 }
 
+function quoteWindowsCommandLineArgument(value: string): string {
+	if (value.length > 0 && !/[\s"]/u.test(value)) return value;
+
+	let quoted = '"';
+	let backslashes = 0;
+	for (const char of value) {
+		if (char === "\\") {
+			backslashes++;
+			continue;
+		}
+		if (char === '"') {
+			quoted += `${"\\".repeat(backslashes * 2 + 1)}"`;
+			backslashes = 0;
+			continue;
+		}
+		quoted += `${"\\".repeat(backslashes)}${char}`;
+		backslashes = 0;
+	}
+	return `${quoted}${"\\".repeat(backslashes * 2)}"`;
+}
+
 function quoteScriptMagicArgument(value: string): string {
+	if (process.platform === "win32") return quoteWindowsCommandLineArgument(value);
 	return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\"'\"'")}'`;
+}
+
+function scriptMagicCommand(shellPath: string): string {
+	const executableName = shellPath.split(/[\\/]/).at(-1)?.toLowerCase();
+	const powerShellStdinRunner = "$source = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($source)) @args";
+	const args =
+		executableName === "pwsh" ||
+		executableName === "pwsh.exe" ||
+		executableName === "powershell" ||
+		executableName === "powershell.exe"
+			? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powerShellStdinRunner]
+			: [];
+	return [shellPath, ...args].map(quoteScriptMagicArgument).join(" ");
+}
+
+function resolveIpythonShellPath(shellPath: string | undefined): string | undefined {
+	const configured = shellPath?.trim();
+	if (process.platform === "win32") return getShellConfig(configured).shell;
+	return configured;
 }
 
 function applyShellSettingsToBashMagicCell(
@@ -305,16 +347,15 @@ function applyShellSettingsToBashMagicCell(
 	options: Pick<IpythonToolOptions, "commandPrefix" | "shellPath"> | undefined,
 ): string {
 	const commandPrefix = options?.commandPrefix;
-	const shellPath = options?.shellPath?.trim();
+	const shellPath = options?.shellPath;
 	if (!commandPrefix && !shellPath) return code;
 
 	const bashCell = parseIpythonBashCell(code);
 	if (!bashCell) return code;
 
-	const firstLine =
-		shellPath && bashCell.magicArguments.trim().length === 0
-			? `${bashCell.indent}%%script ${quoteScriptMagicArgument(shellPath)}`
-			: `${bashCell.indent}%%bash${bashCell.magicArguments}`;
+	const firstLine = shellPath
+		? `${bashCell.indent}%%script ${scriptMagicCommand(shellPath)}${bashCell.magicArguments}`
+		: `${bashCell.indent}%%bash${bashCell.magicArguments}`;
 	const nextBody = commandPrefix ? `${commandPrefix}${bashCell.body ? `\n${bashCell.body}` : ""}` : bashCell.body;
 	return `${bashCell.leadingWhitespace}${firstLine}${bashCell.lineBreak || "\n"}${nextBody}`;
 }
@@ -621,13 +662,18 @@ export function createIpythonToolDefinition(
 	options?: IpythonToolOptions,
 ): ToolDefinition<typeof ipythonSchema, IpythonToolDetails> {
 	const provisioner = options?.provisioner ?? new IpythonKernelProvisioner(cwd, options);
+	const shellSettings = {
+		commandPrefix: options?.commandPrefix,
+		shellPath: resolveIpythonShellPath(options?.shellPath),
+	};
 
 	return {
 		name: "ipython",
 		label: "ipython",
 		description:
-			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
-		promptSnippet: "ipython - persistent agent notebook for Python scratchpad code and %%bash orchestration",
+			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. `%%bash` runs through the configured execution shell, so use PowerShell syntax when PowerShell is configured. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+		promptSnippet:
+			"ipython - persistent agent notebook for Python scratchpad code and configured-shell %%bash orchestration",
 		// The kernel is single-threaded — pi must not run two ipython calls in parallel within a batch.
 		executionMode: "sequential",
 		parameters: ipythonSchema,
@@ -646,7 +692,7 @@ export function createIpythonToolDefinition(
 			};
 
 			try {
-				const code = applyShellSettingsToBashMagicCell(params.code, options);
+				const code = applyShellSettingsToBashMagicCell(params.code, shellSettings);
 				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
 					provisioner,
 					reportStartupProgress,

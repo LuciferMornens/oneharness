@@ -1291,7 +1291,7 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
-		this._scopedModels = config.scopedModels ?? [];
+		this._scopedModels = this._normalizeScopedModels(config.scopedModels ?? []);
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
@@ -4241,7 +4241,20 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
-		this._scopedModels = scopedModels;
+		this._scopedModels = this._normalizeScopedModels(scopedModels);
+	}
+
+	private _normalizeScopedModels(
+		scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>,
+	): Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> {
+		return scopedModels.map((scoped) =>
+			scoped.thinkingLevel === undefined
+				? scoped
+				: {
+						...scoped,
+						thinkingLevel: clampThinkingLevel(scoped.model, scoped.thinkingLevel) as ThinkingLevel,
+					},
+		);
 	}
 
 	/** File-based prompt templates */

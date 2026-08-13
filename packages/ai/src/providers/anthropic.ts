@@ -8,7 +8,12 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages.js";
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost, clampThinkingLevel } from "../models.js";
+import {
+	calculateCost,
+	getReasoningCapabilities,
+	resolveSimpleThinkingLevel,
+	resolveThinkingLevel,
+} from "../models.js";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -44,7 +49,7 @@ import {
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
+import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
 /**
@@ -503,7 +508,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				const created = createClient(
 					model,
 					apiKey,
-					options?.interleavedThinking ?? true,
+					options?.thinkingEnabled === true && (options.interleavedThinking ?? true),
 					shouldUseFineGrainedToolStreamingBeta(model, context),
 					options?.headers,
 					copilotDynamicHeaders,
@@ -738,34 +743,28 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	return stream;
 };
 
-/**
- * Fable/Mythos models think every turn and reject an explicit
- * `thinking: {type: "disabled"}` (and any sampling params) with a 400.
- */
-function isAlwaysOnAdaptiveThinkingModel(modelId: string): boolean {
-	return modelId.includes("fable-5") || modelId.includes("mythos-5") || modelId.includes("mythos-preview");
+/** Check whether the model family uses adaptive thinking. */
+function supportsAdaptiveThinking(modelId: string): boolean {
+	const normalizedModelId = modelId.toLowerCase();
+	return (
+		normalizedModelId.includes("opus-4-6") ||
+		normalizedModelId.includes("opus-4.6") ||
+		normalizedModelId.includes("opus-4-7") ||
+		normalizedModelId.includes("opus-4.7") ||
+		normalizedModelId.includes("opus-4-8") ||
+		normalizedModelId.includes("opus-4.8") ||
+		normalizedModelId.includes("opus-5") ||
+		normalizedModelId.includes("sonnet-4-6") ||
+		normalizedModelId.includes("sonnet-4.6") ||
+		normalizedModelId.includes("sonnet-5") ||
+		normalizedModelId.includes("fable-5") ||
+		normalizedModelId.includes("mythos-5") ||
+		normalizedModelId.includes("mythos-preview")
+	);
 }
 
-/**
- * Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6)
- */
-function supportsAdaptiveThinking(modelId: string): boolean {
-	// Adaptive-thinking model IDs (with or without date suffix).
-	return (
-		modelId.includes("opus-4-6") ||
-		modelId.includes("opus-4.6") ||
-		modelId.includes("opus-5") ||
-		modelId.includes("opus-4-7") ||
-		modelId.includes("opus-4.7") ||
-		modelId.includes("opus-4-8") ||
-		modelId.includes("opus-4.8") ||
-		modelId.includes("sonnet-4-6") ||
-		modelId.includes("sonnet-4.6") ||
-		modelId.includes("sonnet-5") ||
-		modelId.includes("fable-5") ||
-		modelId.includes("mythos-5") ||
-		modelId.includes("mythos-preview")
-	);
+function usesAdaptiveThinking(model: Model<"anthropic-messages">): boolean {
+	return supportsAdaptiveThinking(model.id) || model.reasoningCapabilities?.control === "effort";
 }
 
 /**
@@ -777,11 +776,9 @@ function mapThinkingLevelToEffort(
 	model: Model<"anthropic-messages">,
 	level: SimpleStreamOptions["reasoning"],
 ): AnthropicEffort {
-	// Clamp to what the model actually supports so callers that bypass
-	// clampThinkingLevel (e.g. passing reasoning: "xhigh" directly) can't send an
-	// effort the model lacks — xhigh on a max-only model resolves to max, not xhigh.
-	const effective = level ? clampThinkingLevel(model, level) : undefined;
-	const mapped = effective ? model.thinkingLevelMap?.[effective] : undefined;
+	const resolved = resolveThinkingLevel(model, level);
+	const effective = resolved?.level;
+	const mapped = resolved?.providerValue;
 	if (typeof mapped === "string") return mapped as AnthropicEffort;
 
 	switch (effective) {
@@ -812,13 +809,21 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	if (!options?.reasoning || options.reasoning === "off") {
+	const offSupported = resolveSimpleThinkingLevel(model, undefined)?.enabled === false;
+	if ((!options?.reasoning || options.reasoning === "off") && offSupported) {
 		return streamAnthropic(model, context, { ...base, thinkingEnabled: false } satisfies AnthropicOptions);
 	}
+	if (!options?.reasoning) {
+		return streamAnthropic(model, context, base satisfies AnthropicOptions);
+	}
+	const resolvedReasoning = resolveThinkingLevel(model, options.reasoning);
+	if (!resolvedReasoning?.enabled) return streamAnthropic(model, context, base satisfies AnthropicOptions);
+	const control = getReasoningCapabilities(model)?.control;
+	if (control === "fixed") return streamAnthropic(model, context, base satisfies AnthropicOptions);
 
 	// For Opus 4.6 and Sonnet 4.6: use adaptive thinking with effort level
 	// For older models: use budget-based thinking
-	if (supportsAdaptiveThinking(model.id)) {
+	if (usesAdaptiveThinking(model)) {
 		const effort = mapThinkingLevelToEffort(model, options.reasoning);
 		return streamAnthropic(model, context, {
 			...base,
@@ -827,12 +832,15 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 		} satisfies AnthropicOptions);
 	}
 
-	const adjusted = adjustMaxTokensForThinking(
-		base.maxTokens || 0,
-		model.maxTokens,
-		options.reasoning,
-		options.thinkingBudgets,
-	);
+	const reasoningLevel = resolvedReasoning.level as Exclude<typeof resolvedReasoning.level, "off">;
+	const budgetLevel = clampReasoning(reasoningLevel)!;
+	const capabilityBudget =
+		typeof resolvedReasoning.providerValue === "number" ? resolvedReasoning.providerValue : undefined;
+	const requestedBudget = options.thinkingBudgets?.[budgetLevel] ?? capabilityBudget;
+	const adjusted = adjustMaxTokensForThinking(base.maxTokens || 0, model.maxTokens, reasoningLevel, {
+		...options.thinkingBudgets,
+		...(requestedBudget !== undefined ? { [budgetLevel]: requestedBudget } : {}),
+	});
 
 	return streamAnthropic(model, context, {
 		...base,
@@ -856,7 +864,7 @@ function createClient(
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
 	// The beta header is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so skip it.
-	const needsInterleavedBeta = interleavedThinking && !supportsAdaptiveThinking(model.id);
+	const needsInterleavedBeta = interleavedThinking && !usesAdaptiveThinking(model);
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
@@ -995,7 +1003,11 @@ function buildParams(
 
 	// Temperature is incompatible with extended thinking (adaptive or budget-based),
 	// and always-on models reject sampling params outright.
-	if (options?.temperature !== undefined && !options?.thinkingEnabled && !isAlwaysOnAdaptiveThinkingModel(model.id)) {
+	if (
+		options?.temperature !== undefined &&
+		!options?.thinkingEnabled &&
+		(!model.reasoning || resolveSimpleThinkingLevel(model, undefined) !== undefined)
+	) {
 		params.temperature = options.temperature;
 	}
 
@@ -1011,11 +1023,11 @@ function buildParams(
 	// Configure thinking mode: adaptive (Opus 4.6+ and Sonnet 4.6),
 	// budget-based (older models), or explicitly disabled.
 	if (model.reasoning) {
-		if (options?.thinkingEnabled) {
+		if (options?.thinkingEnabled && getReasoningCapabilities(model)?.control !== "fixed") {
 			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
 			// older Claude 4 models (whose API default is also "summarized").
 			const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
-			if (supportsAdaptiveThinking(model.id)) {
+			if (usesAdaptiveThinking(model)) {
 				// Adaptive thinking: Claude decides when and how much to think.
 				params.thinking = { type: "adaptive", display };
 				if (options.effort) {
@@ -1035,7 +1047,7 @@ function buildParams(
 					display,
 				};
 			}
-		} else if (options?.thinkingEnabled === false && !isAlwaysOnAdaptiveThinkingModel(model.id)) {
+		} else if (options?.thinkingEnabled === false && resolveSimpleThinkingLevel(model, undefined)) {
 			params.thinking = { type: "disabled" };
 		}
 	}

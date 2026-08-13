@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
+import { streamAnthropic } from "../src/providers/anthropic.js";
 import { streamSimple } from "../src/stream.js";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.js";
 
@@ -7,6 +8,7 @@ interface AnthropicThinkingPayload {
 	thinking?: { type: string; budget_tokens?: number; display?: string };
 	output_config?: { effort?: string };
 	temperature?: number;
+	max_tokens?: number;
 }
 
 function makePayloadCaptureContext(): Context {
@@ -105,11 +107,39 @@ async function runWithoutReasoning(model: Model<"anthropic-messages">): Promise<
 }
 
 describe("Anthropic thinking disable payload", () => {
+	it("preserves temperature for non-reasoning Anthropic models", async () => {
+		const baseModel = getModel("anthropic", "claude-sonnet-4-5");
+		const model: Model<"anthropic-messages"> = {
+			...baseModel,
+			reasoning: false,
+			reasoningCapabilities: undefined,
+			thinkingLevelMap: undefined,
+		};
+		const payload = await capturePayload(model, { temperature: 0.4 });
+
+		expect(payload.temperature).toBe(0.4);
+		expect(payload.thinking).toBeUndefined();
+	});
+
 	it("sends thinking.type=disabled for budget-based reasoning models when thinking is off", async () => {
 		const payload = await capturePayload(getModel("anthropic", "claude-sonnet-4-5"));
 
 		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config).toBeUndefined();
+	});
+
+	it("uses numeric capability budgets in max-token adjustment and clamps the budget below max tokens", async () => {
+		const baseModel = getModel("anthropic", "claude-sonnet-4-5");
+		const model: Model<"anthropic-messages"> = {
+			...baseModel,
+			maxTokens: 4096,
+			reasoningCapabilities: { control: "budget", levels: { off: 0, high: 10000 } },
+		};
+		const payload = await capturePayload(model, { reasoning: "high", maxTokens: 1000 });
+
+		expect(payload.max_tokens).toBe(4096);
+		expect(payload.thinking).toMatchObject({ type: "enabled", budget_tokens: 3072 });
+		expect(payload.thinking?.budget_tokens).toBeLessThan(payload.max_tokens!);
 	});
 
 	it("sends thinking.type=disabled for adaptive reasoning models when thinking is off", async () => {
@@ -172,6 +202,24 @@ describe("Anthropic thinking disable payload", () => {
 
 		expect(payload.thinking).toBeUndefined();
 		expect(payload.output_config).toBeUndefined();
+	});
+
+	it("omits disabled thinking for always-on models even in direct provider options", async () => {
+		const model: Model<"anthropic-messages"> = {
+			...getModel("anthropic", "claude-fable-5"),
+			baseUrl: "http://127.0.0.1:9",
+		};
+		let payload: AnthropicThinkingPayload | undefined;
+		await streamAnthropic(model, makePayloadCaptureContext(), {
+			apiKey: "fake-key",
+			thinkingEnabled: false,
+			onPayload: (value) => {
+				payload = value as AnthropicThinkingPayload;
+				return value;
+			},
+		}).result();
+
+		expect(payload?.thinking).toBeUndefined();
 	});
 
 	it("drops temperature for Claude Fable 5 (sampling params are rejected)", async () => {

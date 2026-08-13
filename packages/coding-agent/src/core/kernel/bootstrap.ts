@@ -35,7 +35,8 @@ const DEFAULT_RLM_EXTRA_PACKAGES = [
 export const DEFAULT_RLM_EXTRA_UV_ARGS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.uvArg);
 export const DEFAULT_RLM_EXTRA_IMPORT_NAMES = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.importName);
 export const DEFAULT_RLM_EXTRA_IMPORT_LABELS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.promptLabel);
-const UV_INSTALL_COMMAND = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+const UV_INSTALL_COMMAND_UNIX = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+const UV_INSTALL_COMMAND_WINDOWS = "irm https://astral.sh/uv/install.ps1 | iex";
 const REQUIRED_HARNESS_METHODS = [
 	"create_memory",
 	"update_memory",
@@ -106,8 +107,8 @@ async function exists(filePath: string): Promise<boolean> {
 
 async function isExecutable(filePath: string): Promise<boolean> {
 	try {
-		await access(filePath, constants.X_OK);
-		return true;
+		await access(filePath, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+		return (await stat(filePath)).isFile();
 	} catch {
 		return false;
 	}
@@ -115,7 +116,7 @@ async function isExecutable(filePath: string): Promise<boolean> {
 
 function expandHome(filePath: string): string {
 	if (filePath === "~") return os.homedir();
-	if (filePath.startsWith("~/")) return path.join(os.homedir(), filePath.slice(2));
+	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) return path.join(os.homedir(), filePath.slice(2));
 	return filePath;
 }
 
@@ -331,6 +332,7 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
 		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
 		process.env.HOME ?? "",
+		process.env.LOCALAPPDATA ?? "",
 		process.env.XDG_DATA_HOME ?? "",
 		JSON.stringify(pythonSkills),
 	].join("\0");
@@ -342,7 +344,12 @@ export function getKernelVenvDir(): string {
 	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
 }
 
-function getXdgKernelVenvDir(): string {
+function getFallbackKernelVenvDir(): string {
+	if (process.platform === "win32") {
+		const localAppData = process.env.LOCALAPPDATA;
+		const dataHome = localAppData ? path.resolve(localAppData) : path.join(os.homedir(), "AppData", "Local");
+		return path.join(dataHome, "prime", "agent", "kernel-venv");
+	}
 	const dataHome = process.env.XDG_DATA_HOME
 		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
 		: path.join(os.homedir(), ".local", "share");
@@ -359,7 +366,7 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 			throw new Error(`couldn't create kernel venv parent directory for ${primary}: ${errorMessage(primaryError)}`);
 		}
 
-		const fallback = getXdgKernelVenvDir();
+		const fallback = getFallbackKernelVenvDir();
 		try {
 			await mkdir(path.dirname(fallback), { recursive: true });
 			return fallback;
@@ -376,6 +383,7 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
 		const child = spawn(command, args, {
 			env: process.env,
 			stdio: options.stdio ?? "ignore",
+			windowsHide: true,
 		});
 		child.on("error", reject);
 		child.on("exit", (code, signal) => {
@@ -498,48 +506,96 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 }
 
 async function findExecutable(name: string): Promise<string | null> {
-	const pathValue = process.env.PATH;
+	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path");
+	const pathValue = pathKey ? process.env[pathKey] : undefined;
 	if (!pathValue) return null;
-	const candidates = process.platform === "win32" ? [name, `${name}.exe`] : [name];
+	const candidates =
+		process.platform === "win32"
+			? path.extname(name)
+				? [name]
+				: (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+						.split(";")
+						.filter(Boolean)
+						.map((extension) => `${name}${extension.toLowerCase()}`)
+			: [name];
 	for (const dir of pathValue.split(path.delimiter)) {
 		if (!dir) continue;
+		const searchDir = dir.startsWith('"') && dir.endsWith('"') ? dir.slice(1, -1) : dir;
 		for (const candidate of candidates) {
-			const fullPath = path.join(dir, candidate);
+			const fullPath = path.join(searchDir, candidate);
 			if (await isExecutable(fullPath)) return fullPath;
 		}
 	}
 	return null;
 }
 
+function uvInstallCommand(): string {
+	return process.platform === "win32" ? UV_INSTALL_COMMAND_WINDOWS : UV_INSTALL_COMMAND_UNIX;
+}
+
+function localUvCandidates(): string[] {
+	const executable = process.platform === "win32" ? "uv.exe" : "uv";
+	const candidates = [path.join(os.homedir(), ".local", "bin", executable)];
+	if (process.env.UV_INSTALL_DIR) {
+		candidates.unshift(path.join(path.resolve(expandHome(process.env.UV_INSTALL_DIR)), executable));
+	}
+	return candidates;
+}
+
 async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 	const fromPath = await findExecutable("uv");
 	if (fromPath) return fromPath;
 
-	const localUv = path.join(os.homedir(), ".local", "bin", process.platform === "win32" ? "uv.exe" : "uv");
-	if (await isExecutable(localUv)) return localUv;
+	for (const localUv of localUvCandidates()) {
+		if (await isExecutable(localUv)) return localUv;
+	}
 
 	const shouldInstallUv =
 		process.env.PRIME_AGENT_INSTALL_UV === "1" || (!options.onProgress && (await confirmUvInstall()));
 	if (!shouldInstallUv) {
 		throw new Error(
-			`uv is required to set up the Python kernel. Install uv yourself: ${UV_INSTALL_COMMAND}, ` +
+			`uv is required to set up the Python kernel. Install uv yourself: ${uvInstallCommand()}, ` +
 				"or set PRIME_AGENT_INSTALL_UV=1 to let prime-agent run that installer.",
 		);
 	}
 
 	reportProgress(options, "› installing uv (one-time)…");
 	try {
-		await run("sh", ["-c", UV_INSTALL_COMMAND], { stdio: options.onProgress ? "ignore" : "inherit" });
+		if (process.platform === "win32") {
+			const powershell = (await findExecutable("pwsh")) ?? (await findExecutable("powershell"));
+			if (!powershell) {
+				throw new Error("PowerShell was not found on PATH");
+			}
+			await run(
+				powershell,
+				[
+					"-NoLogo",
+					"-NoProfile",
+					"-NonInteractive",
+					"-ExecutionPolicy",
+					"Bypass",
+					"-Command",
+					UV_INSTALL_COMMAND_WINDOWS,
+				],
+				{ stdio: options.onProgress ? "ignore" : "inherit" },
+			);
+		} else {
+			await run("sh", ["-c", UV_INSTALL_COMMAND_UNIX], {
+				stdio: options.onProgress ? "ignore" : "inherit",
+			});
+		}
 	} catch (error) {
 		throw new Error(
-			`couldn't install uv from astral.sh; install it yourself: ${UV_INSTALL_COMMAND}, then re-run prime-agent. ${errorMessage(error)}`,
+			`couldn't install uv from astral.sh; install it yourself: ${uvInstallCommand()}, then re-run prime-agent. ${errorMessage(error)}`,
 		);
 	}
 
-	if (await isExecutable(localUv)) return localUv;
+	for (const localUv of localUvCandidates()) {
+		if (await isExecutable(localUv)) return localUv;
+	}
 	const installedFromPath = await findExecutable("uv");
 	if (installedFromPath) return installedFromPath;
-	throw new Error("uv install completed but binary not found at ~/.local/bin/uv");
+	throw new Error(`uv install completed but ${process.platform === "win32" ? "uv.exe" : "uv"} was not found`);
 }
 
 async function confirmUvInstall(): Promise<boolean> {
@@ -725,7 +781,7 @@ async function bootstrapVenv(
 ): Promise<void> {
 	await mkdir(path.dirname(venv), { recursive: true });
 	const uv = await ensureUv(options);
-	const python = path.join(venv, "bin", "python");
+	const python = kernelVenvPython(venv);
 	const sourceDir = await resolveRuntimeSourceDir();
 	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
 	const runtimeIdentity = await resolveRuntimeIdentity();
@@ -743,6 +799,18 @@ async function bootstrapVenv(
 		...DEFAULT_RLM_EXTRA_UV_ARGS,
 	]);
 	await syncPythonSkills(uv, venv, python, runtimeIdentity, pythonSkills, options);
+}
+
+function kernelVenvPython(venv: string): string {
+	return process.platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
+}
+
+async function resolvePythonOverride(override: string): Promise<string> {
+	const expanded = expandHome(override);
+	if (path.isAbsolute(expanded) || expanded.includes("/") || expanded.includes("\\")) {
+		return path.resolve(expanded);
+	}
+	return (await findExecutable(expanded)) ?? expanded;
 }
 
 async function syncPythonSkills(
@@ -858,7 +926,7 @@ async function ensureKernelPythonUncached(
 ): Promise<string> {
 	const override = process.env.PRIME_AGENT_KERNEL_PYTHON;
 	if (override) {
-		const python = path.resolve(expandHome(override));
+		const python = await resolvePythonOverride(override);
 		const missing: string[] = [];
 		if (!(await hasIpykernel(python))) missing.push("ipykernel");
 		if (!(await hasPrimeAgentRuntime(python))) {
@@ -886,7 +954,7 @@ async function ensureKernelPythonUncached(
 	}
 
 	const venv = await resolveWritableKernelVenvDir();
-	const python = path.join(venv, "bin", "python");
+	const python = kernelVenvPython(venv);
 	const runtimeIdentity = await resolveRuntimeIdentity();
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 

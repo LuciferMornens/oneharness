@@ -50,10 +50,17 @@ describe("Mistral reasoning mode selection", () => {
 		expect(payload.promptMode).toBeUndefined();
 	});
 
-	it("omits reasoning controls for Mistral Small 4 when thinking is off", async () => {
+	it("sends native none effort for Mistral Small 4 when thinking is off", async () => {
 		const payload = await capturePayload(getModel("mistral", "mistral-small-2603"));
 
-		expect(payload.reasoningEffort).toBeUndefined();
+		expect(payload.reasoningEffort).toBe("none");
+		expect(payload.promptMode).toBeUndefined();
+	});
+
+	it("serializes explicit off for adjustable Mistral reasoning", async () => {
+		const payload = await capturePayload(getModel("mistral", "mistral-small-2603"), { reasoning: "off" });
+
+		expect(payload.reasoningEffort).toBe("none");
 		expect(payload.promptMode).toBeUndefined();
 	});
 
@@ -71,10 +78,10 @@ describe("Mistral reasoning mode selection", () => {
 		expect(payload.promptMode).toBeUndefined();
 	});
 
-	it("omits reasoning controls for Mistral Medium 3.5 when thinking is off", async () => {
+	it("sends native none effort for Mistral Medium 3.5 when thinking is off", async () => {
 		const payload = await capturePayload(getModel("mistral", "mistral-medium-3.5"));
 
-		expect(payload.reasoningEffort).toBeUndefined();
+		expect(payload.reasoningEffort).toBe("none");
 		expect(payload.promptMode).toBeUndefined();
 	});
 });

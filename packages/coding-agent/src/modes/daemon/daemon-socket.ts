@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
+import { getAgentDir } from "../../config.js";
 
 const DAEMON_SOCKET_MODE = 0o600;
 const DAEMON_SOCKET_DIR_MODE = 0o700;
@@ -35,7 +37,9 @@ export interface DaemonSocketIdentity {
 
 export function defaultDaemonSocketPath(): string {
 	if (process.platform === "win32") {
-		return "\\\\.\\pipe\\prime-agent-daemon";
+		const agentIdentity = resolve(getAgentDir()).toLowerCase();
+		const suffix = createHash("sha256").update(agentIdentity).digest("hex").slice(0, 12);
+		return `\\\\.\\pipe\\prime-agent-daemon-${suffix}`;
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }

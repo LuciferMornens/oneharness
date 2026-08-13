@@ -53,7 +53,23 @@ export type Provider = KnownProvider | string;
 
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelThinkingLevel = "off" | ThinkingLevel;
-export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
+export type ThinkingLevelValue = string | number;
+export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, ThinkingLevelValue | null>>;
+
+export type ReasoningControl = "fixed" | "toggle" | "effort" | "budget";
+
+/**
+ * Authoritative reasoning contract for a model route.
+ *
+ * `levels` is exact: a string or number is the provider value for a selectable level,
+ * while null or a missing key means that level is unsupported. Adapters must
+ * resolve selections through this contract rather than infer support from a
+ * model name or API family.
+ */
+export interface ModelReasoningCapabilities {
+	control: ReasoningControl;
+	levels: ThinkingLevelMap;
+}
 
 /** Token budgets for each thinking level (token-based providers only) */
 export interface ThinkingBudgets {
@@ -143,7 +159,7 @@ export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
-	/** Explicit model reasoning selection. Omit to preserve the provider default. */
+	/** Model reasoning selection. Omission requests off where supported; mandatory reasoning remains model-defined. */
 	reasoning?: ModelThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
@@ -445,9 +461,10 @@ export interface Model<TApi extends Api> {
 	baseUrl: string;
 	reasoning: boolean;
 	/**
-	 * Maps pi thinking levels to provider/model-specific values.
-	 * Missing keys use provider defaults. null marks a level as unsupported.
+	 * Exact model-aware reasoning controls and provider values.
 	 */
+	reasoningCapabilities?: ModelReasoningCapabilities;
+	/** @deprecated Use reasoningCapabilities. Kept for custom model compatibility. */
 	thinkingLevelMap?: ThinkingLevelMap;
 	input: ("text" | "image")[];
 	cost: {

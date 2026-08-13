@@ -7326,6 +7326,7 @@ export class InteractiveMode {
 			const result = spawnSync(editor, [...editorArgs, tmpFile], {
 				stdio: "inherit",
 				shell: process.platform === "win32",
+				windowsHide: true,
 			});
 
 			// On successful exit (status 0), replace editor content
@@ -7554,16 +7555,7 @@ export class InteractiveMode {
 						});
 					},
 					onThinkingLevelChange: (level) => {
-						void this.agentConnection
-							.setThinkingLevel(level)
-							.then(() => {
-								this.patchConnectionState({ thinkingLevel: level });
-								this.footer.invalidate();
-								this.updateEditorBorderColor();
-							})
-							.catch((error) => {
-								this.showError(error instanceof Error ? error.message : String(error));
-							});
+						this.applyThinkingLevel(level, false);
 					},
 					onThemeChange: (themeName) => {
 						const result = setTheme(themeName, true);
@@ -7694,6 +7686,7 @@ export class InteractiveMode {
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 		this.patchConnectionState({
 			model: state.model ?? model,
+			thinkingLevel: state.thinkingLevel,
 			serviceTier: state.serviceTier,
 			availableThinkingLevels: state.availableThinkingLevels,
 		});
@@ -7729,6 +7722,12 @@ export class InteractiveMode {
 
 		const result = await authFlows.loginProvider(provider);
 		if (result.status !== "success") return false;
+		if (result.catalogRefreshDeferred) {
+			this.showStatus(
+				`Authentication completed. Select ${model.provider}/${model.id} after the agent connection is available.`,
+			);
+			return false;
+		}
 
 		this.invalidateConnectionModels();
 		await this.getConnectionAvailableModels();
@@ -8003,14 +8002,29 @@ export class InteractiveMode {
 		});
 	}
 
-	private applyThinkingLevel(level: ThinkingLevel): void {
-		void this.agentConnection
+	private applyThinkingLevel(level: ThinkingLevel, showConfirmation = true): void {
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
+		void connection
 			.setThinkingLevel(level)
-			.then(() => {
-				this.patchConnectionState({ thinkingLevel: level });
+			.then(() => connection.getState())
+			.then((state) => {
+				if (
+					this.agentConnection !== connection ||
+					this.connectionState?.sessionId !== sessionId ||
+					(sessionId !== undefined && state.sessionId !== sessionId)
+				) {
+					return;
+				}
+				this.patchConnectionState({
+					thinkingLevel: state.thinkingLevel,
+					availableThinkingLevels: state.availableThinkingLevels,
+				});
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
-				this.showStatus(`Thinking level: ${level}`);
+				if (showConfirmation) {
+					this.showStatus(`Thinking level: ${state.thinkingLevel}`);
+				}
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
@@ -8081,6 +8095,12 @@ export class InteractiveMode {
 
 						if (tab === "mcp-connections") {
 							if (!authResult.providerId.startsWith("mcp:")) return;
+							if (authResult.catalogRefreshDeferred) {
+								this.showStatus(
+									"Connected. Reload after the agent connection is available to activate the integration.",
+								);
+								return;
+							}
 							if (this.isAgentStreaming() || this.isAgentCompacting()) {
 								this.showStatus("Connected. Run /reload (after the current turn) to activate the integration.");
 								return;
@@ -8097,7 +8117,9 @@ export class InteractiveMode {
 							this.connectionConfiguredProviders,
 						);
 						menu.setActiveTab("models");
-						refreshModels(true);
+						if (!authResult.catalogRefreshDeferred) {
+							refreshModels(true);
+						}
 					})
 					.catch((error) => {
 						handle?.focus();
@@ -8607,6 +8629,10 @@ export class InteractiveMode {
 			}
 			const result = await this.createAuthFlows().runMcpLogin(server);
 			if (result.status === "success") {
+				if (result.catalogRefreshDeferred) {
+					this.showStatus(`Connected ${server}. Reload after the agent connection is available to activate it.`);
+					return;
+				}
 				// Enabling the skill needs a reload, which is refused mid-turn; tell the
 				// user to /reload rather than silently leaving creds saved but inactive.
 				if (this.isAgentStreaming() || this.isAgentCompacting()) {
@@ -8628,7 +8654,12 @@ export class InteractiveMode {
 				this.showStatus(`${server} is not connected.`);
 				return;
 			}
-			authStorage.logout(`mcp:${server}`);
+			try {
+				authStorage.logout(`mcp:${server}`);
+			} catch (error) {
+				this.showError(`Failed to disconnect ${server}: ${error instanceof Error ? error.message : String(error)}`);
+				return;
+			}
 			if (this.isAgentStreaming() || this.isAgentCompacting()) {
 				this.showStatus(`Disconnected ${server}. Run /reload (after the current turn) to fully unload it.`);
 			} else {
@@ -8681,6 +8712,7 @@ export class InteractiveMode {
 				stdio: "inherit",
 				cwd: updateCwd,
 				env: updateEnv,
+				windowsHide: true,
 			},
 		);
 		const updateExitCode = updateResult.status ?? (updateResult.signal ? 1 : 0);
@@ -8732,6 +8764,7 @@ export class InteractiveMode {
 				stdio: "inherit",
 				cwd: updateCwd,
 				env: process.env,
+				windowsHide: true,
 			});
 			if (relaunchResult.error) {
 				console.error(`Failed to relaunch ${APP_NAME}: ${relaunchResult.error.message}`);
@@ -8945,7 +8978,7 @@ export class InteractiveMode {
 	private async handleShareCommand(): Promise<void> {
 		// Check if gh is available and logged in
 		try {
-			const authResult = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
+			const authResult = spawnSync("gh", ["auth", "status"], { encoding: "utf-8", windowsHide: true });
 			if (authResult.status !== 0) {
 				this.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
 				return;
@@ -8994,7 +9027,7 @@ export class InteractiveMode {
 
 		try {
 			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
-				proc = spawn("gh", ["gist", "create", "--public=false", tmpFile]);
+				proc = spawn("gh", ["gist", "create", "--public=false", tmpFile], { windowsHide: true });
 				let stdout = "";
 				let stderr = "";
 				proc.stdout?.on("data", (data) => {

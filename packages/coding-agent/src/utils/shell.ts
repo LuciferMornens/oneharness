@@ -1,37 +1,67 @@
 import { existsSync } from "node:fs";
-import { delimiter } from "node:path";
-import { spawn, spawnSync } from "child_process";
+import { basename, delimiter } from "node:path";
+import { spawnSync } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
+import { signalProcessGroupOrProcess } from "./child-process.js";
 
 export interface ShellConfig {
 	shell: string;
 	args: string[];
 }
 
+let automaticShellConfigCache: { key: string; config: ShellConfig } | undefined;
+
+function automaticShellConfigKey(): string {
+	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path");
+	return [
+		process.platform,
+		pathKey ? process.env[pathKey] : undefined,
+		process.env.ProgramFiles,
+		process.env["ProgramFiles(x86)"],
+		process.env.SystemRoot,
+	].join("\0");
+}
+
+function cacheAutomaticShellConfig(key: string, config: ShellConfig): ShellConfig {
+	automaticShellConfigCache = { key, config };
+	return config;
+}
+
 /**
  * Find bash executable on PATH (cross-platform)
  */
+function findExecutableOnWindowsPath(executable: string): string | null {
+	try {
+		const result = spawnSync("where.exe", [executable], {
+			encoding: "utf-8",
+			timeout: 5000,
+			windowsHide: true,
+		});
+		if (result.status === 0 && result.stdout) {
+			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
+			if (firstMatch && existsSync(firstMatch)) {
+				return firstMatch;
+			}
+		}
+	} catch {
+		// Ignore errors
+	}
+	return null;
+}
+
 function findBashOnPath(): string | null {
 	if (process.platform === "win32") {
-		// Windows: Use 'where' and verify file exists (where can return non-existent paths)
-		try {
-			const result = spawnSync("where", ["bash.exe"], { encoding: "utf-8", timeout: 5000 });
-			if (result.status === 0 && result.stdout) {
-				const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-				if (firstMatch && existsSync(firstMatch)) {
-					return firstMatch;
-				}
-			}
-		} catch {
-			// Ignore errors
-		}
-		return null;
+		return findExecutableOnWindowsPath("bash.exe");
 	}
 
 	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
 	try {
-		const result = spawnSync("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
+		const result = spawnSync("which", ["bash"], {
+			encoding: "utf-8",
+			timeout: 5000,
+			windowsHide: true,
+		});
 		if (result.status === 0 && result.stdout) {
 			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
 			if (firstMatch) {
@@ -44,20 +74,42 @@ function findBashOnPath(): string | null {
 	return null;
 }
 
+export function isPowerShellShell(shellPath: string): boolean {
+	const executable = basename(shellPath).toLowerCase();
+	return (
+		executable === "pwsh" ||
+		executable === "pwsh.exe" ||
+		executable === "powershell" ||
+		executable === "powershell.exe"
+	);
+}
+
+function shellArgs(shellPath: string): string[] {
+	if (isPowerShellShell(shellPath)) {
+		return ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"];
+	}
+	return ["-c"];
+}
+
 /**
  * Resolve shell configuration based on platform and an optional explicit shell path.
  * Resolution order:
  * 1. User-specified shellPath
- * 2. On Windows: Git Bash in known locations, then bash on PATH
+ * 2. On Windows: Git Bash in known locations, bash on PATH, then PowerShell
  * 3. On Unix: /bin/bash, then bash on PATH, then fallback to sh
  */
 export function getShellConfig(customShellPath?: string): ShellConfig {
 	// 1. Check user-specified shell path
 	if (customShellPath) {
 		if (existsSync(customShellPath)) {
-			return { shell: customShellPath, args: ["-c"] };
+			return { shell: customShellPath, args: shellArgs(customShellPath) };
 		}
 		throw new Error(`Custom shell path not found: ${customShellPath}`);
+	}
+
+	const cacheKey = automaticShellConfigKey();
+	if (automaticShellConfigCache?.key === cacheKey) {
+		return automaticShellConfigCache.config;
 	}
 
 	if (process.platform === "win32") {
@@ -74,20 +126,31 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 
 		for (const path of paths) {
 			if (existsSync(path)) {
-				return { shell: path, args: ["-c"] };
+				return cacheAutomaticShellConfig(cacheKey, { shell: path, args: ["-c"] });
 			}
 		}
 
 		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
 		const bashOnPath = findBashOnPath();
 		if (bashOnPath) {
-			return { shell: bashOnPath, args: ["-c"] };
+			return cacheAutomaticShellConfig(cacheKey, { shell: bashOnPath, args: ["-c"] });
+		}
+
+		const windowsPowerShell = process.env.SystemRoot
+			? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+			: undefined;
+		const powershell =
+			findExecutableOnWindowsPath("pwsh.exe") ??
+			findExecutableOnWindowsPath("powershell.exe") ??
+			(windowsPowerShell && existsSync(windowsPowerShell) ? windowsPowerShell : undefined);
+		if (powershell) {
+			return cacheAutomaticShellConfig(cacheKey, { shell: powershell, args: shellArgs(powershell) });
 		}
 
 		throw new Error(
-			`No bash shell found. Options:\n` +
+			`No supported shell found. Options:\n` +
 				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
-				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
+				`  2. Add bash, pwsh, or powershell to PATH\n` +
 				"  3. Set shellPath in settings.json\n\n" +
 				`Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}`,
 		);
@@ -95,15 +158,15 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 
 	// Unix: try /bin/bash, then bash on PATH, then fallback to sh
 	if (existsSync("/bin/bash")) {
-		return { shell: "/bin/bash", args: ["-c"] };
+		return cacheAutomaticShellConfig(cacheKey, { shell: "/bin/bash", args: ["-c"] });
 	}
 
 	const bashOnPath = findBashOnPath();
 	if (bashOnPath) {
-		return { shell: bashOnPath, args: ["-c"] };
+		return cacheAutomaticShellConfig(cacheKey, { shell: bashOnPath, args: ["-c"] });
 	}
 
-	return { shell: "sh", args: ["-c"] };
+	return cacheAutomaticShellConfig(cacheKey, { shell: "sh", args: ["-c"] });
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {
@@ -188,27 +251,5 @@ export function killTrackedDetachedChildren(): void {
  * Kill a process and all its children (cross-platform)
  */
 export function killProcessTree(pid: number): void {
-	if (process.platform === "win32") {
-		// Use taskkill on Windows to kill process tree
-		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
-				stdio: "ignore",
-				detached: true,
-			});
-		} catch {
-			// Ignore errors if taskkill fails
-		}
-	} else {
-		// Use SIGKILL on Unix/Linux/Mac
-		try {
-			process.kill(-pid, "SIGKILL");
-		} catch {
-			// Fallback to killing just the child if process group kill fails
-			try {
-				process.kill(pid, "SIGKILL");
-			} catch {
-				// Process already dead
-			}
-		}
-	}
+	signalProcessGroupOrProcess(pid, "SIGKILL");
 }

@@ -190,7 +190,7 @@ describe("Prime Inference models", () => {
 		const glm52 = getModel("prime-inference", "z-ai/glm-5.2");
 		expect(glm52.reasoning).toBe(true);
 		expect(glm52.compat).toMatchObject({
-			supportsReasoningEffort: false,
+			supportsReasoningEffort: true,
 			thinkingFormat: "zai",
 		});
 		expect(getModel("prime-inference", "qwen/qwen3-coder-next").reasoning).toBe(false);

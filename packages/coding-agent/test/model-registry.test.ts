@@ -417,7 +417,7 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("model schema accepts thinkingLevelMap and compat schema accepts supportsStrictMode and cacheControlFormat", () => {
+		test("model schema preserves reasoning capabilities and legacy maps", () => {
 			writeRawModelsJson({
 				demo: {
 					baseUrl: "https://example.com/v1",
@@ -435,6 +435,15 @@ describe("ModelRegistry", () => {
 								minimal: null,
 								high: "max",
 							},
+							reasoningCapabilities: {
+								control: "budget",
+								levels: {
+									off: 0,
+									low: 1024,
+									high: 8192,
+									max: 32768,
+								},
+							},
 							compat: {
 								supportsStrictMode: false,
 								cacheControlFormat: "anthropic",
@@ -449,9 +458,45 @@ describe("ModelRegistry", () => {
 			const compat = model?.compat as OpenAICompletionsCompat | undefined;
 
 			expect(registry.getError()).toBeUndefined();
+			expect(model?.reasoningCapabilities).toEqual({
+				control: "budget",
+				levels: { off: 0, low: 1024, high: 8192, max: 32768 },
+			});
 			expect(model?.thinkingLevelMap).toEqual({ minimal: null, high: "max" });
 			expect(compat?.supportsStrictMode).toBe(false);
 			expect(compat?.cacheControlFormat).toBe("anthropic");
+		});
+
+		test("legacy thinking level overrides update generated reasoning capabilities", () => {
+			writeRawModelsJson({
+				openai: {
+					modelOverrides: {
+						"gpt-5.4": {
+							thinkingLevelMap: {
+								off: null,
+								minimal: null,
+								low: null,
+								medium: null,
+								high: "high",
+								xhigh: null,
+								max: null,
+							},
+						},
+					},
+				},
+			});
+
+			const overriddenRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = overriddenRegistry.find("openai", "gpt-5.4");
+			expect(model?.reasoningCapabilities?.levels).toEqual({
+				off: null,
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: null,
+			});
 		});
 
 		test("compat schema accepts Anthropic eager tool input streaming flag", () => {

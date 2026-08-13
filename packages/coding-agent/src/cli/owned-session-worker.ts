@@ -13,6 +13,7 @@ import {
 } from "../core/orphan-process-journal.js";
 import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../modes/rpc/jsonl.js";
+import { signalProcessGroupOrProcess } from "../utils/child-process.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
@@ -192,6 +193,10 @@ function exitCodeForSignal(signal: NodeJS.Signals | null): number {
 
 function forwardSignal(child: ChildProcess, signal: NodeJS.Signals): void {
 	if (child.exitCode === null && child.signalCode === null) {
+		if (process.platform === "win32" && child.pid !== undefined) {
+			signalProcessGroupOrProcess(child.pid, signal);
+			return;
+		}
 		child.kill(signal);
 	}
 }
@@ -301,8 +306,12 @@ export async function runOwnedSessionWorkerFrontend(
 				continue;
 			}
 			const { pid } = orphan;
+			if (process.platform === "win32") {
+				signalProcessGroupOrProcess(pid, "SIGKILL");
+				continue;
+			}
 			try {
-				process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
+				process.kill(-pid, "SIGKILL");
 			} catch {
 				try {
 					process.kill(pid, "SIGKILL");
@@ -356,6 +365,7 @@ export async function runOwnedSessionWorkerFrontend(
 				[SESSION_LEASE_OWNER_ID_ENV]: `owned-${randomUUID()}`,
 			},
 			stdio,
+			windowsHide: !interactive,
 		});
 		currentChild = child;
 		if (!interactive) {

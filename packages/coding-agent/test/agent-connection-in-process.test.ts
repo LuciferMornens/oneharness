@@ -281,6 +281,20 @@ describe("InProcessAgentConnection", () => {
 		expect(snapshot.messages).toEqual([userMessage("snapshot context", 1)]);
 	});
 
+	it("preserves exact thinking capabilities in initial snapshots", async () => {
+		const session = createFakeSession("thinking-capabilities", []);
+		Object.assign(session.session, {
+			thinkingLevel: "max",
+			getAvailableThinkingLevels: () => ["off", "low", "high", "max"],
+		});
+		const connection = new InProcessAgentConnection(asRuntime(new FakeRuntime(session.session)));
+
+		const snapshot = await connection.getInitialSnapshot();
+
+		expect(snapshot.state.thinkingLevel).toBe("max");
+		expect(snapshot.state.availableThinkingLevels).toEqual(["off", "low", "high", "max"]);
+	});
+
 	it("emits replacement snapshots and rebinds events when the runtime replaces its session", async () => {
 		const oldSession = createFakeSession("old", [userMessage("old", 1)]);
 		const newSession = createFakeSession("new", [userMessage("new", 2)]);

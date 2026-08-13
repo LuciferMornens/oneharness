@@ -1,14 +1,31 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const installerSource = readFileSync("install.sh", "utf-8");
+const powerShellInstallerSource = readFileSync("install.ps1", "utf-8");
 const mainCall = '\nmain "$@"';
 const mainCallIndex = installerSource.lastIndexOf(mainCall);
 const ansiPattern = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const syncEnd = "\x1b[?2026l";
 const failures = [];
+const shellPath = resolveShellPath();
+
+for (const channel of ["stable", "beta"]) {
+	const rendered = powerShellInstallerSource
+		.replaceAll("__PRIME_AGENT_DOWNLOAD_BASE_URL__", "https://downloads.example.invalid")
+		.replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", channel);
+	check(
+		!rendered.includes("__PRIME_AGENT_DOWNLOAD_BASE_URL__") &&
+			!rendered.includes("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__"),
+		`expected the ${channel} PowerShell installer to replace every release token`,
+	);
+	check(
+		rendered.includes(`$configuredDefaultChannel = "${channel}"`),
+		`expected the ${channel} PowerShell installer to select the ${channel} channel`,
+	);
+}
 
 if (mainCallIndex === -1) {
 	console.error('Installer render check failed: could not find final main "$@" call.');
@@ -164,12 +181,16 @@ if (failures.length > 0) {
 console.log("Installer render check passed.");
 
 function runCase(name, initialCols, initialRows, resizedCols, resizedRows) {
-	const result = spawnSync("sh", [harnessPath, String(initialCols), String(initialRows), String(resizedCols), String(resizedRows)], {
-		detached: true,
+	const result = spawnSync(shellPath, [harnessPath, String(initialCols), String(initialRows), String(resizedCols), String(resizedRows)], {
 		encoding: "utf-8",
+		windowsHide: true,
 	});
+	if (result.error) {
+		failures.push(`${name}: could not launch installer harness: ${result.error.message}`);
+		return emptyParsedCase();
+	}
 	if (result.status !== 0) {
-		failures.push(`${name}: harness exited with ${result.status ?? "unknown"}\n${result.stderr}${result.stdout}`);
+		failures.push(`${name}: harness exited with ${result.status ?? "unknown"}\n${result.stderr ?? ""}${result.stdout ?? ""}`);
 		return emptyParsedCase();
 	}
 
@@ -180,6 +201,19 @@ function runCase(name, initialCols, initialRows, resizedCols, resizedRows) {
 	assertScreenFrame(name, "first", parsed, initialCols, initialRows);
 	assertScreenFrame(name, "second", parsed, resizedCols, resizedRows);
 	return parsed;
+}
+
+function resolveShellPath() {
+	if (process.platform !== "win32") return "sh";
+
+	const gitExecPath = spawnSync("git", ["--exec-path"], { encoding: "utf-8", windowsHide: true });
+	if (gitExecPath.status === 0 && gitExecPath.stdout) {
+		for (const candidate of ["bin/bash.exe", "usr/bin/bash.exe"]) {
+			const path = resolve(gitExecPath.stdout.trim(), "../../..", candidate);
+			if (existsSync(path)) return path;
+		}
+	}
+	return "sh";
 }
 
 function parseRenderOutput(output) {

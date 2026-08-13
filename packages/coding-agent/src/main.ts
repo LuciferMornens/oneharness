@@ -1284,9 +1284,10 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager,
 			sessionStartEvent,
 			...resolvedSessionOptions,
-			// Main agents boot their kernel in the background at session creation;
-			// subagent sessions (rlmDepth > 0) keep the lazy first-call start.
-			prewarmIpythonKernel: true,
+			// A Windows kernel starts several processes. Keep it lazy until the first
+			// IPython call so opening or inspecting an agent has no idle RAM cost.
+			// Other platforms retain the existing background prewarm behavior.
+			prewarmIpythonKernel: process.platform !== "win32",
 			// Read serializedRefine from the merged runtime config (passed
 			// from the JSON/print client through AgentSessionRuntimeConfig)
 			// so it survives the daemon worker's appMode="daemon" context.

@@ -1,4 +1,4 @@
-import { type ChildProcess, execFileSync } from "node:child_process";
+import { type ChildProcess, execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename } from "node:path";
@@ -39,7 +39,10 @@ export function isZombieProcess(pid: number): boolean {
 		// Fall through to the portable process listing used on macOS and BSD.
 	}
 	try {
-		const state = execFileSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
+		const state = execFileSync("ps", ["-p", String(pid), "-o", "stat="], {
+			encoding: "utf8",
+			windowsHide: true,
+		}).trim();
 		return state.startsWith("Z");
 	} catch {
 		return false;
@@ -52,6 +55,22 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
+	if (process.platform === "win32") {
+		const result = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+			stdio: "ignore",
+			timeout: 5000,
+			windowsHide: true,
+		});
+		if (!result.error && result.status === 0) {
+			return;
+		}
+		try {
+			process.kill(pid, signal);
+		} catch {
+			// The process may already be fully reaped.
+		}
+		return;
+	}
 	try {
 		process.kill(-pid, signal);
 		return;

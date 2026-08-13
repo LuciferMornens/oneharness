@@ -1,7 +1,7 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { clampThinkingLevel } from "../models.js";
+import { resolveSimpleThinkingLevel, resolveThinkingLevel, resolveThinkingOffValue } from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -48,6 +48,7 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 // Azure OpenAI Responses-specific options
 export interface AzureOpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	reasoningEffortValue?: string;
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	azureApiVersion?: string;
 	azureResourceName?: string;
@@ -146,12 +147,17 @@ export const streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-resp
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
 
 	return streamAzureOpenAIResponses(model, context, {
 		...base,
-		reasoningEffort,
+		reasoningEffort: resolvedReasoning?.enabled
+			? (resolvedReasoning.level as Exclude<typeof resolvedReasoning.level, "off">)
+			: undefined,
+		reasoningEffortValue:
+			resolvedReasoning?.enabled && typeof resolvedReasoning.providerValue === "string"
+				? resolvedReasoning.providerValue
+				: undefined,
 	} satisfies AzureOpenAIResponsesOptions);
 };
 
@@ -270,17 +276,22 @@ function buildParams(
 	if (model.reasoning) {
 		if (options?.reasoningEffort || options?.reasoningSummary) {
 			const effort = options?.reasoningEffort
-				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
+				? (options.reasoningEffortValue ??
+					resolveThinkingLevel(model, options.reasoningEffort)?.providerValue ??
+					options.reasoningEffort)
 				: "medium";
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],
 				summary: options?.reasoningSummary || "auto",
 			};
 			params.include = ["reasoning.encrypted_content"];
-		} else if (model.thinkingLevelMap?.off !== null) {
-			params.reasoning = {
-				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
-			};
+		} else {
+			const offValue = resolveThinkingOffValue(model, "none");
+			if (typeof offValue === "string") {
+				params.reasoning = {
+					effort: offValue as NonNullable<typeof params.reasoning>["effort"],
+				};
+			}
 		}
 	}
 

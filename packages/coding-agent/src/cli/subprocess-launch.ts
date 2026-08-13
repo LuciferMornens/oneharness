@@ -31,17 +31,43 @@ export function createCliSubprocessEnv(
 	}
 }
 
-function quoteCommandArgument(value: string): string {
+function quotePosixCommandArgument(value: string): string {
 	return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function quotePowerShellCommandArgument(value: string): string {
+	return `'${value.replaceAll("'", "''")}'`;
+}
+
+function quoteCmdCommandArgument(value: string): string {
+	return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `"${value.replaceAll('"', '""')}"`;
+}
+
+type CommandShell = "cmd" | "posix" | "powershell";
+
+function formatCommand(values: readonly string[], shell: CommandShell): string {
+	if (shell === "powershell") {
+		return `& ${values.map(quotePowerShellCommandArgument).join(" ")}`;
+	}
+	if (shell === "cmd") return values.map(quoteCmdCommandArgument).join(" ");
+	return values.map(quotePosixCommandArgument).join(" ");
+}
+
+function commandShellForLauncher(launcherPath: string, defaultShell: CommandShell): CommandShell {
+	if (/\.ps1$/iu.test(launcherPath)) return "powershell";
+	if (/\.(?:cmd|bat)$/iu.test(launcherPath)) return "cmd";
+	if (/\.(?:ba)?sh$/iu.test(launcherPath)) return "posix";
+	return defaultShell;
 }
 
 export function formatCurrentCliCommand(args: readonly string[], environment: NodeJS.ProcessEnv = process.env): string {
 	const launcherPath = environment.PRIME_AGENT_LAUNCHER_PATH;
 	if (launcherPath) {
-		return [launcherPath, ...args].map(quoteCommandArgument).join(" ");
+		const defaultShell = process.platform === "win32" ? "powershell" : "posix";
+		return formatCommand([launcherPath, ...args], commandShellForLauncher(launcherPath, defaultShell));
 	}
 	const launch = createCliSubprocessLaunchSpec(args);
-	return [launch.command, ...launch.args].map(quoteCommandArgument).join(" ");
+	return formatCommand([launch.command, ...launch.args], process.platform === "win32" ? "powershell" : "posix");
 }
 
 export function createCliSubprocessLaunchSpec(

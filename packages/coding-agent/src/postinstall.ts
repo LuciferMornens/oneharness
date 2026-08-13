@@ -28,5 +28,6 @@ try {
 		await ensureKernelPython();
 	}
 } catch (error) {
-	console.error(`prime-agent: postinstall setup skipped: ${oneLine(errorMessage(error))}`);
+	console.error(`prime-agent: postinstall setup failed: ${oneLine(errorMessage(error))}`);
+	process.exitCode = 1;
 }

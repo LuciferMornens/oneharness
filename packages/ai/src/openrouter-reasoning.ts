@@ -20,7 +20,7 @@ function enabledOnlyCapabilities(mandatory: boolean): OpenRouterReasoningCapabil
 	// effort selection. Represent that as one generic active level in the UI.
 	return {
 		thinkingLevelMap: {
-			...(mandatory ? { off: null } : {}),
+			off: mandatory ? null : "none",
 			minimal: null,
 			low: null,
 			medium: null,
@@ -50,7 +50,7 @@ export function getOpenRouterReasoningCapabilities(model: unknown): OpenRouterRe
 	const rawEfforts = model.reasoning.supported_efforts;
 	if (rawEfforts === null) {
 		const thinkingLevelMap: ThinkingLevelMap = {};
-		if (mandatory) thinkingLevelMap.off = null;
+		thinkingLevelMap.off = mandatory ? null : "none";
 		for (const level of THINKING_LEVELS) thinkingLevelMap[level] = level;
 		return { thinkingLevelMap, supportsReasoningEffort: true, mandatory };
 	}
@@ -64,7 +64,7 @@ export function getOpenRouterReasoningCapabilities(model: unknown): OpenRouterRe
 		);
 		if (supportedEfforts.size === 0) return enabledOnlyCapabilities(mandatory);
 		const thinkingLevelMap: ThinkingLevelMap = {};
-		if (mandatory) thinkingLevelMap.off = null;
+		thinkingLevelMap.off = mandatory ? null : "none";
 		for (const level of THINKING_LEVELS) {
 			thinkingLevelMap[level] = supportedEfforts.has(level) ? level : null;
 		}

@@ -686,7 +686,8 @@ export class DaemonSupervisor {
 			if (migratedJobs > 0) {
 				this.log(`Migrated ${migratedJobs} scheduled jobs into session artifacts`);
 			}
-			await this.catalog.start().catch((error) => this.log(`Could not start daemon catalog: ${String(error)}`));
+			// The catalog client starts itself on the first saved-session operation.
+			// Keeping it lazy avoids a large idle Node process for an empty daemon.
 			let adoptionFailure: unknown;
 			let adoptionFailed = false;
 			await Promise.all(
@@ -2184,6 +2185,7 @@ export class DaemonSupervisor {
 				[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
 			}),
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
+			windowsHide: true,
 		});
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
@@ -2903,6 +2905,10 @@ export class DaemonSupervisor {
 						continue;
 					}
 					const { pid } = orphan;
+					if (process.platform === "win32") {
+						signalProcessGroupOrProcess(pid, "SIGKILL");
+						continue;
+					}
 					try {
 						process.kill(-pid, "SIGKILL");
 					} catch {
@@ -4749,7 +4755,11 @@ export class DaemonSupervisor {
 			worker.client.close();
 			worker.client = undefined;
 		} else if (directChild) {
-			directChild.child.kill("SIGTERM");
+			if (process.platform === "win32") {
+				signalProcessGroupOrProcess(entryPid, "SIGTERM");
+			} else {
+				directChild.child.kill("SIGTERM");
+			}
 		} else if (this.processIdentity(entryPid, entryStartId) === "current") {
 			signalProcessGroupOrProcess(entryPid, "SIGTERM");
 		}
@@ -4780,7 +4790,12 @@ export class DaemonSupervisor {
 		let sigkillSent = false;
 		if (force && isWorkerProcessAlive()) {
 			if (directChild) {
-				sigkillSent = directChild.child.kill("SIGKILL");
+				if (process.platform === "win32") {
+					signalProcessGroupOrProcess(entryPid, "SIGKILL");
+					sigkillSent = true;
+				} else {
+					sigkillSent = directChild.child.kill("SIGKILL");
+				}
 			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
 				// Fresh, unthrottled check: the cached verdict may be up to 500ms
 				// old, long enough for the pid to be recycled.
@@ -5134,7 +5149,7 @@ export class DaemonSupervisor {
 			await Promise.all(
 				[...this.workers.values()].map(async (worker) => {
 					try {
-						await this.stopWorker(worker, true, forceWorkers, true);
+						await this.stopWorker(worker, true, forceWorkers);
 					} catch (error) {
 						if (!(error instanceof WorkerStopTimeoutError)) {
 							throw error;
@@ -5188,6 +5203,7 @@ export class DaemonSupervisor {
 				detached: true,
 				env: environment,
 				stdio: "ignore",
+				windowsHide: true,
 			});
 			replacement.unref();
 		}

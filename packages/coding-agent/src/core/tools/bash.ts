@@ -10,6 +10,7 @@ import { waitForChildProcess } from "../../utils/child-process.js";
 import {
 	getShellConfig,
 	getShellEnv,
+	isPowerShellShell,
 	killProcessTree,
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
@@ -22,7 +23,7 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.js";
 
 const bashSchema = Type.Object({
-	command: Type.String({ description: "Bash command to execute" }),
+	command: Type.String({ description: "Command to execute using the configured shell's syntax" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
 });
 
@@ -69,7 +70,8 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 			return new Promise((resolve, reject) => {
 				const { shell, args } = getShellConfig(options?.shellPath);
 				if (!existsSync(cwd)) {
-					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`));
+					const shellLabel = isPowerShellShell(shell) ? "PowerShell" : "Bash";
+					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellLabel} commands.`));
 					return;
 				}
 				const child = spawn(shell, [...args, command], {
@@ -77,6 +79,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					detached: process.platform !== "win32",
 					env: env ?? getShellEnv(),
 					stdio: ["ignore", "pipe", "pipe"],
+					windowsHide: true,
 				});
 				if (child.pid) trackDetachedChildPid(child.pid);
 				let timedOut = false;
@@ -277,14 +280,24 @@ export function createBashToolDefinition(
 	cwd: string,
 	options?: BashToolOptions,
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
-	const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
+	const localShell = options?.operations ? undefined : getShellConfig(options?.shellPath);
+	const ops = options?.operations ?? createLocalBashOperations({ shellPath: localShell?.shell });
+	const shellKind = localShell ? (isPowerShellShell(localShell.shell) ? "PowerShell" : "Bash") : "configured shell";
+	const shellCommandDescription =
+		shellKind === "configured shell" ? "a configured shell command" : `a ${shellKind} command`;
+	const shellExamples =
+		shellKind === "PowerShell"
+			? "Get-ChildItem, Select-String, Get-Command, etc."
+			: shellKind === "Bash"
+				? "ls, grep, find, etc."
+				: "use the configured shell's native syntax";
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
 	const definition: ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> = {
 		name: "bash",
-		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
-		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
+		label: shellKind === "PowerShell" ? "PowerShell" : "bash",
+		description: `Execute ${shellCommandDescription} in the current working directory using ${shellKind} syntax. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		promptSnippet: `Execute ${shellKind} commands (${shellExamples})`,
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,

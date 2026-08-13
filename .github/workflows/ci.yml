@@ -43,6 +43,214 @@ jobs:
       - name: Check
         run: npm run check
 
+  windows-check:
+    name: Windows native check
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm.cmd ci
+
+      - name: Render and parse PowerShell installers
+        shell: pwsh
+        run: |
+          $template = Get-Content -Raw ./install.ps1
+          foreach ($channel in @('stable', 'beta')) {
+            $rendered = $template.Replace('__PRIME_AGENT_DOWNLOAD_BASE_URL__', 'https://downloads.example.invalid').Replace('__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__', $channel)
+            [void][scriptblock]::Create($rendered)
+            if ($rendered.Contains('__PRIME_AGENT_DOWNLOAD_BASE_URL__') -or $rendered.Contains('__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__')) {
+              throw "The $channel PowerShell installer contains an unrendered release token."
+            }
+          }
+
+      - name: Check source and installer paths
+        shell: pwsh
+        run: |
+          $env:PATH = "${env:ProgramFiles}\Git\bin;$env:PATH"
+          npm.cmd run check
+
+      - name: Verify native source launcher
+        shell: pwsh
+        run: |
+          Push-Location $env:RUNNER_TEMP
+          try {
+            $powerShellVersion = & "$env:GITHUB_WORKSPACE/prime-agent.ps1" --version
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($powerShellVersion)) {
+              throw "The native PowerShell source launcher failed."
+            }
+            $cmdVersion = & "$env:GITHUB_WORKSPACE/prime-agent.cmd" --version
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($cmdVersion)) {
+              throw "The native CMD source launcher failed."
+            }
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Verify native kernel bootstrap
+        shell: pwsh
+        env:
+          PRIME_AGENT_CODING_AGENT_DIR: ${{ runner.temp }}\prime-agent-windows-ci
+          PRIME_AGENT_INSTALL_UV: '1'
+          UV_INSTALL_DIR: ${{ runner.temp }}\prime-agent-uv-bin
+        run: |
+          $nodeDir = Split-Path (Get-Command node.exe).Source
+          $pwshDir = Split-Path (Get-Command pwsh.exe).Source
+          $env:PATH = "$nodeDir;$pwshDir;${env:SystemRoot}\System32;${env:SystemRoot}"
+          if (Get-Command uv.exe -ErrorAction SilentlyContinue) {
+            throw 'The controlled PowerShell-only PATH unexpectedly contains uv.'
+          }
+          npx.cmd tsx packages/coding-agent/src/core/kernel/bootstrap-cli.ts
+          if (-not (Test-Path "$env:UV_INSTALL_DIR\uv.exe")) {
+            throw 'The native PowerShell uv installer did not create uv.exe.'
+          }
+
+      - name: Verify PowerShell tool and IPython execution
+        shell: pwsh
+        env:
+          PRIME_AGENT_CODING_AGENT_DIR: ${{ runner.temp }}\prime-agent-windows-ci
+        run: |
+          $env:PRIME_AGENT_TEST_PWSH = (Get-Command pwsh.exe).Source
+          @'
+          import { createBashToolDefinition, createLocalBashOperations } from "./packages/coding-agent/src/core/tools/bash.ts";
+          import { createIpythonToolDefinition, IpythonKernelProvisioner } from "./packages/coding-agent/src/core/tools/ipython.ts";
+          import { formatCurrentCliCommand } from "./packages/coding-agent/src/cli/subprocess-launch.ts";
+          import { getShellConfig, isPowerShellShell } from "./packages/coding-agent/src/utils/shell.ts";
+          import { dirname } from "node:path";
+
+          const shellPath = process.env.PRIME_AGENT_TEST_PWSH;
+          if (!shellPath) throw new Error("PRIME_AGENT_TEST_PWSH is required");
+
+          const recoveryCommand = formatCurrentCliCommand(["shutdown", "--force"], {
+            ...process.env,
+            PRIME_AGENT_LAUNCHER_PATH: "C:\\Program Files\\Prime Agent\\prime-agent.ps1",
+          });
+          if (recoveryCommand !== "& 'C:\\Program Files\\Prime Agent\\prime-agent.ps1' 'shutdown' '--force'") {
+            throw new Error(`PowerShell recovery command was not executable: ${recoveryCommand}`);
+          }
+
+          const originalPath = process.env.PATH;
+          const originalProgramFiles = process.env.ProgramFiles;
+          const originalProgramFilesX86 = process.env["ProgramFiles(x86)"];
+          try {
+            process.env.ProgramFiles = process.env.RUNNER_TEMP;
+            process.env["ProgramFiles(x86)"] = process.env.RUNNER_TEMP;
+            process.env.PATH = `${dirname(shellPath)};${process.env.SystemRoot}\\System32`;
+            const automaticShell = getShellConfig();
+            if (!isPowerShellShell(automaticShell.shell)) {
+              throw new Error(`PowerShell-only shell resolution selected ${automaticShell.shell}`);
+            }
+          }
+          finally {
+            process.env.PATH = originalPath;
+            process.env.ProgramFiles = originalProgramFiles;
+            process.env["ProgramFiles(x86)"] = originalProgramFilesX86;
+          }
+
+          const definition = createBashToolDefinition(process.cwd(), { shellPath });
+          if (!definition.description.includes("PowerShell") || !definition.promptSnippet?.includes("Get-ChildItem")) {
+            throw new Error("The command tool did not advertise PowerShell syntax");
+          }
+
+          let output = "";
+          const operations = createLocalBashOperations({ shellPath });
+          const executed = await operations.exec("Write-Output 'powershell-tool-ok'", process.cwd(), {
+            onData: (data) => {
+              output += data.toString("utf8");
+            },
+          });
+          if (executed.exitCode !== 0 || !output.includes("powershell-tool-ok")) {
+            throw new Error(`PowerShell command tool failed: ${executed.exitCode} ${output}`);
+          }
+
+          const provisioner = new IpythonKernelProvisioner(process.cwd(), {});
+          try {
+            const ipython = createIpythonToolDefinition(process.cwd(), { provisioner, shellPath });
+            const result = await ipython.execute("windows-ci", {
+              code: "%%bash --no-raise-error\nWrite-Output 'ipython-powershell-ok'\nexit 7",
+            });
+            const text = result.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+            if (result.isError || !text.includes("ipython-powershell-ok")) {
+              throw new Error(`PowerShell IPython cell failed: ${text}`);
+            }
+            const argumentResult = await ipython.execute("windows-ci-args", {
+              code: "%%bash -s marker\nWrite-Output ('ipython-args=' + ($args -join ','))",
+            });
+            const argumentText = argumentResult.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+            if (argumentResult.isError || !argumentText.includes("ipython-args=-s,marker")) {
+              throw new Error(`PowerShell IPython arguments failed: ${argumentText}`);
+            }
+            const captureResult = await ipython.execute("windows-ci-capture", {
+              code: "%%bash --out captured\nWrite-Output 'ipython-captured-ok'",
+            });
+            const inspectResult = await ipython.execute("windows-ci-inspect", {
+              code: "print(captured.strip())",
+            });
+            const inspectText = inspectResult.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+            if (captureResult.isError || inspectResult.isError || !inspectText.includes("ipython-captured-ok")) {
+              throw new Error(`PowerShell IPython output capture failed: ${inspectText}`);
+            }
+          }
+          finally {
+            await provisioner.dispose();
+          }
+          '@ | npx.cmd tsx -
+
+      - name: Verify Windows named-pipe daemon lifecycle
+        shell: pwsh
+        env:
+          PRIME_AGENT_CODING_AGENT_DIR: ${{ runner.temp }}\prime-agent-windows-ci
+        run: |
+          $socket = (@'
+          import { defaultDaemonSocketPath } from "./packages/coding-agent/src/modes/daemon/daemon-socket.ts";
+          console.log(defaultDaemonSocketPath());
+          '@ | npx.cmd tsx - | Select-Object -Last 1).Trim()
+          if ($socket -notmatch '^\\\\\.\\pipe\\prime-agent-daemon-[0-9a-f]{12}$') {
+            throw "The default Windows daemon pipe is not configuration-specific: $socket"
+          }
+          $stdout = Join-Path $env:RUNNER_TEMP 'prime-agent-daemon.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'prime-agent-daemon.stderr.log'
+          $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', "$env:GITHUB_WORKSPACE/prime-agent.ps1", '--mode', 'daemon')
+          $daemon = Start-Process -FilePath (Get-Command pwsh.exe).Source -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              Start-Sleep -Milliseconds 250
+              $status = (& "$env:GITHUB_WORKSPACE/prime-agent.ps1" status | Out-String)
+              if ($LASTEXITCODE -eq 0 -and $status.Contains($socket)) {
+                $ready = $true
+                break
+              }
+            }
+            if (-not $ready) {
+              throw "The Windows named-pipe daemon did not become discoverable.`n$(Get-Content -Raw $stderr -ErrorAction SilentlyContinue)"
+            }
+            & "$env:GITHUB_WORKSPACE/prime-agent.ps1" shutdown --force --json
+            if ($LASTEXITCODE -ne 0) {
+              throw 'The Windows named-pipe daemon shutdown failed.'
+            }
+          }
+          finally {
+            if (-not $daemon.HasExited) {
+              Stop-Process -Id $daemon.Id -Force
+            }
+          }
+
   test:
     name: Test (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -118,13 +326,15 @@ jobs:
   build-check-test:
     name: build-check-test
     if: always()
-    needs: [build-check, test]
+    needs: [build-check, windows-check, test]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
+          WINDOWS_CHECK_RESULT: ${{ needs.windows-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
+          test "$WINDOWS_CHECK_RESULT" = success
           test "$TEST_RESULT" = success

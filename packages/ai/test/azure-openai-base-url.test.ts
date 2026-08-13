@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
-import { streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses.js";
+import {
+	streamAzureOpenAIResponses,
+	streamSimpleAzureOpenAIResponses,
+} from "../src/providers/azure-openai-responses.js";
 import type { Context } from "../src/types.js";
 
 interface CapturedAzureClientOptions {
@@ -83,6 +86,27 @@ async function captureClientBaseUrl(baseUrl: string): Promise<string> {
 }
 
 describe("azure-openai-responses base URL normalization", () => {
+	it("uses authoritative capability values for max and default off reasoning", async () => {
+		process.env.AZURE_OPENAI_BASE_URL = "https://my-resource.openai.azure.com";
+		let payload: unknown;
+		await streamSimpleAzureOpenAIResponses(getModel("azure-openai-responses", "gpt-5.6"), context, {
+			apiKey: "test-api-key",
+			reasoning: "max",
+			onPayload: (value) => {
+				payload = value;
+			},
+		}).result();
+		expect(payload).toMatchObject({ reasoning: { effort: "max" } });
+
+		await streamSimpleAzureOpenAIResponses(getModel("azure-openai-responses", "gpt-5.1"), context, {
+			apiKey: "test-api-key",
+			onPayload: (value) => {
+				payload = value;
+			},
+		}).result();
+		expect(payload).toMatchObject({ reasoning: { effort: "none" } });
+	});
+
 	it("normalizes Cognitive Services root endpoints to /openai/v1", async () => {
 		const baseURL = await captureClientBaseUrl("https://marc-quicktests-resource.cognitiveservices.azure.com");
 		expect(baseURL).toBe("https://marc-quicktests-resource.cognitiveservices.azure.com/openai/v1");

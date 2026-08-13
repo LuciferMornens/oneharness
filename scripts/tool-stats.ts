@@ -229,4 +229,8 @@ const html = `<!doctype html>
 mkdirSync(resolve(output, ".."), { recursive: true });
 writeFileSync(output, html);
 console.log(`Wrote ${output}`);
-spawn(process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open", process.platform === "win32" ? ["/c", "start", output] : [output], { detached: true, stdio: "ignore" }).unref();
+spawn(
+	process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open",
+	process.platform === "win32" ? ["/c", "start", output] : [output],
+	{ detached: true, stdio: "ignore", windowsHide: true },
+).unref();

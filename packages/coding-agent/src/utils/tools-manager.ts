@@ -100,7 +100,11 @@ const TOOLS: Record<string, ToolConfig> = {
 // Check that a command both launches and reports a successful version.
 function commandWorks(cmd: string): boolean {
 	try {
-		const result = spawnSync(cmd, ["--version"], { stdio: "pipe", timeout: COMMAND_TIMEOUT_MS });
+		const result = spawnSync(cmd, ["--version"], {
+			stdio: "pipe",
+			timeout: COMMAND_TIMEOUT_MS,
+			windowsHide: true,
+		});
 		return !result.error && result.status === 0;
 	} catch {
 		return false;
@@ -224,7 +228,10 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 
 	try {
 		if (assetName.endsWith(".tar.gz")) {
-			const extractResult = spawnSync("tar", ["xzf", archivePath, "-C", extractDir], { stdio: "pipe" });
+			const extractResult = spawnSync("tar", ["xzf", archivePath, "-C", extractDir], {
+				stdio: "pipe",
+				windowsHide: true,
+			});
 			if (extractResult.error || extractResult.status !== 0) {
 				const errMsg = extractResult.error?.message ?? extractResult.stderr?.toString().trim() ?? "unknown error";
 				throw new Error(`Failed to extract ${assetName}: ${errMsg}`);

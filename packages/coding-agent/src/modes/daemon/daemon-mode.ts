@@ -756,10 +756,17 @@ export class AgentDaemon {
 			return;
 		}
 		this.supervisorLaunchInProgress = true;
-		const key = createHash("sha256").update(supervisorSocketPath).digest("hex").slice(0, 12);
-		const lockDirectory = join(dirname(supervisorSocketPath), `.supervisor-launch-${key}.lock`);
+		const normalizedSocketPath =
+			process.platform === "win32" ? supervisorSocketPath.toLowerCase() : supervisorSocketPath;
+		const key = createHash("sha256").update(normalizedSocketPath).digest("hex").slice(0, 12);
+		const lockRoot =
+			process.platform === "win32" ? join(this.agentDir, "daemon-supervisor-launch") : dirname(supervisorSocketPath);
+		const lockDirectory = join(lockRoot, `.supervisor-launch-${key}.lock`);
 		let ownsLock = false;
 		try {
+			if (process.platform === "win32") {
+				mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+			}
 			for (let attempt = 0; attempt < 3 && !ownsLock; attempt++) {
 				const token = randomUUID();
 				const candidateDirectory = `${lockDirectory}.candidate-${process.pid}-${token}`;
@@ -821,6 +828,7 @@ export class AgentDaemon {
 				detached: true,
 				env: environment,
 				stdio: "ignore",
+				windowsHide: true,
 			});
 			child.unref();
 			const deadline = Date.now() + 10_000;

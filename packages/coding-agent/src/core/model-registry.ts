@@ -90,7 +90,7 @@ const VercelGatewayRoutingSchema = Type.Object({
 });
 
 // Schema for thinking level support and provider-specific values
-const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Null()]);
+const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Number(), Type.Null()]);
 const ThinkingLevelMapSchema = Type.Object({
 	off: Type.Optional(ThinkingLevelMapValueSchema),
 	minimal: Type.Optional(ThinkingLevelMapValueSchema),
@@ -99,6 +99,11 @@ const ThinkingLevelMapSchema = Type.Object({
 	high: Type.Optional(ThinkingLevelMapValueSchema),
 	xhigh: Type.Optional(ThinkingLevelMapValueSchema),
 	max: Type.Optional(ThinkingLevelMapValueSchema),
+});
+
+const ReasoningCapabilitiesSchema = Type.Object({
+	control: Type.Union([Type.Literal("fixed"), Type.Literal("toggle"), Type.Literal("effort"), Type.Literal("budget")]),
+	levels: ThinkingLevelMapSchema,
 });
 
 const OpenAICompletionsCompatSchema = Type.Object({
@@ -152,6 +157,7 @@ const ModelDefinitionSchema = Type.Object({
 	api: Type.Optional(Type.String({ minLength: 1 })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
+	reasoningCapabilities: Type.Optional(ReasoningCapabilitiesSchema),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	cost: Type.Optional(
@@ -172,6 +178,7 @@ const ModelDefinitionSchema = Type.Object({
 const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
+	reasoningCapabilities: Type.Optional(ReasoningCapabilitiesSchema),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
 	cost: Type.Optional(
@@ -334,8 +341,17 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	// Simple field overrides
 	if (override.name !== undefined) result.name = override.name;
 	if (override.reasoning !== undefined) result.reasoning = override.reasoning;
-	if (override.thinkingLevelMap !== undefined) {
+	if (override.reasoningCapabilities !== undefined) {
+		result.reasoningCapabilities = override.reasoningCapabilities;
+		result.thinkingLevelMap = { ...override.reasoningCapabilities.levels };
+	} else if (override.thinkingLevelMap !== undefined) {
 		result.thinkingLevelMap = { ...model.thinkingLevelMap, ...override.thinkingLevelMap };
+		if (result.reasoningCapabilities) {
+			result.reasoningCapabilities = {
+				...result.reasoningCapabilities,
+				levels: { ...result.reasoningCapabilities.levels, ...override.thinkingLevelMap },
+			};
+		}
 	}
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
@@ -739,6 +755,7 @@ export class ModelRegistry {
 					provider: providerName,
 					baseUrl,
 					reasoning: modelDef.reasoning ?? false,
+					reasoningCapabilities: modelDef.reasoningCapabilities,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
@@ -1545,6 +1562,7 @@ export class ModelRegistry {
 					provider: providerName,
 					baseUrl: modelDef.baseUrl ?? config.baseUrl!,
 					reasoning: modelDef.reasoning,
+					reasoningCapabilities: modelDef.reasoningCapabilities,
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: modelDef.input as ("text" | "image")[],
 					cost: modelDef.cost,
@@ -1594,6 +1612,7 @@ export interface ProviderConfigInput {
 		api?: Api;
 		baseUrl?: string;
 		reasoning: boolean;
+		reasoningCapabilities?: Model<Api>["reasoningCapabilities"];
 		thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 		input: ("text" | "image")[];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };

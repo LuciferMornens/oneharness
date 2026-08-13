@@ -931,7 +931,7 @@ describe("openai-completions tool_choice", () => {
 		expect((payload as { reasoning?: unknown }).reasoning).toBeUndefined();
 	});
 
-	it("distinguishes omitted reasoning from explicit off for Prime effort models", async () => {
+	it("requests off for omitted and explicit off reasoning on Prime effort models", async () => {
 		const model = getModel("prime-inference", "moonshotai/kimi-k3")!;
 		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
 		let payload: unknown;
@@ -942,7 +942,7 @@ describe("openai-completions tool_choice", () => {
 				payload = params;
 			},
 		}).result();
-		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBeUndefined();
+		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
 
 		await streamSimple(model, context, {
 			apiKey: "test",
@@ -957,7 +957,13 @@ describe("openai-completions tool_choice", () => {
 	it("serializes explicit off only for models that allow disabling reasoning", async () => {
 		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
 		const effortCompat = { ...baseModel.compat, supportsReasoningEffort: true };
-		const optionalModel = { ...baseModel, compat: effortCompat, thinkingLevelMap: { high: "high" } };
+		const optionalLevels = { off: "none", high: "high" } as const;
+		const optionalModel = {
+			...baseModel,
+			compat: effortCompat,
+			thinkingLevelMap: optionalLevels,
+			reasoningCapabilities: { control: "effort" as const, levels: optionalLevels },
+		};
 		const mandatoryModel = {
 			...baseModel,
 			compat: effortCompat,
@@ -969,6 +975,10 @@ describe("openai-completions tool_choice", () => {
 				high: "high",
 				xhigh: null,
 				max: null,
+			},
+			reasoningCapabilities: {
+				control: "effort" as const,
+				levels: { off: null, high: "high" },
 			},
 		};
 		let payload: unknown;
@@ -998,12 +1008,17 @@ describe("openai-completions tool_choice", () => {
 		const model = {
 			...baseModel,
 			thinkingLevelMap: {
+				off: "none",
 				minimal: null,
 				low: null,
 				medium: null,
 				high: "high",
 				xhigh: null,
 				max: null,
+			},
+			reasoningCapabilities: {
+				control: "toggle" as const,
+				levels: { off: "none", high: "high" },
 			},
 			compat: { ...baseModel.compat, supportsReasoningEffort: false },
 		};

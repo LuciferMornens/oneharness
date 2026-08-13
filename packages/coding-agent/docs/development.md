@@ -18,7 +18,13 @@ Run from source:
 /path/to/prime-agent/prime-agent.sh
 ```
 
-The script can be called from any directory and preserves the caller's working directory. Use that behavior to run a source checkout against a separate test project.
+On Windows, use the native source launcher:
+
+```powershell
+C:\path\to\prime-agent\prime-agent.ps1
+```
+
+Both launchers can be called from any directory and preserve the caller's working directory. Use that behavior to run a source checkout against a separate test project.
 
 ## Product and Source Names
 

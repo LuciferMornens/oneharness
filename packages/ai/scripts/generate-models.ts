@@ -84,12 +84,28 @@ const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 ]);
 
 const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
+	off: "off",
+	minimal: null,
+	low: "low",
+	medium: null,
+	high: "high",
+	xhigh: null,
+	max: "max",
+} as const;
+
+const ZAI_TOGGLE_THINKING_LEVEL_MAP = {
+	off: "off",
 	minimal: null,
 	low: null,
 	medium: null,
 	high: "high",
-	xhigh: "max",
+	xhigh: null,
 	max: null,
+} as const;
+
+const ZAI_GLM_52_THINKING_LEVEL_MAP = {
+	...ZAI_TOGGLE_THINKING_LEVEL_MAP,
+	max: "max",
 } as const;
 
 const KIMI_K3_THINKING_LEVEL_MAP = {
@@ -260,6 +276,61 @@ function supportsOpenAiXhigh(modelId: string): boolean {
 	);
 }
 
+function getOpenAiReasoningLevelMap(modelId: string): Model<any>["thinkingLevelMap"] | undefined {
+	const id = modelId.toLowerCase();
+	if (!id.includes("gpt-5") && !id.includes("gpt-oss") && !/^o[134](?:-|$)/.test(id)) return undefined;
+	if (id.includes("gpt-oss")) {
+		return { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null };
+	}
+	if (id.includes("gpt-5-pro") || id === "gpt-5-pro") {
+		return { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null };
+	}
+	if (/gpt-5\.(?:2|4|5)-pro/.test(id)) {
+		return { off: null, minimal: null, low: null, medium: "medium", high: "high", xhigh: "xhigh", max: null };
+	}
+	if (id.includes("gpt-5.6")) {
+		return { off: "none", minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
+	}
+	if (/gpt-5\.[1-5]/.test(id)) {
+		return {
+			off: OPENAI_RESPONSES_NONE_REASONING_MODELS.has(modelId) ? "none" : null,
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: supportsOpenAiXhigh(id) ? "xhigh" : null,
+			max: null,
+		};
+	}
+	if (id === "gpt-5" || id.endsWith("/gpt-5")) {
+		return { off: null, minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: null, max: null };
+	}
+	return { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null };
+}
+
+function getDocumentedOpenAiCompatibleLevelMap(model: Model<any>): Model<any>["thinkingLevelMap"] | undefined {
+	const id = model.id.toLowerCase();
+	if (model.provider === "xai") {
+		if (id.includes("grok-4.6") || id.includes("grok-4.20-multi-agent")) {
+			return { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: null };
+		}
+		if (id.includes("grok-4.5")) {
+			return { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null };
+		}
+	}
+	if (model.provider === "groq") {
+		if (id.includes("gpt-oss")) return getOpenAiReasoningLevelMap(id);
+		if (id.includes("qwen")) return { off: "off", minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null };
+	}
+	if (model.provider === "cerebras") {
+		if (id.includes("gpt-oss")) return getOpenAiReasoningLevelMap(id);
+		if (id.includes("glm") || id.includes("gemma")) {
+			return { off: "off", minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null };
+		}
+	}
+	return undefined;
+}
+
 function isGoogleThinkingApi(model: Model<any>): boolean {
 	return model.api === "google-generative-ai" || model.api === "google-vertex";
 }
@@ -276,12 +347,65 @@ function isGemma4Model(modelId: string): boolean {
 	return /gemma-?4/.test(modelId.toLowerCase());
 }
 
+function isGemini25ProModel(modelId: string): boolean {
+	return modelId.toLowerCase().includes("gemini-2.5-pro");
+}
+
+function isGemini25FlashLiteModel(modelId: string): boolean {
+	return modelId.toLowerCase().includes("gemini-2.5-flash-lite");
+}
+
+function isGemini25FlashModel(modelId: string): boolean {
+	return modelId.toLowerCase().includes("gemini-2.5-flash") && !isGemini25FlashLiteModel(modelId);
+}
+
+function isAdaptiveClaudeModel(modelId: string, modelName?: string): boolean {
+	const candidates = (modelName ? [modelId, modelName] : [modelId]).flatMap((value) => {
+		const lower = value.toLowerCase();
+		return [lower, lower.replace(/[\s_.:]+/g, "-")];
+	});
+	return candidates.some(
+		(candidate) =>
+			candidate.includes("opus-4-6") ||
+			candidate.includes("opus-4-7") ||
+			candidate.includes("opus-4-8") ||
+			candidate.includes("opus-5") ||
+			candidate.includes("sonnet-4-6") ||
+			candidate.includes("sonnet-5") ||
+			candidate.includes("fable-5") ||
+			candidate.includes("mythos"),
+	);
+}
+
+function isMistralReasoningEffortModel(modelId: string): boolean {
+	return (
+		modelId === "mistral-small-2603" ||
+		modelId === "mistral-small-latest" ||
+		modelId === "mistral-medium-3.5"
+	);
+}
+
 function applyThinkingLevelMetadata(model: Model<any>): void {
-	if (
-		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
-		model.id.startsWith("gpt-5")
-	) {
-		mergeThinkingLevelMap(model, { off: null });
+	const nativeOpenAiRoute =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	const nativeAnthropicRoute =
+		(model.api === "anthropic-messages" &&
+			model.id.toLowerCase().includes("claude") &&
+			(model.provider === "anthropic" || model.provider === "github-copilot" || model.provider === "opencode")) ||
+		(model.api === "bedrock-converse-stream" &&
+			(model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude")));
+	const openAiReasoningLevelMap = getOpenAiReasoningLevelMap(model.id);
+	if (openAiReasoningLevelMap && nativeOpenAiRoute) {
+		mergeThinkingLevelMap(model, openAiReasoningLevelMap);
+	}
+	const compatibleReasoningLevelMap = getDocumentedOpenAiCompatibleLevelMap(model);
+	if (compatibleReasoningLevelMap) {
+		mergeThinkingLevelMap(model, compatibleReasoningLevelMap);
+		if (model.provider === "xai") {
+			model.compat = { ...model.compat, supportsReasoningEffort: true };
+		}
 	}
 	if (
 		model.api === "openai-responses" &&
@@ -290,53 +414,112 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		mergeThinkingLevelMap(model, { off: "none" });
 	}
-	if (supportsOpenAiXhigh(model.id)) {
+	if (nativeOpenAiRoute && supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
-	if (model.id.includes("gpt-5.6")) {
+	if (nativeOpenAiRoute && model.id.includes("gpt-5.6")) {
 		mergeThinkingLevelMap(model, { minimal: null, max: "max" });
 	}
 	// Per-family effort support per the Anthropic effort docs. Opus 4.6 / Sonnet 4.6
 	// have no xhigh; Fable 5 / Mythos 5 / Mythos Preview think every turn (off: null).
 	if (
-		model.id.includes("opus-4-6") ||
-		model.id.includes("opus-4.6") ||
-		model.id.includes("sonnet-4-6") ||
-		model.id.includes("sonnet-4.6")
+		nativeAnthropicRoute &&
+		(model.id.includes("opus-4-6") ||
+			model.id.includes("opus-4.6") ||
+			model.id.includes("sonnet-4-6") ||
+			model.id.includes("sonnet-4.6"))
 	) {
 		mergeThinkingLevelMap(model, { max: "max" });
 	}
 	if (
-		model.id.includes("opus-4-7") ||
-		model.id.includes("opus-4.7") ||
-		model.id.includes("opus-4-8") ||
-		model.id.includes("opus-4.8") ||
-		model.id.includes("opus-5") ||
-		model.id.includes("sonnet-5")
+		nativeAnthropicRoute &&
+		(model.id.includes("opus-4-7") ||
+			model.id.includes("opus-4.7") ||
+			model.id.includes("opus-4-8") ||
+			model.id.includes("opus-4.8") ||
+			model.id.includes("opus-5") ||
+			model.id.includes("sonnet-5"))
 	) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
 	}
-	if (model.id.includes("fable-5") || model.id.includes("mythos-5")) {
+	if (nativeAnthropicRoute && (model.id.includes("fable-5") || model.id.includes("mythos-5"))) {
 		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh", max: "max" });
 	}
-	if (model.id.includes("mythos-preview")) {
+	if (nativeAnthropicRoute && model.id.includes("mythos-preview")) {
 		mergeThinkingLevelMap(model, { off: null, max: "max" });
 	}
-	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
+	if (model.provider === "deepseek" && model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+	}
+	if (model.compat?.thinkingFormat === "zai" && model.reasoning) {
+		const supportsEffort = /(?:^|\/)glm-5\.2(?:-|$)/.test(model.id.toLowerCase());
+		mergeThinkingLevelMap(
+			model,
+			supportsEffort ? ZAI_GLM_52_THINKING_LEVEL_MAP : ZAI_TOGGLE_THINKING_LEVEL_MAP,
+		);
+		model.compat = { ...model.compat, supportsReasoningEffort: supportsEffort };
 	}
 	const kimiK3Id = model.id.toLowerCase();
 	if (!model.thinkingLevelMap && (/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))) {
 		mergeThinkingLevelMap(model, KIMI_K3_THINKING_LEVEL_MAP);
 	}
 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
-		mergeThinkingLevelMap(model, { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" });
+		mergeThinkingLevelMap(model, {
+			off: null,
+			minimal: null,
+			low: "LOW",
+			medium: "MEDIUM",
+			high: "HIGH",
+			xhigh: null,
+			max: null,
+		});
 	}
 	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
-		mergeThinkingLevelMap(model, { off: null });
+		mergeThinkingLevelMap(model, {
+			off: null,
+			minimal: "MINIMAL",
+			low: "LOW",
+			medium: "MEDIUM",
+			high: "HIGH",
+			xhigh: null,
+			max: null,
+		});
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
-		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
+		mergeThinkingLevelMap(model, { off: "MINIMAL", minimal: null, low: null, medium: null, high: "HIGH" });
+	}
+	if (isGoogleThinkingApi(model) && isGemini25ProModel(model.id)) {
+		mergeThinkingLevelMap(model, {
+			off: null,
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 32768,
+			xhigh: null,
+			max: null,
+		});
+	}
+	if (isGoogleThinkingApi(model) && isGemini25FlashModel(model.id)) {
+		mergeThinkingLevelMap(model, {
+			off: 0,
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+			xhigh: null,
+			max: null,
+		});
+	}
+	if (isGoogleThinkingApi(model) && isGemini25FlashLiteModel(model.id)) {
+		mergeThinkingLevelMap(model, {
+			off: 0,
+			minimal: 512,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+			xhigh: null,
+			max: null,
+		});
 	}
 	if (
 		model.provider === "openai-codex" &&
@@ -348,6 +531,100 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openai-codex" && model.id === "gpt-5.1-codex-mini") {
 		mergeThinkingLevelMap(model, { minimal: "medium", low: "medium", medium: "medium", high: "high" });
 	}
+	if (model.api === "mistral-conversations" && isMistralReasoningEffortModel(model.id)) {
+		mergeThinkingLevelMap(model, {
+			off: "none",
+			minimal: null,
+			low: null,
+			medium: null,
+			high: "high",
+			xhigh: null,
+			max: null,
+		});
+	}
+
+	if (!model.reasoning) return;
+
+	const isClaudeBedrock =
+		model.api === "bedrock-converse-stream" &&
+		(model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude"));
+	const directClaudeApi =
+		model.api === "anthropic-messages" &&
+		model.id.toLowerCase().includes("claude") &&
+		(model.provider === "anthropic" || model.provider === "github-copilot" || model.provider === "opencode");
+	const googleThinking = model.api === "google-generative-ai" || model.api === "google-vertex";
+	const adaptiveClaude = (directClaudeApi || isClaudeBedrock) && isAdaptiveClaudeModel(model.id, model.name);
+	const budgetBased = (directClaudeApi || isClaudeBedrock) && !adaptiveClaude;
+	const namedEffort =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	const openAiCompat = model.api === "openai-completions" ? model.compat : undefined;
+	const openAiToggleFormat =
+		model.provider === "openrouter" ||
+		openAiCompat?.thinkingFormat === "zai" ||
+		openAiCompat?.thinkingFormat === "qwen" ||
+		openAiCompat?.thinkingFormat === "qwen-chat-template" ||
+		openAiCompat?.thinkingFormat === "deepseek" ||
+		openAiCompat?.thinkingFormat === "openrouter";
+	const hasKnownReasoningControl =
+		adaptiveClaude ||
+		budgetBased ||
+		namedEffort ||
+		googleThinking ||
+		openAiToggleFormat ||
+		model.api === "mistral-conversations" ||
+		model.thinkingLevelMap !== undefined;
+	const fixedReasoning =
+		(model.api === "bedrock-converse-stream" && !isClaudeBedrock) ||
+		(model.api === "anthropic-messages" && !directClaudeApi) ||
+		(model.api === "openai-completions" && model.provider === "xai" && !compatibleReasoningLevelMap) ||
+		(model.api === "openai-completions" &&
+			(model.provider === "cloudflare-workers-ai" ||
+				(model.provider === "cloudflare-ai-gateway" && model.id.startsWith("workers-ai/")))) ||
+		(model.api === "openai-completions" &&
+			(model.provider === "huggingface" || model.provider === "fireworks") &&
+			!model.thinkingLevelMap) ||
+		(model.api === "openai-completions" &&
+			openAiCompat?.supportsReasoningEffort === false &&
+			!openAiToggleFormat) ||
+		!hasKnownReasoningControl;
+	const defaultLevels = adaptiveClaude
+		? { off: "off", low: "low", medium: "medium", high: "high" }
+		: budgetBased
+			? { off: 0, minimal: 1024, low: 2048, medium: 8192, high: 16384 }
+			: namedEffort
+				? { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high" }
+				: googleThinking
+					? { off: 0, high: -1 }
+					: fixedReasoning
+						? { off: null, high: "always" }
+						: { off: "off", high: "high" };
+	const supportsNamedEffort =
+		namedEffort ||
+		adaptiveClaude ||
+		openAiCompat?.supportsReasoningEffort === true ||
+		((openAiCompat?.thinkingFormat === "deepseek" || openAiCompat?.thinkingFormat === "openrouter") &&
+			openAiCompat.supportsReasoningEffort !== false) ||
+		Object.entries(model.thinkingLevelMap ?? {}).filter(
+			([level, value]) => level !== "off" && value !== null && value !== undefined,
+		).length > 1 ||
+		(model.api === "mistral-conversations" && !!model.thinkingLevelMap) ||
+		(googleThinking && !!model.thinkingLevelMap && !Object.values(model.thinkingLevelMap).some((value) => typeof value === "number"));
+	model.reasoningCapabilities = fixedReasoning
+		? { control: "fixed", levels: { off: null, high: "always" } }
+		: {
+		control:
+			budgetBased || (googleThinking && Object.values(model.thinkingLevelMap ?? {}).some((value) => typeof value === "number"))
+				? "budget"
+				: supportsNamedEffort
+					? "effort"
+					: "toggle",
+		levels: { ...defaultLevels, ...model.thinkingLevelMap },
+	};
+	// Keep the legacy field as a complete mirror so existing custom model
+	// overrides remain exact rather than inheriting hidden base levels.
+	model.thinkingLevelMap = { ...model.reasoningCapabilities.levels };
 }
 
 function getAnthropicMessagesCompat(provider: string, modelId: string): AnthropicMessagesCompat | undefined {
@@ -620,8 +897,8 @@ function buildPrimeInferenceOpenRouterIndex(catalog: unknown[]): Map<string, Pri
 			...(reasoningCapabilities?.thinkingLevelMap
 				? { thinkingLevelMap: reasoningCapabilities.thinkingLevelMap }
 				: {}),
-			...(reasoningCapabilities?.supportsReasoningEffort === false
-				? { supportsReasoningEffort: false }
+			...(reasoningCapabilities
+				? { supportsReasoningEffort: reasoningCapabilities.supportsReasoningEffort }
 				: {}),
 		});
 	}
@@ -723,10 +1000,12 @@ function createPrimeInferenceModel(
 		maxTokens,
 		compat: {
 			...compat,
-			...(openRouter?.supportsReasoningEffort === false
+			...(openRouter?.supportsReasoningEffort !== undefined
 				? {
-						supportsReasoningEffort: false,
-						...(!compat.thinkingFormat ? { thinkingFormat: "openrouter" as const } : {}),
+						supportsReasoningEffort: openRouter.supportsReasoningEffort,
+						...(!compat.thinkingFormat && openRouter.supportsReasoningEffort === false
+							? { thinkingFormat: "openrouter" as const }
+							: {}),
 					}
 				: {}),
 		},
@@ -785,8 +1064,8 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 				...(reasoningCapabilities?.thinkingLevelMap
 					? { thinkingLevelMap: reasoningCapabilities.thinkingLevelMap }
 					: {}),
-				...(reasoningCapabilities?.supportsReasoningEffort === false
-					? { compat: { supportsReasoningEffort: false } }
+				...(reasoningCapabilities
+					? { compat: { supportsReasoningEffort: reasoningCapabilities.supportsReasoningEffort } }
 					: {}),
 				input,
 				cost: {
@@ -1182,6 +1461,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					},
 					compat: {
 						supportsDeveloperRole: false,
+						supportsReasoningEffort: modelId.startsWith("glm-5.2"),
 						thinkingFormat: ZAI_THINKING_COMPAT.thinkingFormat,
 						...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(modelId) ? { zaiToolStream: true } : {}),
 					},
@@ -1908,7 +2188,7 @@ async function generateModels() {
 	allModels.push(...deepseekV4Models);
 
 	for (const candidate of allModels) {
-		if (candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
+		if (candidate.provider === "deepseek" && candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
 			candidate.compat = {
 				...candidate.compat,
 				...(candidate.provider === "openrouter"
@@ -2403,6 +2683,9 @@ export const MODELS = {
 			output += `\t\t\treasoning: ${model.reasoning},\n`;
 			if (model.thinkingLevelMap) {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
+			}
+			if (model.reasoningCapabilities) {
+				output += `\t\t\treasoningCapabilities: ${JSON.stringify(model.reasoningCapabilities)},\n`;
 			}
 			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;
 			output += `\t\t\tcost: {\n`;
