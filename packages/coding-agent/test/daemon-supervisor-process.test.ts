@@ -404,7 +404,8 @@ describe("daemon supervisor resident workers", () => {
 		const agentDir = join(root, "agent");
 		const projectDir = join(root, "project");
 		const sessionDir = join(agentDir, "sessions");
-		const socketPath = join(tmpdir(), `prime-supervisor-owned-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		const socketId = `prime-supervisor-owned-${process.pid}-${randomUUID().slice(0, 8)}`;
+		const socketPath = process.platform === "win32" ? `\\\\.\\pipe\\${socketId}` : join(tmpdir(), `${socketId}.sock`);
 		mkdirSync(projectDir, { recursive: true });
 		const sessionManager = SessionManager.create(projectDir, sessionDir);
 		sessionManager.appendMessage({ role: "user", content: "owned worker fixture", timestamp: 1 });
@@ -420,7 +421,11 @@ describe("daemon supervisor resident workers", () => {
 			type: "create",
 			sessionPath: sessionFile,
 			lifecycle: "client_owned",
-			launchEnv: { PRIME_AGENT_OWNED_TEST: launchEnvSentinel },
+			launchEnv: {
+				[ENV_AGENT_DIR]: join(root, "other-agent"),
+				LOCALAPPDATA: join(root, "other-local-app-data"),
+				PRIME_AGENT_OWNED_TEST: launchEnvSentinel,
+			},
 			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
 		});
 		expect(created.success).toBe(true);

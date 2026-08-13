@@ -13,13 +13,14 @@ import {
 import { createConnection } from "node:net";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ENV_AGENT_DIR, getCronJobsPath } from "../../../src/config.js";
+import { APP_NAME, ENV_AGENT_DIR, getCronJobsPath } from "../../../src/config.js";
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import {
 	acquireDaemonSupervisorOwnership,
+	listDaemonSupervisorProcesses,
 	persistDaemonStartupFenceFromOwner,
 	waitForDaemonStartupFence,
 } from "../../../src/modes/daemon/daemon-supervisor-ownership.js";
@@ -126,24 +127,30 @@ function dispatchMessage(handle: FixtureHandle, message: FixtureMessage): void {
 function spawnFixture(
 	mode: "legacy_cleanup" | "owner" | "supervisor",
 	paths: { agentDir: string; descriptorDir: string; registryDir: string; socketPath: string },
-	options: { extraEnv?: NodeJS.ProcessEnv; generation?: string } = {},
+	options: { extraEnv?: NodeJS.ProcessEnv; generation?: string; useDefaultRegistry?: boolean } = {},
 ): FixtureHandle {
+	const environment: NodeJS.ProcessEnv = {
+		...process.env,
+		...options.extraEnv,
+		[ENV_AGENT_DIR]: paths.agentDir,
+		ENG_4600_AGENT_DIR: paths.agentDir,
+		ENG_4600_DESCRIPTOR_DIR: paths.descriptorDir,
+		ENG_4600_FIXTURE_MODE: mode,
+		ENG_4600_GENERATION: options.generation,
+		ENG_4600_SOCKET_PATH: paths.socketPath,
+		PI_OFFLINE: "1",
+		TSX_TSCONFIG_PATH: tsconfigPath,
+	};
+	if (options.useDefaultRegistry) {
+		delete environment[supervisorRegistryDirEnv];
+		environment.ENG_4600_PROBE_BEFORE_RELEASE = "1";
+	} else {
+		environment[supervisorRegistryDirEnv] = paths.registryDir;
+		environment.ENG_4600_REGISTRY_DIR = paths.registryDir;
+	}
 	const child = spawn(process.execPath, [tsxPath, fixturePath], {
 		cwd: paths.agentDir,
-		env: {
-			...process.env,
-			...options.extraEnv,
-			[supervisorRegistryDirEnv]: paths.registryDir,
-			[ENV_AGENT_DIR]: paths.agentDir,
-			ENG_4600_AGENT_DIR: paths.agentDir,
-			ENG_4600_DESCRIPTOR_DIR: paths.descriptorDir,
-			ENG_4600_FIXTURE_MODE: mode,
-			ENG_4600_GENERATION: options.generation,
-			ENG_4600_REGISTRY_DIR: paths.registryDir,
-			ENG_4600_SOCKET_PATH: paths.socketPath,
-			PI_OFFLINE: "1",
-			TSX_TSCONFIG_PATH: tsconfigPath,
-		},
+		env: environment,
 		stdio: ["ignore", "pipe", "pipe", "ipc"],
 	});
 	const handle: FixtureHandle = {
@@ -166,20 +173,26 @@ function spawnFixture(
 function spawnRealSupervisor(
 	paths: { agentDir: string; registryDir: string; socketPath: string },
 	extraEnv: NodeJS.ProcessEnv,
+	useDefaultRegistry = false,
 ): FixtureHandle {
+	const environment: NodeJS.ProcessEnv = {
+		...process.env,
+		...extraEnv,
+		[ENV_AGENT_DIR]: paths.agentDir,
+		PI_OFFLINE: "1",
+		TSX_TSCONFIG_PATH: tsconfigPath,
+	};
+	if (useDefaultRegistry) {
+		delete environment[supervisorRegistryDirEnv];
+	} else {
+		environment[supervisorRegistryDirEnv] = paths.registryDir;
+	}
 	const child = spawn(
 		process.execPath,
 		[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", paths.socketPath, "--offline"],
 		{
 			cwd: paths.agentDir,
-			env: {
-				...process.env,
-				...extraEnv,
-				[supervisorRegistryDirEnv]: paths.registryDir,
-				[ENV_AGENT_DIR]: paths.agentDir,
-				PI_OFFLINE: "1",
-				TSX_TSCONFIG_PATH: tsconfigPath,
-			},
+			env: environment,
 			stdio: ["ignore", "pipe", "pipe"],
 		},
 	);
@@ -562,6 +575,75 @@ async function stopSupervisor(handle: FixtureHandle, socketPath: string): Promis
 }
 
 describe("ENG-4600 daemon supervisor ownership", () => {
+	it("keeps Windows default ownership outside disposable OS temp storage", async () => {
+		if (process.platform !== "win32") {
+			return;
+		}
+		const paths = await createPaths();
+		const osTempRoot = join(paths.agentDir, "os-temp");
+		const localAppData = join(paths.agentDir, "local-app-data");
+		mkdirSync(osTempRoot, { recursive: true });
+		const generation = "durable-default-owner";
+		const owner = spawnFixture("owner", paths, {
+			extraEnv: {
+				LOCALAPPDATA: localAppData,
+				TEMP: osTempRoot,
+				TMP: osTempRoot,
+				TMPDIR: osTempRoot,
+			},
+			generation,
+			useDefaultRegistry: true,
+		});
+		await waitForType(owner, "booted");
+		send(owner, "go");
+		await waitForType(owner, "ready");
+
+		const durableOwnerPath = join(localAppData, APP_NAME, "daemon-supervisor-owners", `${generation}.owner`);
+		expect(existsSync(durableOwnerPath)).toBe(true);
+		rmSync(osTempRoot, { recursive: true, force: true });
+		send(owner, "probe");
+		expect(
+			await waitForMessage(owner, (message) => message.type === "probe_ack" || message.type === "failed"),
+		).toMatchObject({ type: "probe_ack" });
+		await releaseOwnershipHolder(owner);
+	});
+
+	it("keeps a live Windows supervisor commandable after its OS temp root is deleted", async () => {
+		if (process.platform !== "win32") {
+			return;
+		}
+		const paths = await createPaths();
+		const osTempRoot = join(paths.agentDir, "os-temp-live-supervisor");
+		const localAppData = join(paths.agentDir, "local-app-data-live-supervisor");
+		mkdirSync(osTempRoot, { recursive: true });
+		const durableRegistryDir = join(localAppData, APP_NAME, "daemon-supervisor-owners");
+		cleanupRegistryDirs.add(durableRegistryDir);
+		cleanupSupervisorSockets.add(paths.socketPath);
+		const supervisor = spawnRealSupervisor(
+			paths,
+			{
+				LOCALAPPDATA: localAppData,
+				TEMP: osTempRoot,
+				TMP: osTempRoot,
+				TMPDIR: osTempRoot,
+			},
+			true,
+		);
+		let client: DaemonClient | undefined;
+		try {
+			client = await connectEventually(paths.socketPath);
+			expect(listOwnerRecords(durableRegistryDir)).toHaveLength(1);
+			rmSync(osTempRoot, { recursive: true, force: true });
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+			const listed = await client.request({ type: "list" });
+			expect(listed.success).toBe(true);
+			await client.request({ type: "shutdown", force: true }, 5000);
+			await waitForExit(supervisor);
+		} finally {
+			client?.close();
+		}
+	});
+
 	it("elects one listener while 16 contenders atomically reclaim a stale owner", async () => {
 		const paths = await createPaths();
 		const stale = spawnFixture("owner", paths, { generation: "stale-owner" });
@@ -788,6 +870,46 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		await assertConnectable(paths.socketPath);
 		await stopSupervisor(replacement, paths.socketPath);
 	}, 30_000);
+
+	it("migrates a Windows update fence from the legacy Temp registry to durable storage", async () => {
+		if (process.platform !== "win32") {
+			return;
+		}
+		const paths = await createPaths();
+		const legacyRegistryDir = join(paths.agentDir, "legacy-temp-registry");
+		const durableRegistryDir = join(paths.agentDir, "durable-registry");
+		const legacyPaths = { ...paths, registryDir: legacyRegistryDir };
+		const predecessor = spawnFixture("owner", legacyPaths, { generation: "legacy-temp-predecessor" });
+		await waitForType(predecessor, "booted");
+		send(predecessor, "go");
+		const predecessorReady = await waitForType(predecessor, "ready");
+		const owner = predecessorReady.owner;
+		if (!owner?.processStartId) {
+			throw new Error("Legacy predecessor did not publish a process start identity");
+		}
+		expect(await listDaemonSupervisorProcesses(durableRegistryDir, legacyRegistryDir)).toContainEqual({
+			pid: owner.pid,
+			processStartId: owner.processStartId,
+			socketPath: owner.socketPath,
+		});
+		await persistDaemonStartupFenceFromOwner(
+			paths.socketPath,
+			{
+				supervisorGeneration: owner.generation,
+				supervisorOwnerToken: owner.token,
+				supervisorPid: owner.pid,
+				supervisorProcessStartId: owner.processStartId,
+				supervisorSocketPath: owner.socketPath,
+			},
+			durableRegistryDir,
+			legacyRegistryDir,
+		);
+		expect(readdirSync(join(durableRegistryDir, "startup-fences"))).toHaveLength(1);
+		await expect(waitForDaemonStartupFence(paths.socketPath, 50, durableRegistryDir)).rejects.toThrow(/Timed out/);
+		await releaseOwnershipHolder(predecessor);
+		await waitForDaemonStartupFence(paths.socketPath, 5000, durableRegistryDir);
+		expect(readdirSync(join(durableRegistryDir, "startup-fences"))).toEqual([]);
+	});
 
 	it("rejects malformed or mismatched fixed-owner fences and preserves timed-out fences", async () => {
 		const missingPaths = await createPaths();
@@ -1150,17 +1272,19 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 
 	it("unwinds real pre-bind and post-bind startup failures before retry", async () => {
 		const paths = await createPaths();
-		writeFileSync(paths.socketPath, "not a socket");
-		const preBindFailure = spawnFixture("supervisor", paths);
-		await waitForType(preBindFailure, "booted");
-		send(preBindFailure, "go");
-		expect(await waitForType(preBindFailure, "failed")).toMatchObject({
-			error: expect.stringContaining("is not a socket"),
-		});
-		await waitForExit(preBindFailure);
-		expect(listOwnerRecords(paths.registryDir)).toEqual([]);
-		expect(existsSync(`${paths.socketPath}.lock`)).toBe(false);
-		rmSync(paths.socketPath, { force: true });
+		if (process.platform !== "win32") {
+			writeFileSync(paths.socketPath, "not a socket");
+			const preBindFailure = spawnFixture("supervisor", paths);
+			await waitForType(preBindFailure, "booted");
+			send(preBindFailure, "go");
+			expect(await waitForType(preBindFailure, "failed")).toMatchObject({
+				error: expect.stringContaining("is not a socket"),
+			});
+			await waitForExit(preBindFailure);
+			expect(listOwnerRecords(paths.registryDir)).toEqual([]);
+			expect(existsSync(`${paths.socketPath}.lock`)).toBe(false);
+			rmSync(paths.socketPath, { force: true });
+		}
 
 		writeFileSync(getCronJobsPath(paths.agentDir), "{ malformed\n");
 		const postBindFailure = spawnFixture("supervisor", paths);

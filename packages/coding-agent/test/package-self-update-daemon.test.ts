@@ -904,7 +904,9 @@ describe("self-update daemon restart", () => {
 			expect(releaseAdmissionIndex).toBeGreaterThan(startupFenceIndex);
 			expect(ensureIndex).toBeGreaterThan(releaseAdmissionIndex);
 			expect(ensureIndex).toBeGreaterThan(shutdownIndex);
-			expect(statSync(join(agentDir, "update-restarts", "test-status.json")).mode & 0o777).toBe(0o600);
+			expect(statSync(join(agentDir, "update-restarts", "test-status.json")).mode & 0o777).toBe(
+				process.platform === "win32" ? 0o666 : 0o600,
+			);
 		} finally {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();

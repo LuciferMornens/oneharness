@@ -34,15 +34,25 @@ function waitForControl(type: ControlMessage["type"]): Promise<void> {
 }
 
 async function runOwnershipHolder(): Promise<never> {
+	const registryDir = process.env.ENG_4600_REGISTRY_DIR;
 	const ownership = await acquireDaemonSupervisorOwnership({
 		socketPath: requiredEnvironment("ENG_4600_SOCKET_PATH"),
 		descriptorDir: requiredEnvironment("ENG_4600_DESCRIPTOR_DIR"),
 		agentDir: requiredEnvironment("ENG_4600_AGENT_DIR"),
 		generation: requiredEnvironment("ENG_4600_GENERATION"),
 		appVersion: "test",
-		registryDir: requiredEnvironment("ENG_4600_REGISTRY_DIR"),
+		...(registryDir ? { registryDir } : {}),
 	});
 	send({ type: "ready", owner: ownership.record });
+	if (process.env.ENG_4600_PROBE_BEFORE_RELEASE === "1") {
+		await waitForControl("probe");
+		try {
+			await ownership.assertCurrent();
+			send({ type: "probe_ack" });
+		} catch (error) {
+			send({ type: "failed", error: error instanceof Error ? error.message : String(error) });
+		}
+	}
 	await waitForControl("release");
 	await ownership.release();
 	send({ type: "owner_released" });

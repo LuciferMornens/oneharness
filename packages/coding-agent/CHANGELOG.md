@@ -5,6 +5,7 @@
 - Made reasoning-effort controls model-aware so the UI only shows supported levels and keeps the effective clamped choice when switching models.
 - Added first-class native Windows installation, PowerShell-aware command and IPython execution, Windows virtual-environment bootstrap, and per-configuration named-pipe daemon lifecycle handling.
 - Fixed the global Windows command being blocked when PowerShell script execution is disabled.
+- Fixed long-running Windows agents losing daemon ownership when OS temporary files are cleaned.
 - Hid background Windows subprocess consoles, made IPython and the session catalog lazy, and stopped the catalog after 30 seconds idle to reduce startup churn and memory without removing on-demand capabilities.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 

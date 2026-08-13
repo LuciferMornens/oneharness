@@ -98,6 +98,7 @@ import {
 } from "./daemon-socket.js";
 import {
 	acquireDaemonSupervisorOwnership,
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
 	isDaemonShutdownAdmissionActive,
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
@@ -2168,12 +2169,17 @@ export class DaemonSupervisor {
 			existing?.descriptor.orphanProcessJournalPath ?? join(this.descriptorDir, `${workerId}.orphans.jsonl`);
 		const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", socketPath]);
 		await this.assertRecoveryAllowed();
+		const supervisorRegistryDir = this.ownership?.registryDir;
+		if (!supervisorRegistryDir) {
+			throw new Error("Daemon supervisor ownership registry is unavailable");
+		}
 		const child: ChildProcess = spawn(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
 			env: createCliSubprocessEnv({
 				...process.env,
 				...launchEnv,
+				[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]: supervisorRegistryDir,
 				[DAEMON_WORKER_ROLE_ENV]: "1",
 				[DAEMON_WORKER_TOKEN_ENV]: token,
 				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
