@@ -2379,9 +2379,123 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 	syncLegacyThinkingLevelMap(model);
 }
 
+const GROK_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
+
+/**
+ * xAI Grok subscription models served through the Grok CLI chat proxy.
+ * These mirror the xAI API catalog but are billed against a SuperGrok /
+ * X Premium+ subscription via OAuth instead of api.x.ai credits.
+ */
+function getGrokSubscriptionModels(): Model<"grok-responses">[] {
+	const models: Model<"grok-responses">[] = [
+		{
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grok-responses",
+			provider: "grok",
+			baseUrl: GROK_CLI_PROXY_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: {
+				control: "effort",
+				levels: { off: null, high: "high", minimal: null, low: "low", medium: "medium", xhigh: "xhigh", max: null },
+			},
+			input: ["text", "image"],
+			cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+			contextWindow: 500000,
+			maxTokens: 500000,
+		},
+		{
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			api: "grok-responses",
+			provider: "grok",
+			baseUrl: GROK_CLI_PROXY_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: {
+				control: "effort",
+				levels: { off: null, high: "high", minimal: null, low: "low", medium: "medium", xhigh: null, max: null },
+			},
+			input: ["text", "image"],
+			cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
+			contextWindow: 500000,
+			maxTokens: 500000,
+		},
+		{
+			id: "grok-4.3",
+			name: "Grok 4.3",
+			api: "grok-responses",
+			provider: "grok",
+			baseUrl: GROK_CLI_PROXY_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "fixed", levels: { off: null, high: "always" } },
+			input: ["text", "image"],
+			cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 30000,
+		},
+		{
+			id: "grok-4.20-0309-reasoning",
+			name: "Grok 4.20 (Reasoning)",
+			api: "grok-responses",
+			provider: "grok",
+			baseUrl: GROK_CLI_PROXY_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "fixed", levels: { off: null, high: "always" } },
+			input: ["text", "image"],
+			cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 30000,
+		},
+		{
+			id: "grok-4.20-0309-non-reasoning",
+			name: "Grok 4.20 (Non-Reasoning)",
+			api: "grok-responses",
+			provider: "grok",
+			baseUrl: GROK_CLI_PROXY_BASE_URL,
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 30000,
+		},
+		{
+			id: "grok-build-0.1",
+			name: "Grok Build 0.1",
+			api: "grok-responses",
+			provider: "grok",
+			baseUrl: GROK_CLI_PROXY_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "fixed", levels: { off: null, high: "always" } },
+			input: ["text", "image"],
+			cost: { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 256000,
+			maxTokens: 256000,
+		},
+		{
+			id: "grok-code-fast-1",
+			name: "Grok Code Fast 1",
+			api: "grok-responses",
+			provider: "grok",
+			baseUrl: GROK_CLI_PROXY_BASE_URL,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0.2, output: 1.5, cacheRead: 0.02, cacheWrite: 0 },
+			contextWindow: 32768,
+			maxTokens: 8192,
+		},
+	];
+	return models;
+}
+
 async function generateModels() {
 	if (process.argv.includes("--preserve-catalog")) {
-		writeGeneratedModels(getExistingCatalogModels(), true);
+		const preservedModels = getExistingCatalogModels();
+		for (const model of getGrokSubscriptionModels()) {
+			if (!preservedModels.some((m) => m.provider === model.provider && m.id === model.id)) {
+				preservedModels.push(model);
+			}
+		}
+		writeGeneratedModels(preservedModels, true);
 		return;
 	}
 
@@ -2923,6 +3037,9 @@ async function generateModels() {
 		},
 	];
 	allModels.push(...codexModels);
+
+	// xAI Grok subscription models (OAuth via the Grok CLI proxy)
+	allModels.push(...getGrokSubscriptionModels());
 
 	// Add missing Grok models
 	if (!allModels.some(m => m.provider === "xai" && m.id === "grok-code-fast-1")) {

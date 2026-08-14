@@ -84,6 +84,8 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	},
 	// xAI
 	{ provider: "xai", model: "grok-code-fast-1", label: "xai-grok-code-fast-1" },
+	// xAI Grok subscription (OAuth)
+	{ provider: "grok", model: "grok-4.6", label: "grok-subscription-grok-4.6" },
 	// Cerebras
 	{ provider: "cerebras", model: "zai-glm-4.7", label: "cerebras-zai-glm-4.7" },
 	// Cloudflare Workers AI

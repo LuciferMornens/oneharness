@@ -26,6 +26,10 @@
 			"types": "./dist/providers/google-vertex.d.ts",
 			"import": "./dist/providers/google-vertex.js"
 		},
+		"./grok-responses": {
+			"types": "./dist/providers/grok-responses.d.ts",
+			"import": "./dist/providers/grok-responses.js"
+		},
 		"./mistral": {
 			"types": "./dist/providers/mistral.d.ts",
 			"import": "./dist/providers/mistral.js"

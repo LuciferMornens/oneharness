@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added xAI Grok subscription login via `/login`, letting SuperGrok and X Premium+ subscribers use Grok models under the new `grok` provider without an xAI API key.
 - Changed reasoning controls to be model-aware across the UI and provider payloads, with authoritative Anthropic/Bedrock effort routes, synchronous control-discriminator validation, strict native off-budget and fixed-contract validation, exact custom-provider contracts, native Moonshot controls, and string-only legacy thinking maps.
 - Added first-class native Windows installation, PowerShell-aware command and IPython execution, Windows virtual-environment bootstrap, and per-configuration named-pipe daemon lifecycle handling.
 - Fixed the global Windows command being blocked when PowerShell script execution is disabled.

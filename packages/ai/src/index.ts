@@ -12,6 +12,7 @@ export * from "./providers/faux.js";
 export type { GoogleOptions } from "./providers/google.js";
 export type { GoogleThinkingLevel } from "./providers/google-shared.js";
 export type { GoogleVertexOptions } from "./providers/google-vertex.js";
+export type { GrokResponsesOptions } from "./providers/grok-responses.js";
 export type { MistralOptions } from "./providers/mistral.js";
 export type {
 	OpenAICodexResponsesOptions,
