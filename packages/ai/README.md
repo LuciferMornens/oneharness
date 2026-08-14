@@ -80,6 +80,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Vercel AI Gateway**
 - **MiniMax**
 - **GitHub Copilot** (requires OAuth, see below)
+- **xAI Grok** (SuperGrok / X Premium+ subscription, requires OAuth, see below)
 - **Amazon Bedrock**
 - **OpenCode Zen**
 - **OpenCode Go**
@@ -1145,6 +1146,7 @@ Several providers require OAuth authentication instead of static API keys:
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
+- **xAI Grok** (SuperGrok / X Premium+ subscription, `grok` provider; device-code login against accounts.x.ai, inference through xAI's Grok CLI proxy)
 
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
 
@@ -1211,6 +1213,7 @@ import {
   loginAnthropic,
   loginOpenAICodex,
   loginGitHubCopilot,
+  loginGrok,
   loginGeminiCli,
 
   // Token management

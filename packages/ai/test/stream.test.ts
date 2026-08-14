@@ -27,8 +27,9 @@ const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
 	resolveApiKey("openai-codex"),
+	resolveApiKey("grok"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken, grokToken] = oauthTokens;
 const primeInferenceApiKey = getEnvApiKey("prime-inference");
 
 // Calculator tool definition (same as examples)
@@ -1347,6 +1348,30 @@ describe("Generate E2E Tests", () => {
 
 		it.skipIf(!openaiCodexToken)("should handle image input", { retry: 3 }, async () => {
 			await handleImage(llm, wsOptions);
+		});
+	});
+
+	describe("xAI Grok Provider (grok-4.6)", () => {
+		const llm = getModel("grok", "grok-4.6");
+
+		it.skipIf(!grokToken)("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm, { apiKey: grokToken });
+		});
+
+		it.skipIf(!grokToken)("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm, { apiKey: grokToken });
+		});
+
+		it.skipIf(!grokToken)("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm, { apiKey: grokToken });
+		});
+
+		it.skipIf(!grokToken)("should handle thinking", { retry: 3 }, async () => {
+			await handleThinking(llm, { apiKey: grokToken, reasoningEffort: "high" });
+		});
+
+		it.skipIf(!grokToken)("should handle image input", { retry: 3 }, async () => {
+			await handleImage(llm, { apiKey: grokToken });
 		});
 	});
 

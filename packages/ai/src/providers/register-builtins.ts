@@ -15,6 +15,7 @@ import type { AnthropicOptions } from "./anthropic.js";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.js";
 import type { GoogleOptions } from "./google.js";
 import type { GoogleVertexOptions } from "./google-vertex.js";
+import type { GrokResponsesOptions } from "./grok-responses.js";
 import type { MistralOptions } from "./mistral.js";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.js";
 import type { OpenAICompletionsOptions } from "./openai-completions.js";
@@ -51,6 +52,11 @@ interface GoogleProviderModule {
 interface GoogleVertexProviderModule {
 	streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOptions>;
 	streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStreamOptions>;
+}
+
+interface GrokResponsesProviderModule {
+	streamGrokResponses: StreamFunction<"grok-responses", GrokResponsesOptions>;
+	streamSimpleGrokResponses: StreamFunction<"grok-responses", SimpleStreamOptions>;
 }
 
 interface MistralProviderModule {
@@ -99,6 +105,9 @@ let googleProviderModulePromise:
 	| undefined;
 let googleVertexProviderModulePromise:
 	| Promise<LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>>
+	| undefined;
+let grokResponsesProviderModulePromise:
+	| Promise<LazyProviderModule<"grok-responses", GrokResponsesOptions, SimpleStreamOptions>>
 	| undefined;
 let mistralProviderModulePromise:
 	| Promise<LazyProviderModule<"mistral-conversations", MistralOptions, SimpleStreamOptions>>
@@ -252,6 +261,19 @@ function loadGoogleVertexProviderModule(): Promise<
 	return googleVertexProviderModulePromise;
 }
 
+function loadGrokResponsesProviderModule(): Promise<
+	LazyProviderModule<"grok-responses", GrokResponsesOptions, SimpleStreamOptions>
+> {
+	grokResponsesProviderModulePromise ||= import("./grok-responses.js").then((module) => {
+		const provider = module as GrokResponsesProviderModule;
+		return {
+			stream: provider.streamGrokResponses,
+			streamSimple: provider.streamSimpleGrokResponses,
+		};
+	});
+	return grokResponsesProviderModulePromise;
+}
+
 function loadMistralProviderModule(): Promise<
 	LazyProviderModule<"mistral-conversations", MistralOptions, SimpleStreamOptions>
 > {
@@ -328,6 +350,8 @@ export const streamGoogle = createLazyStream(loadGoogleProviderModule);
 export const streamSimpleGoogle = createLazySimpleStream(loadGoogleProviderModule);
 export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule);
 export const streamSimpleGoogleVertex = createLazySimpleStream(loadGoogleVertexProviderModule);
+export const streamGrokResponses = createLazyStream(loadGrokResponsesProviderModule);
+export const streamSimpleGrokResponses = createLazySimpleStream(loadGrokResponsesProviderModule);
 export const streamMistral = createLazyStream(loadMistralProviderModule);
 export const streamSimpleMistral = createLazySimpleStream(loadMistralProviderModule);
 export const streamOpenAICodexResponses = createLazyStream(loadOpenAICodexResponsesProviderModule);
@@ -374,6 +398,12 @@ export function registerBuiltInApiProviders(): void {
 		api: "openai-codex-responses",
 		stream: streamOpenAICodexResponses,
 		streamSimple: streamSimpleOpenAICodexResponses,
+	});
+
+	registerApiProvider({
+		api: "grok-responses",
+		stream: streamGrokResponses,
+		streamSimple: streamSimpleGrokResponses,
 	});
 
 	registerApiProvider({

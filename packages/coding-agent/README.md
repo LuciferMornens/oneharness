@@ -80,6 +80,7 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
+- xAI Grok (SuperGrok / Premium+)
 
 **API keys:**
 - Anthropic
