@@ -240,6 +240,67 @@ describe("xAI Grok OAuth device flow", () => {
 		await rejection;
 	});
 
+	it("aborts an in-flight token poll immediately", async () => {
+		vi.useFakeTimers();
+
+		let tokenSignal: AbortSignal | undefined;
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const url = getUrl(input);
+			if (url === DEVICE_CODE_URL) {
+				return deviceCodeResponse();
+			}
+			if (url === TOKEN_URL) {
+				tokenSignal = init?.signal ?? undefined;
+				return new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => {
+						reject(new DOMException("The operation was aborted", "AbortError"));
+					});
+				});
+			}
+			throw new Error(`Unexpected fetch URL: ${url}`);
+		});
+
+		vi.stubGlobal("fetch", fetchMock);
+
+		const controller = new AbortController();
+		const loginPromise = loginGrok({ onAuth: () => {}, signal: controller.signal });
+		const rejection = expect(loginPromise).rejects.toThrow(/cancelled/i);
+
+		// Enter the first token poll, then cancel while the request is in flight.
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(tokenSignal).toBeDefined();
+		expect(tokenSignal?.aborted).toBe(false);
+		controller.abort();
+		await rejection;
+		expect(tokenSignal?.aborted).toBe(true);
+	});
+
+	it("aborts an in-flight device authorization request immediately", async () => {
+		let deviceSignal: AbortSignal | undefined;
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const url = getUrl(input);
+			if (url === DEVICE_CODE_URL) {
+				deviceSignal = init?.signal ?? undefined;
+				return new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => {
+						reject(new DOMException("The operation was aborted", "AbortError"));
+					});
+				});
+			}
+			throw new Error(`Unexpected fetch URL: ${url}`);
+		});
+
+		vi.stubGlobal("fetch", fetchMock);
+
+		const controller = new AbortController();
+		const loginPromise = loginGrok({ onAuth: () => {}, signal: controller.signal });
+		const rejection = expect(loginPromise).rejects.toThrow(/cancelled/i);
+
+		controller.abort();
+		await rejection;
+		expect(deviceSignal?.aborted).toBe(true);
+	});
+
 	it("falls back to the plain verification URI when the prefilled one is unsafe", async () => {
 		vi.useFakeTimers();
 

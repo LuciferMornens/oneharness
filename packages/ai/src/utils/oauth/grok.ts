@@ -51,12 +51,20 @@ function formHeaders(): Record<string, string> {
 	};
 }
 
-async function postForm(url: string, form: Record<string, string>): Promise<Response> {
-	return fetch(url, {
-		method: "POST",
-		headers: formHeaders(),
-		body: new URLSearchParams(form).toString(),
-	});
+async function postForm(url: string, form: Record<string, string>, signal?: AbortSignal): Promise<Response> {
+	try {
+		return await fetch(url, {
+			method: "POST",
+			headers: formHeaders(),
+			body: new URLSearchParams(form).toString(),
+			signal,
+		});
+	} catch (error) {
+		if (signal?.aborted) {
+			throw new Error("Login cancelled");
+		}
+		throw error;
+	}
 }
 
 async function readJson(response: Response, label: string): Promise<Record<string, unknown>> {
@@ -83,11 +91,15 @@ function validateVerificationUri(value: unknown): string | undefined {
 	}
 }
 
-async function startDeviceFlow(): Promise<DeviceAuthorization> {
-	const response = await postForm(DEVICE_CODE_URL, {
-		client_id: CLIENT_ID,
-		scope: SCOPE,
-	});
+async function startDeviceFlow(signal?: AbortSignal): Promise<DeviceAuthorization> {
+	const response = await postForm(
+		DEVICE_CODE_URL,
+		{
+			client_id: CLIENT_ID,
+			scope: SCOPE,
+		},
+		signal,
+	);
 
 	if (!response.ok) {
 		throw new Error(`xAI device authorization request failed with status ${response.status}`);
@@ -177,11 +189,15 @@ async function pollForTokens(device: DeviceAuthorization, signal?: AbortSignal):
 
 		await abortableSleep(Math.min(intervalMs, deadline - Date.now()), signal);
 
-		const response = await postForm(TOKEN_URL, {
-			grant_type: DEVICE_GRANT_TYPE,
-			device_code: device.deviceCode,
-			client_id: CLIENT_ID,
-		});
+		const response = await postForm(
+			TOKEN_URL,
+			{
+				grant_type: DEVICE_GRANT_TYPE,
+				device_code: device.deviceCode,
+				client_id: CLIENT_ID,
+			},
+			signal,
+		);
 
 		if (response.ok) {
 			const data = (await readJson(response, "xAI device token response")) as TokenResponse;
@@ -232,7 +248,7 @@ export async function loginGrok(options: {
 	onProgress?: (message: string) => void;
 	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
-	const device = await startDeviceFlow();
+	const device = await startDeviceFlow(options.signal);
 	options.onAuth(device.verificationUriComplete ?? device.verificationUri, `Enter code: ${device.userCode}`);
 	options.onProgress?.("Waiting for approval in the browser...");
 	return pollForTokens(device, options.signal);
