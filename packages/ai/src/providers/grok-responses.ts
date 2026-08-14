@@ -18,6 +18,7 @@ import {
 	resolveSimpleThinkingLevel,
 	resolveThinkingLevel,
 	resolveThinkingOffValue,
+	supportsFastMode,
 } from "../models.js";
 import type {
 	Api,
@@ -186,7 +187,10 @@ export const streamSimpleGrokResponses: StreamFunction<"grok-responses", SimpleS
 	if (getReasoningCapabilities(model)?.control === "fixed") {
 		return streamGrokResponses(model, context, base satisfies GrokResponsesOptions);
 	}
-	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
+	// Grok fast mode is not a service tier on the proxy: it is low reasoning
+	// effort on the same model id, so map the "priority" tier to "low".
+	const fastMode = options?.serviceTier === "priority" && supportsFastMode(model);
+	const resolvedReasoning = resolveSimpleThinkingLevel(model, fastMode ? "low" : options?.reasoning);
 
 	return streamGrokResponses(model, context, {
 		...base,

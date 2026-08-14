@@ -42,6 +42,7 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 - Device-code login: open the printed accounts.x.ai URL, enter the shown code, and approve access
 - Requests go through xAI's Grok CLI proxy and are billed against the subscription, not api.x.ai credits
 - Models appear under the `grok` provider (for example `grok/grok-4.6`); credentials are stored under the `grok` key in `auth.json`
+- `/fast` toggles fast mode on Grok 4.5/4.6: there is no separate fast model id, it runs the same model at `low` reasoning effort
 - For pay-per-token API-key access instead, use the `xai` provider with `XAI_API_KEY`
 
 ## API Keys

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
+import { getModel, supportsFastMode } from "../src/models.js";
 import {
 	buildGrokProxyHeaders,
 	GROK_CLI_BASE_URL,
@@ -180,6 +180,54 @@ describe("grok-responses provider", () => {
 		}).result();
 
 		expect(capturedBody?.reasoning).toMatchObject({ effort: "medium" });
+	});
+
+	it("maps the priority service tier to grok fast mode (low effort, no service_tier)", async () => {
+		const model = getModel("grok", "grok-4.6");
+		let capturedBody: Record<string, unknown> | undefined;
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return sseResponse();
+		});
+
+		await streamSimpleGrokResponses(model, buildContext(), {
+			apiKey: "grok-oauth-token",
+			reasoning: "high",
+			serviceTier: "priority",
+		}).result();
+
+		expect(capturedBody?.reasoning).toMatchObject({ effort: "low" });
+		expect(capturedBody?.service_tier).toBeUndefined();
+	});
+
+	it("ignores non-priority service tiers for reasoning effort", async () => {
+		const model = getModel("grok", "grok-4.6");
+		let capturedBody: Record<string, unknown> | undefined;
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return sseResponse();
+		});
+
+		await streamSimpleGrokResponses(model, buildContext(), {
+			apiKey: "grok-oauth-token",
+			reasoning: "high",
+			serviceTier: "default",
+		}).result();
+
+		expect(capturedBody?.reasoning).toMatchObject({ effort: "high" });
+		expect(capturedBody?.service_tier).toBeUndefined();
+	});
+
+	it("advertises fast mode only for effort-controlled grok models with a low level", () => {
+		expect(supportsFastMode(getModel("grok", "grok-4.6"))).toBe(true);
+		expect(supportsFastMode(getModel("grok", "grok-4.5"))).toBe(true);
+		expect(supportsFastMode(getModel("grok", "grok-4.3"))).toBe(false);
+		expect(supportsFastMode(getModel("grok", "grok-4.20-0309-reasoning"))).toBe(false);
+		expect(supportsFastMode(getModel("grok", "grok-4.20-0309-non-reasoning"))).toBe(false);
+		expect(supportsFastMode(getModel("grok", "grok-code-fast-1"))).toBe(false);
+		expect(supportsFastMode(getModel("xai", "grok-4.6"))).toBe(false);
 	});
 
 	it("fails without credentials instead of sending a request", async () => {

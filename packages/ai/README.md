@@ -1146,7 +1146,7 @@ Several providers require OAuth authentication instead of static API keys:
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
-- **xAI Grok** (SuperGrok / X Premium+ subscription, `grok` provider; device-code login against accounts.x.ai, inference through xAI's Grok CLI proxy)
+- **xAI Grok** (SuperGrok / X Premium+ subscription, `grok` provider; device-code login against accounts.x.ai, inference through xAI's Grok CLI proxy; the `priority` service tier maps to fast mode, which is `low` reasoning effort on the same model id)
 
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
 

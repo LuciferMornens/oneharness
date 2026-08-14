@@ -54,6 +54,11 @@ export function getModels<TProvider extends KnownProvider>(
 }
 
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
+	if (model.provider === "grok" && model.api === "grok-responses") {
+		// Grok fast mode is low reasoning effort on the same model id, not a separate model.
+		const capabilities = getReasoningCapabilities(model);
+		return capabilities?.control === "effort" && capabilities.levels.low != null;
+	}
 	return (
 		model.provider === "openai-codex" &&
 		model.api === "openai-codex-responses" &&

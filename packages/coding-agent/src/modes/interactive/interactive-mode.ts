@@ -7922,7 +7922,8 @@ export class InteractiveMode {
 	}
 
 	private handleFastCommand(): void {
-		const unavailableMessage = "Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT authentication";
+		const unavailableMessage =
+			"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT authentication, or Grok 4.5/4.6 with an xAI Grok subscription";
 		if (!this.currentModelSupportsFastMode()) {
 			this.showStatus(unavailableMessage);
 			return;
