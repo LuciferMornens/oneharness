@@ -23,7 +23,7 @@ describe("KernelManager startup", () => {
 		}
 	});
 
-	it("surfaces kernels that exit before resolving ports", async () => {
+	it.skipIf(process.platform === "win32")("surfaces kernels that exit before resolving ports", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "fake kernel died before binding" >&2', "exit 42", ""].join("\n"));
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

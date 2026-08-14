@@ -192,7 +192,8 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `name` | No | `id` | Human-readable model label. Used for matching (`--model` patterns) and shown in model details/status text. |
 | `api` | No | provider's `api` | Override provider's API for this model |
 | `reasoning` | No | `false` | Supports extended thinking |
-| `thinkingLevelMap` | No | omitted | Maps Prime Agent thinking levels to provider values and marks unsupported levels (see below) |
+| `reasoningCapabilities` | No | omitted | Exact reasoning control type, selectable levels, and provider mappings (see below) |
+| `thinkingLevelMap` | No | omitted | Deprecated compatibility map for legacy custom models (see below) |
 | `input` | No | `["text"]` | Input types: `["text"]` or `["text", "image"]` |
 | `contextWindow` | No | `128000` | Context window size in tokens |
 | `maxTokens` | No | `16384` | Maximum output tokens |
@@ -203,30 +204,35 @@ Current behavior:
 - `/model` and `prime-agent model list` list entries by model `id`.
 - The configured `name` is used for model matching and detail/status text.
 
-### Thinking Level Map
+### Reasoning Capabilities
 
-Use `thinkingLevelMap` on a model to describe model-specific thinking controls. Keys are Prime Agent thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+Use `reasoningCapabilities` on a model to describe exact model-specific thinking controls. `control` is `fixed`, `toggle`, `effort`, or `budget`. Keys in `levels` are Prime Agent thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
-Values are tristate:
+Level entries are:
 
 | Value | Meaning |
 |-------|---------|
-| omitted | Level is supported and uses the provider's default mapping |
-| string | Level is supported and this value is sent to the provider |
+| string | Level is supported. For `effort`, this must be a non-empty native serialized value; for `toggle`, it is a support/mapping marker. |
+| number | Level is supported. For `budget`, this must be a finite native integer token count; for `toggle`, it is a support/mapping marker. |
 | `null` | Level is unsupported and hidden/skipped/clamped away |
+| omitted | Level is unsupported |
 
-Example for a model that only supports off, high, and max reasoning:
+For `control: "effort"`, every selectable level must map to a non-empty string. For `control: "budget"`, every selectable level must map to a finite integer accepted by the model API. Active OpenAI-compatible and OpenRouter budgets must be positive; active Anthropic and Bedrock Claude manual budgets must be at least 1,024. A numeric `off` mapping must use the route's real disable value, normally `0`; positive budgets and Google's `-1` dynamic-thinking sentinel are invalid at `off`. Anthropic/Bedrock structural disable support uses `supportsOff: true` instead of a fake zero budget. Google accepts documented `0` disable and `-1` dynamic sentinels on applicable budget-based Gemini families, but `-1` is only valid on active levels. On `openai-completions`, numeric budgets use top-level `reasoning_budget` with `thinkingFormat: "openai"`, or `reasoning: { max_tokens }` with `thinkingFormat: "openrouter"`; structural formats reject numeric budget contracts. The `openai-responses`, `azure-openai-responses`, `openai-codex-responses`, and `mistral-conversations` APIs have string-only effort fields and reject numeric budget contracts. For `control: "toggle"`, structural `thinkingFormat` adapters (`zai`, `moonshot`, `qwen`, `qwen-chat-template`, and toggle-only `deepseek`) use the values only to resolve exact support/mapping and emit the format's documented enabled/disabled object or boolean. They do not copy the marker string to the wire.
+
+Example for a token-budget model:
 
 ```json
 {
-  "id": "deepseek-v4-pro",
+  "id": "budget-reasoning-model",
   "reasoning": true,
-  "thinkingLevelMap": {
-    "minimal": null,
-    "low": null,
-    "medium": null,
-    "high": "high",
-    "xhigh": "max"
+  "reasoningCapabilities": {
+    "control": "budget",
+    "levels": {
+      "minimal": 512,
+      "low": 1024,
+      "medium": 4096,
+      "high": 8192
+    }
   }
 }
 ```
@@ -237,13 +243,38 @@ Example for a model where thinking cannot be disabled:
 {
   "id": "always-thinking-model",
   "reasoning": true,
-  "thinkingLevelMap": {
-    "off": null
+  "reasoningCapabilities": {
+    "control": "fixed",
+    "levels": {
+      "high": "always"
+    }
   }
 }
 ```
 
-Migration: older configs that used `compat.reasoningEffortMap` should move that mapping to model-level `thinkingLevelMap`. Use `null` for levels that should not appear in the UI.
+Fixed controls are intrinsic, expose exactly one selectable level, and their internal values are not sent to providers. Legacy `thinkingLevelMap` overlays cannot add choices to a fixed route; set an explicit non-fixed `reasoningCapabilities` contract when the underlying route really supports selection. Omitting a request's reasoning selection preserves the provider default.
+
+Example for a Qwen structural toggle. The marker strings describe the two selectable mappings; the adapter sends `enable_thinking: false` or `enable_thinking: true`, not the strings:
+
+```json
+{
+  "id": "qwen-toggle-model",
+  "reasoning": true,
+  "reasoningCapabilities": {
+    "control": "toggle",
+    "levels": {
+      "off": "disabled",
+      "high": "enabled"
+    }
+  },
+  "compat": {
+    "supportsReasoningEffort": false,
+    "thinkingFormat": "qwen"
+  }
+}
+```
+
+Migration: new configs should use `reasoningCapabilities`. `thinkingLevelMap` remains compatible with older custom models as a `string | null` map; numeric budgets must be declared under `reasoningCapabilities` with `control: "budget"`. Legacy models without either field retain `off`, `minimal`, `low`, `medium`, and `high`. For `modelOverrides`, `thinkingLevelMap` overlays the generated contract, then the effective contract is revalidated against its API and `thinkingFormat`; an explicitly supplied `reasoningCapabilities` object is authoritative. A partial legacy map must be expanded rather than copied directly: on a legacy OpenAI-compatible effort route, `{ high: "high" }` inherits `off: "off"`, `minimal: "minimal"`, `low: "low"`, and `medium: "medium"`, so include those values in exact `levels` and set `xhigh`/`max` to `null`; use explicit `null` for any inherited level that should instead be unsupported.
 
 ## Overriding Built-in Providers
 
@@ -305,7 +336,7 @@ Use `modelOverrides` to customize specific built-in models without replacing the
 }
 ```
 
-`modelOverrides` supports these fields per model: `name`, `reasoning`, `input`, `cost` (partial), `contextWindow`, `maxTokens`, `headers`, `compat`.
+`modelOverrides` supports these fields per model: `name`, `reasoning`, `reasoningCapabilities`, `thinkingLevelMap`, `input`, `cost` (partial), `contextWindow`, `maxTokens`, `headers`, `compat`.
 
 Behavior notes:
 - `modelOverrides` are applied to built-in provider models.
@@ -381,14 +412,14 @@ For providers with partial OpenAI compatibility, use the `compat` field.
 | `requiresAssistantAfterToolResult` | Insert an assistant message before a user message after tool results |
 | `requiresThinkingAsText` | Convert thinking blocks to plain text |
 | `requiresReasoningContentOnAssistantMessages` | Include empty `reasoning_content` on all replayed assistant messages when reasoning is enabled |
-| `thinkingFormat` | Use `reasoning_effort`, `deepseek`, `zai`, `qwen`, or `qwen-chat-template` thinking parameters |
+| `thinkingFormat` | Use `openai`, `openrouter`, `deepseek`, `zai`, `moonshot`, `qwen`, or `qwen-chat-template` thinking parameters |
 | `cacheControlFormat` | Use Anthropic-style `cache_control` markers on the system prompt, last tool definition, and last user/assistant text content. Currently only `anthropic` is supported. |
 | `supportsStrictMode` | Include the `strict` field in tool definitions |
 | `supportsLongCacheRetention` | Whether the provider accepts long cache retention when cache retention is `long`: `prompt_cache_retention: "24h"` for OpenAI prompt caching, or `cache_control.ttl: "1h"` when `cacheControlFormat` is `anthropic`. Default: `true`. |
 | `openRouterRouting` | OpenRouter provider routing preferences. This object is sent as-is in the `provider` field of the [OpenRouter API request](https://openrouter.ai/docs/guides/routing/provider-selection). |
 | `vercelGatewayRouting` | Vercel AI Gateway routing config for provider selection (`only`, `order`) |
 
-`qwen` uses top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that require `chat_template_kwargs.enable_thinking`.
+`openrouter` sends `reasoning: { effort }`. `zai` and `moonshot` send `thinking: { type: "enabled" | "disabled" }`. `qwen` uses top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that require `chat_template_kwargs.enable_thinking`.
 
 `cacheControlFormat: "anthropic"` is for OpenAI-compatible providers that expose Anthropic-style prompt caching through `cache_control` markers on text content and tool definitions.
 

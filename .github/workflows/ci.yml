@@ -84,6 +84,15 @@ jobs:
           $env:PATH = "${env:ProgramFiles}\Git\bin;$env:PATH"
           npm.cmd run check
 
+      - name: Verify Windows daemon identity, migration, and tree termination
+        shell: pwsh
+        working-directory: packages/coding-agent
+        run: |
+          npx.cmd tsx ../../node_modules/vitest/dist/cli.js --run test/suite/regressions/4600-supervisor-singleton.test.ts
+          npx.cmd tsx ../../node_modules/vitest/dist/cli.js --run test/child-process.test.ts
+          npx.cmd tsx ../../node_modules/vitest/dist/cli.js --run test/suite/regressions/4606-update-restart-coordinator.test.ts
+          npx.cmd tsx ../../node_modules/vitest/dist/cli.js --run test/ipython-provisioner.test.ts
+
       - name: Verify native source launcher
         shell: pwsh
         run: |
@@ -251,6 +260,27 @@ jobs:
             }
           }
 
+  macos-daemon-check:
+    name: macOS daemon registry check
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify macOS daemon temp registry security
+        working-directory: packages/coding-agent
+        run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/suite/regressions/4600-supervisor-singleton.test.ts
+
   test:
     name: Test (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -326,15 +356,17 @@ jobs:
   build-check-test:
     name: build-check-test
     if: always()
-    needs: [build-check, windows-check, test]
+    needs: [build-check, windows-check, macos-daemon-check, test]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           WINDOWS_CHECK_RESULT: ${{ needs.windows-check.result }}
+          MACOS_DAEMON_CHECK_RESULT: ${{ needs.macos-daemon-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$WINDOWS_CHECK_RESULT" = success
+          test "$MACOS_DAEMON_CHECK_RESULT" = success
           test "$TEST_RESULT" = success

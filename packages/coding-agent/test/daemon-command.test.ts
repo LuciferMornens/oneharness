@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { VERSION } from "../src/config.js";
+import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
 
 const daemonClientMock = vi.hoisted(() => {
 	type Listener = (message: { type: string; activeSessionId?: string; event?: { type: string } }) => void;
@@ -30,6 +32,8 @@ const daemonClientMock = vi.hoisted(() => {
 		promptSucceeds: false,
 		emitStaleAgentEndOnAttach: false,
 		connectFails: false,
+		connectFailuresRemaining: 0,
+		helloWaits: 0,
 		sessions: [] as Array<Record<string, unknown>>,
 	};
 
@@ -45,7 +49,31 @@ const daemonClientMock = vi.hoisted(() => {
 		}
 
 		async connect(): Promise<void> {
-			if (behavior.connectFails) throw new Error("mock connect failed");
+			if (behavior.connectFails) {
+				throw new Error("mock connect failed");
+			}
+			if (behavior.connectFailuresRemaining > 0) {
+				behavior.connectFailuresRemaining--;
+				throw new Error("mock connect failed");
+			}
+		}
+
+		async waitForHello(): Promise<Record<string, unknown>> {
+			behavior.helloWaits++;
+			return {
+				type: "daemon_hello",
+				socketPath: this.socketPath,
+				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				schemaId: DAEMON_SCHEMA_ID,
+				appVersion: VERSION,
+				supervisorGeneration: "test-generation",
+				supervisorOwnerToken: "test-owner",
+				supervisorPid: 99999,
+				supervisorProcessStartId: "test-start",
+				supervisorSocketPath: this.socketPath,
+				clientId: "test-client",
+				serverCapabilities: [],
+			};
 		}
 
 		async request(command: Command): Promise<Response> {
@@ -102,11 +130,11 @@ vi.mock("../src/modes/daemon/daemon-client.js", () => ({
 }));
 
 const spawnMock = vi.hoisted(() => {
-	const calls: string[][] = [];
+	const calls: Array<{ args: string[]; options: { env?: NodeJS.ProcessEnv } }> = [];
 	return {
 		calls,
 		mockSpawn: (...args: unknown[]) => {
-			calls.push(args[1] as string[]);
+			calls.push({ args: args[1] as string[], options: args[2] as { env?: NodeJS.ProcessEnv } });
 			return {
 				unref: () => {},
 				kill: () => {},
@@ -137,6 +165,8 @@ describe("daemon command", () => {
 		daemonClientMock.behavior.promptSucceeds = false;
 		daemonClientMock.behavior.emitStaleAgentEndOnAttach = false;
 		daemonClientMock.behavior.connectFails = false;
+		daemonClientMock.behavior.connectFailuresRemaining = 0;
+		daemonClientMock.behavior.helloWaits = 0;
 		daemonClientMock.behavior.sessions = [];
 		consoleErrorMessages = [];
 		vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null | undefined) => {
@@ -475,28 +505,55 @@ describe("daemon command", () => {
 	});
 
 	it("does not leak --goal/--goal-token-budget into daemon startup args", async () => {
-		// Force canConnectToDaemon to fail so runStart is exercised.
-		daemonClientMock.behavior.connectFails = true;
+		// The initial two-attempt probe is absent; the post-spawn probe receives
+		// and validates a public supervisor hello.
+		daemonClientMock.behavior.connectFailuresRemaining = 2;
 		spawnMock.calls.length = 0;
+		const inheritedInternalEnvironment = {
+			PRIME_AGENT_INTERNAL_DAEMON_CATALOG: "1",
+			PRIME_AGENT_INTERNAL_DAEMON_WORKER: "1",
+			PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN: "worker-token",
+			PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID: "active-1",
+			PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL: "worker-recovery",
+			PRIME_AGENT_INTERNAL_DAEMON_WORKER_STARTUP_GATE_FD: "3",
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET: "worker-socket",
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: "worker-registry",
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: "selected-registry",
+			PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL: "orphan-journal",
+			PRIME_AGENT_INTERNAL_SESSION_LEASES: "1",
+			PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID: "lease-owner",
+		} as const;
+		const previousValues = new Map(Object.keys(inheritedInternalEnvironment).map((key) => [key, process.env[key]]));
+		Object.assign(process.env, inheritedInternalEnvironment);
+		try {
+			await handleDaemonCommand([
+				"daemon",
+				"--socket",
+				"/tmp/prime-agent-goal-leak-test.sock",
+				"start",
+				"--goal",
+				"Leak test goal",
+				"--goal-token-budget",
+				"100",
+			]);
 
-		await handleDaemonCommand([
-			"daemon",
-			"--socket",
-			"/tmp/prime-agent-goal-leak-test.sock",
-			"start",
-			"--goal",
-			"Leak test goal",
-			"--goal-token-budget",
-			"100",
-		]);
-
-		expect(spawnMock.calls.length).toBe(1);
-		const spawnArgs = spawnMock.calls[0]!;
-		// The goal flags must NOT appear in the daemon startup args.
-		expect(spawnArgs).not.toContain("--goal");
-		expect(spawnArgs).not.toContain("Leak test goal");
-		expect(spawnArgs).not.toContain("--goal-token-budget");
-		expect(spawnArgs).not.toContain("100");
+			expect(spawnMock.calls.length).toBe(1);
+			const spawnCall = spawnMock.calls[0]!;
+			// Session-only flags and internal worker state must not reach the supervisor.
+			expect(spawnCall.args).not.toContain("--goal");
+			expect(spawnCall.args).not.toContain("Leak test goal");
+			expect(spawnCall.args).not.toContain("--goal-token-budget");
+			expect(spawnCall.args).not.toContain("100");
+			for (const key of Object.keys(inheritedInternalEnvironment)) {
+				expect(spawnCall.options.env?.[key]).toBeUndefined();
+			}
+			expect(daemonClientMock.behavior.helloWaits).toBe(1);
+		} finally {
+			for (const [key, value] of previousValues) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
 	});
 
 	it("does not leak goal into default config for a subsequent no-goal create", async () => {

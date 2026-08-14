@@ -2,12 +2,21 @@
 
 ## [Unreleased]
 
-- Made reasoning-effort controls model-aware so the UI only shows supported levels and keeps the effective clamped choice when switching models.
+- Changed reasoning controls to be model-aware across the UI and provider payloads, with authoritative Anthropic/Bedrock effort routes, synchronous control-discriminator validation, strict native off-budget and fixed-contract validation, exact custom-provider contracts, native Moonshot controls, and string-only legacy thinking maps.
 - Added first-class native Windows installation, PowerShell-aware command and IPython execution, Windows virtual-environment bootstrap, and per-configuration named-pipe daemon lifecycle handling.
 - Fixed the global Windows command being blocked when PowerShell script execution is disabled.
+- Fixed PowerShell-backed IPython shell cells reporting native-command and cmdlet failures as successful.
+- Fixed Windows IPython shell launching for executable paths containing spaces and systems without Windows PowerShell.
+- Fixed concurrent OAuth refreshes consuming the same rotating refresh token across processes with file storage, while legacy custom backends retain serialization through their existing async storage lock.
+- Fixed first-time auth file creation on Windows filesystems without hard-link support while retaining locked atomic writes.
 - Fixed long-running Windows agents losing daemon ownership when OS temporary files are cleaned.
+- Fixed Windows daemon upgrades losing resident workers, duplicate supervisors starting through directory aliases or reused PIDs, and lifecycle recovery aborting on conflicting migrations, missing orphan workers under stale owners, or targeting reused PIDs.
+- Fixed Windows forced daemon shutdown missing workers after ownership transitions or discarding records for partially terminated process trees.
+- Fixed forced daemon shutdown leaving detached Unix worker descendants running or allowing custom-registry supervisors to restart during convergence.
+- Fixed daemon recovery missing detached Unix child groups, update restarts losing custom-registry fencing, and detached starts inheriting worker role state.
 - Hid background Windows subprocess consoles, made IPython and the session catalog lazy, and stopped the catalog after 30 seconds idle to reduce startup churn and memory without removing on-demand capabilities.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
+- Fixed `--no-env` to unset every supported provider credential environment variable.
 
 ## [0.7.2] - 2026-08-11
 

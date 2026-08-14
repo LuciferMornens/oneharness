@@ -54,6 +54,7 @@ prime-agent
 | Prime Inference | `PRIME_API_KEY` | `prime-inference` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | Google Gemini | `GEMINI_API_KEY` | `google` |
+| Google Vertex AI | `GOOGLE_CLOUD_API_KEY` or ADC + `GOOGLE_CLOUD_PROJECT`/`GCLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION` | `google-vertex` |
 | Mistral | `MISTRAL_API_KEY` | `mistral` |
 | Groq | `GROQ_API_KEY` | `groq` |
 | Cerebras | `CEREBRAS_API_KEY` | `cerebras` |
@@ -66,6 +67,7 @@ prime-agent
 | OpenCode Zen | `OPENCODE_API_KEY` | `opencode` |
 | OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` |
 | Hugging Face | `HF_TOKEN` | `huggingface` |
+| Moonshot AI | `MOONSHOT_API_KEY` | `moonshotai` / `moonshotai-cn` |
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
 | Kimi For Coding | `KIMI_API_KEY` | `kimi-coding` |
 | MiniMax | `MINIMAX_API_KEY` | `minimax` |

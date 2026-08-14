@@ -1,8 +1,8 @@
 import { type ChildProcess, type StdioOptions, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AgentSession } from "../core/agent-session.js";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import {
@@ -11,9 +11,13 @@ import {
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
 } from "../core/orphan-process-journal.js";
-import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
+import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../modes/rpc/jsonl.js";
-import { signalProcessGroupOrProcess } from "../utils/child-process.js";
+import {
+	signalProcessGroupOrProcess,
+	terminateUnixProcessGroupByIdentity,
+	terminateWindowsProcessTreeByIdentity,
+} from "../utils/child-process.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
@@ -131,7 +135,21 @@ function writeOwnedRecoveryDescriptor(path: string, profile: OwnedSessionWorkerP
 	const tempPath = `${path}.${process.pid}.tmp`;
 	writeFileSync(tempPath, `${JSON.stringify(descriptor)}\n`, { mode: 0o600 });
 	chmodSync(tempPath, 0o600);
+	let descriptorHandle = openSync(tempPath, "r+");
+	try {
+		fsyncSync(descriptorHandle);
+	} finally {
+		closeSync(descriptorHandle);
+	}
 	renameSync(tempPath, path);
+	if (process.platform !== "win32") {
+		descriptorHandle = openSync(dirname(path), "r");
+		try {
+			fsyncSync(descriptorHandle);
+		} finally {
+			closeSync(descriptorHandle);
+		}
+	}
 }
 
 export function installOwnedSessionRecoveryTracking(runtime: AgentSessionRuntime): void {
@@ -193,12 +211,23 @@ function exitCodeForSignal(signal: NodeJS.Signals | null): number {
 
 function forwardSignal(child: ChildProcess, signal: NodeJS.Signals): void {
 	if (child.exitCode === null && child.signalCode === null) {
-		if (process.platform === "win32" && child.pid !== undefined) {
+		if (child.pid !== undefined) {
 			signalProcessGroupOrProcess(child.pid, signal);
 			return;
 		}
 		child.kill(signal);
 	}
+}
+
+async function captureOwnedWorkerProcessStartId(child: ChildProcess, timeoutMs = 5000): Promise<string | undefined> {
+	const deadline = Date.now() + timeoutMs;
+	while (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+		const processStartId = getProcessStartId(child.pid);
+		if (processStartId) return processStartId;
+		if (Date.now() >= deadline) return undefined;
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+	}
+	return undefined;
 }
 
 export async function runOwnedSessionWorkerFrontend(
@@ -209,6 +238,7 @@ export async function runOwnedSessionWorkerFrontend(
 	const recoveryDescriptorPath = join(tmpdir(), `prime-agent-owned-${process.pid}-${randomUUID().slice(0, 12)}.json`);
 	const orphanProcessJournalPath = `${recoveryDescriptorPath}.orphans.jsonl`;
 	let currentChild: ChildProcess | undefined;
+	let currentChildProcessStartId: string | undefined;
 	let terminating = false;
 	let terminationSignal: NodeJS.Signals | undefined;
 	let stdinEnded = false;
@@ -217,6 +247,7 @@ export async function runOwnedSessionWorkerFrontend(
 	let rpcStdoutPaused = false;
 	let detachRpcInput: (() => void) | undefined;
 	let detachRpcOutput: (() => void) | undefined;
+	let trackingCleanupComplete = true;
 	const bufferedRpcInput: string[] = [];
 	const pendingRpcCommands = new Map<string, { publicId?: string; command: string }>();
 	const anonymousRpcIdPrefix = `prime-agent-owned-${randomUUID()}`;
@@ -290,37 +321,113 @@ export async function runOwnedSessionWorkerFrontend(
 		}
 		pendingRpcCommands.clear();
 	};
-	const reapWorkerResources = (workerPid: number | undefined) => {
+	const reapWorkerResources = async (
+		workerPid: number | undefined,
+		workerProcessStartId?: string,
+		requireWorkerIdentity = false,
+		cleanWorkerClose = false,
+	): Promise<boolean> => {
 		if (!workerPid) {
-			return;
+			return true;
 		}
-		if (process.platform !== "win32") {
+		let orphans: ReturnType<typeof readActiveOrphanProcesses>;
+		try {
+			orphans = readActiveOrphanProcesses(orphanProcessJournalPath, workerPid);
+		} catch {
+			return false;
+		}
+		if (cleanWorkerClose && orphans.length === 0) {
 			try {
-				process.kill(-workerPid, "SIGKILL");
+				clearOrphanProcessJournal(orphanProcessJournalPath);
+				return true;
 			} catch {
-				// The worker process group may already be fully reaped.
+				return false;
 			}
 		}
-		for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, workerPid)) {
-			if (!isOrphanProcessIdentityCurrent(orphan)) {
-				continue;
+		if (process.platform === "win32") {
+			if (requireWorkerIdentity && !workerProcessStartId) {
+				return false;
 			}
-			const { pid } = orphan;
-			if (process.platform === "win32") {
-				signalProcessGroupOrProcess(pid, "SIGKILL");
-				continue;
+			let result: Awaited<ReturnType<typeof terminateWindowsProcessTreeByIdentity>>;
+			if (workerProcessStartId) {
+				result = await terminateWindowsProcessTreeByIdentity(workerPid, workerProcessStartId, orphans);
+			} else if (orphans[0]) {
+				result = await terminateWindowsProcessTreeByIdentity(
+					orphans[0].pid,
+					orphans[0].processStartId,
+					orphans.slice(1),
+				);
+			} else {
+				result = "not-found";
 			}
-			try {
-				process.kill(-pid, "SIGKILL");
-			} catch {
-				try {
-					process.kill(pid, "SIGKILL");
-				} catch {
-					// The detached resource may already have exited.
+			if (result === "failed") {
+				return false;
+			}
+		} else {
+			if (!workerProcessStartId) {
+				return false;
+			}
+			const result = await terminateUnixProcessGroupByIdentity(workerPid, workerProcessStartId, getProcessStartId);
+			if (result === "failed" || result === "identity-mismatch") {
+				return false;
+			}
+		}
+
+		let currentOrphans: ReturnType<typeof readActiveOrphanProcesses>;
+		try {
+			currentOrphans = readActiveOrphanProcesses(orphanProcessJournalPath, workerPid);
+		} catch {
+			return false;
+		}
+		const trackedByIdentity = new Map(
+			[...orphans, ...currentOrphans].map((orphan) => [`${orphan.pid}\0${orphan.processStartId}`, orphan]),
+		);
+		const activeTrackedOrphans = [...trackedByIdentity.values()].filter(isOrphanProcessIdentityCurrent);
+		if (process.platform === "win32") {
+			const [primaryOrphan, ...remainingOrphans] = activeTrackedOrphans;
+			if (primaryOrphan) {
+				const result = await terminateWindowsProcessTreeByIdentity(
+					primaryOrphan.pid,
+					primaryOrphan.processStartId,
+					remainingOrphans,
+				);
+				if (result === "failed") {
+					return false;
+				}
+			}
+		} else {
+			for (const orphan of activeTrackedOrphans) {
+				const result = await terminateUnixProcessGroupByIdentity(
+					orphan.pid,
+					orphan.processStartId,
+					getProcessStartId,
+				);
+				if (result === "failed" || result === "identity-mismatch") {
+					return false;
 				}
 			}
 		}
-		clearOrphanProcessJournal(orphanProcessJournalPath);
+		let finalOrphans: ReturnType<typeof readActiveOrphanProcesses>;
+		try {
+			finalOrphans = readActiveOrphanProcesses(orphanProcessJournalPath, workerPid);
+		} catch {
+			return false;
+		}
+		const finalTrackedByIdentity = new Map(
+			[...trackedByIdentity.values(), ...finalOrphans].map((orphan) => [
+				`${orphan.pid}\0${orphan.processStartId}`,
+				orphan,
+			]),
+		);
+		if ([...finalTrackedByIdentity.values()].some(isOrphanProcessIdentityCurrent)) {
+			return false;
+		}
+		try {
+			clearOrphanProcessJournal(orphanProcessJournalPath);
+			return true;
+		} catch {
+			return false;
+		}
 	};
 
 	if (profile === "rpc") {
@@ -354,7 +461,7 @@ export async function runOwnedSessionWorkerFrontend(
 			: [bridgeStdin ? "pipe" : "inherit", "pipe", "pipe", "ipc"];
 		const child = spawn(launch.command, launch.args, {
 			cwd: process.cwd(),
-			detached: process.platform !== "win32",
+			detached: true,
 			env: {
 				...process.env,
 				[OWNED_WORKER_ENV]: "1",
@@ -368,6 +475,7 @@ export async function runOwnedSessionWorkerFrontend(
 			windowsHide: !interactive,
 		});
 		currentChild = child;
+		currentChildProcessStartId = child.pid !== undefined ? getProcessStartId(child.pid) : undefined;
 		if (!interactive) {
 			const childInput = child.stdin ?? undefined;
 			const childOutput = child.stdout ?? undefined;
@@ -429,11 +537,17 @@ export async function runOwnedSessionWorkerFrontend(
 			const workerStartedAt = Date.now();
 			const child = spawnWorker(workerArgs);
 			const workerPid = child.pid;
-			const exit = await new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+			const processStartIdPromise = currentChildProcessStartId
+				? Promise.resolve(currentChildProcessStartId)
+				: captureOwnedWorkerProcessStartId(child);
+			const exitPromise = new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
 				child.once("error", reject);
 				child.once("close", (code, signal) => resolveExit({ code: code ?? exitCodeForSignal(signal), signal }));
 			});
+			const [workerProcessStartId, exit] = await Promise.all([processStartIdPromise, exitPromise]);
+			currentChildProcessStartId = workerProcessStartId;
 			currentChild = undefined;
+			currentChildProcessStartId = undefined;
 			currentRpcInput = undefined;
 			currentRpcOutput = undefined;
 			if (profile === "rpc" && !stdinEnded) {
@@ -447,7 +561,17 @@ export async function runOwnedSessionWorkerFrontend(
 			if (child.connected) {
 				child.disconnect();
 			}
-			reapWorkerResources(workerPid);
+			if (
+				!(await reapWorkerResources(
+					workerPid,
+					workerProcessStartId,
+					false,
+					!terminating && exit.code === 0 && exit.signal === null,
+				))
+			) {
+				trackingCleanupComplete = false;
+				return terminationSignal ? exitCodeForSignal(terminationSignal) : exit.code;
+			}
 			const rpcCrashed =
 				profile === "rpc" &&
 				!terminating &&
@@ -481,8 +605,18 @@ export async function runOwnedSessionWorkerFrontend(
 		}
 		detachRpcInput?.();
 		detachRpcOutput?.();
-		rmSync(recoveryDescriptorPath, { force: true });
-		clearOrphanProcessJournal(orphanProcessJournalPath);
+		if (currentChild) {
+			trackingCleanupComplete =
+				(await reapWorkerResources(
+					currentChild.pid,
+					currentChildProcessStartId,
+					true,
+					!terminating && currentChild.exitCode === 0 && currentChild.signalCode === null,
+				)) && trackingCleanupComplete;
+		}
+		if (trackingCleanupComplete) {
+			rmSync(recoveryDescriptorPath, { force: true });
+		}
 	}
 }
 
@@ -510,6 +644,19 @@ export function installOwnedSessionWorkerOwnerWatch(): void {
 	}
 
 	let ownerGone = false;
+	let gracefulShutdownRequested = false;
+	const requestWindowsGracefulShutdown = () => {
+		if (!ownerGone || gracefulShutdownRequested) {
+			return;
+		}
+		if (process.listenerCount("SIGTERM") === 0) {
+			const retryTimer = setTimeout(requestWindowsGracefulShutdown, 10);
+			retryTimer.unref();
+			return;
+		}
+		gracefulShutdownRequested = true;
+		process.emit("SIGTERM");
+	};
 	const terminate = () => {
 		if (ownerGone) {
 			return;
@@ -528,7 +675,11 @@ export function installOwnedSessionWorkerOwnerWatch(): void {
 			process.exit(143);
 		}, 5000);
 		forceTimer.unref();
-		process.kill(process.pid, "SIGTERM");
+		if (process.platform === "win32") {
+			requestWindowsGracefulShutdown();
+		} else {
+			process.kill(process.pid, "SIGTERM");
+		}
 	};
 	process.once("disconnect", terminate);
 	process.channel.unref();

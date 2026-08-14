@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { describe, expect, it } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.js";
 import {
 	cleanupDaemonSocketPath,
 	defaultDaemonSocketPath,
@@ -13,12 +15,58 @@ import {
 } from "../src/modes/daemon/daemon-socket.js";
 
 describe("defaultDaemonSocketPath", () => {
-	it("uses a fixed Windows named pipe path", () => {
+	it("discovers the original Windows pipe for a live identity-less legacy worker", async () => {
 		if (process.platform !== "win32") {
 			return;
 		}
-
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-legacy-pipe-"));
+		const supervisorSocketPath = "\\\\.\\pipe\\prime-agent-daemon";
+		const workerSocketPath = `\\\\.\\pipe\\prime-agent-legacy-worker-${process.pid}-${Date.now()}`;
+		const descriptorDir = join(
+			agentDir,
+			"daemon-workers",
+			createHash("sha256").update(supervisorSocketPath).digest("hex").slice(0, 12),
+		);
+		mkdirSync(descriptorDir, { recursive: true });
+		writeFileSync(
+			join(descriptorDir, "supervisor-config"),
+			JSON.stringify({
+				version: 1,
+				socketPath: supervisorSocketPath,
+				defaultSessionConfig: { agentDir },
+			}),
+		);
+		const descriptorPath = join(descriptorDir, "legacy-worker.json");
+		const legacyDescriptor = {
+			pid: process.pid,
+			socketPath: workerSocketPath,
+			authenticationToken: "legacy-worker-token",
+			supervisorSocketPath,
+		};
+		writeFileSync(descriptorPath, JSON.stringify(legacyDescriptor));
+		const previousAgentDir = process.env[ENV_AGENT_DIR];
+		const workerServer = createServer();
+		try {
+			await new Promise<void>((resolve, reject) => {
+				workerServer.once("error", reject);
+				workerServer.listen(workerSocketPath, resolve);
+			});
+			process.env[ENV_AGENT_DIR] = agentDir;
+			expect(defaultDaemonSocketPath()).toBe(supervisorSocketPath);
+			await new Promise<void>((resolve) => workerServer.close(() => resolve()));
+			// The descriptor remains a migration target even when its identity-less
+			// pid was reused after the legacy worker pipe disappeared.
+			expect(defaultDaemonSocketPath()).toBe(supervisorSocketPath);
+			writeFileSync(descriptorPath, JSON.stringify({ ...legacyDescriptor, pid: 2_147_483_647 }));
+			expect(defaultDaemonSocketPath()).toBe(supervisorSocketPath);
+		} finally {
+			if (previousAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+			else process.env[ENV_AGENT_DIR] = previousAgentDir;
+			if (workerServer.listening) {
+				await new Promise<void>((resolve) => workerServer.close(() => resolve()));
+			}
+			rmSync(agentDir, { recursive: true, force: true });
+		}
 	});
 
 	it("uses a per-user Unix socket directory", () => {

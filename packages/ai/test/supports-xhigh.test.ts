@@ -119,6 +119,10 @@ describe("getSupportedThinkingLevels", () => {
 		for (const provider of getProviders()) {
 			for (const model of getModels(provider)) {
 				if (!model.reasoning) continue;
+				expect(
+					Object.values(model.thinkingLevelMap ?? {}).some((value) => typeof value === "number"),
+					`${provider}/${model.id}`,
+				).toBe(false);
 				expect(getReasoningCapabilities(model), `${provider}/${model.id}`).toBeDefined();
 				expect(getSupportedThinkingLevels(model).length, `${provider}/${model.id}`).toBeGreaterThan(0);
 			}
@@ -136,6 +140,16 @@ describe("getSupportedThinkingLevels", () => {
 		}
 	});
 
+	it("keeps every fixed contract to one selectable level", () => {
+		for (const provider of getProviders()) {
+			for (const model of getModels(provider)) {
+				const capabilities = getReasoningCapabilities(model);
+				if (capabilities?.control !== "fixed") continue;
+				expect(getSupportedThinkingLevels(model), `${provider}/${model.id}`).toHaveLength(1);
+			}
+		}
+	});
+
 	it("uses exact provider/model capability matrices", () => {
 		for (const provider of ["opencode", "github-copilot"] as const) {
 			expect(getSupportedThinkingLevels(getModel(provider, "claude-fable-5"))).not.toContain("off");
@@ -149,7 +163,6 @@ describe("getSupportedThinkingLevels", () => {
 		const grok45 = getModel("xai", "grok-4.5");
 		expect(grok45.compat?.supportsReasoningEffort).toBe(true);
 		expect(getSupportedThinkingLevels(grok45)).toEqual(["low", "medium", "high"]);
-		expect(getSupportedThinkingLevels(getModel("xai", "grok-4.6"))).toEqual(["low", "medium", "high", "xhigh"]);
 		expect(getReasoningCapabilities(getModel("xai", "grok-4.3"))?.control).toBe("fixed");
 		expect(getSupportedThinkingLevels(getModel("xai", "grok-4.3"))).toEqual(["high"]);
 		expect(
@@ -172,16 +185,42 @@ describe("getSupportedThinkingLevels", () => {
 			"high",
 		]);
 		expect(getSupportedThinkingLevels(getModel("openai", "gpt-5.4-pro"))).toEqual(["medium", "high", "xhigh"]);
+		expect(getSupportedThinkingLevels(getModel("prime-inference", "openai/gpt-5.6"))).toEqual([
+			"off",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+		expect(getReasoningCapabilities(getModel("github-copilot", "gpt-5-mini"))?.control).toBe("fixed");
+		expect(getReasoningCapabilities(getModel("github-copilot", "gpt-5.4-mini"))?.control).toBe("fixed");
+		expect(getReasoningCapabilities(getModel("github-copilot", "claude-haiku-4.5"))?.control).toBe("fixed");
+		expect(getReasoningCapabilities(getModel("github-copilot", "kimi-k3"))?.control).toBe("fixed");
+		expect(getReasoningCapabilities(getModel("github-copilot", "gpt-5.4"))?.control).toBe("effort");
+		expect(getReasoningCapabilities(getModel("github-copilot", "claude-opus-4.7"))?.control).toBe("effort");
+		expect(getSupportedThinkingLevels(getModel("github-copilot", "gpt-5.4"))).not.toContain("off");
 		expect(getSupportedThinkingLevels(getModel("mistral", "mistral-small-2603"))).toEqual(["off", "high"]);
 	});
 
-	it("prefers an explicit capability contract over the legacy compatibility map", () => {
+	it("resolves legacy maps, generated overrides, and explicit capability contracts in precedence order", () => {
 		const base = getModel("openai", "gpt-5.4");
 		const overridden = {
 			...base,
 			thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
 		};
-		expect(getSupportedThinkingLevels(overridden)).toEqual(["off", "low", "medium", "high", "xhigh"]);
+		expect(getSupportedThinkingLevels(overridden)).toEqual(["high"]);
+
+		const explicit = {
+			...base,
+			thinkingLevelMap: { high: "legacy-high" },
+			reasoningCapabilities: { control: "effort" as const, levels: { off: "none", low: "exact-low" } },
+		};
+		expect(getSupportedThinkingLevels(explicit)).toEqual(["off", "low"]);
+		expect(getReasoningCapabilities(explicit)).toBe(explicit.reasoningCapabilities);
+
+		const legacy = { ...base, reasoningCapabilities: undefined, thinkingLevelMap: undefined };
+		expect(getSupportedThinkingLevels(legacy)).toEqual(["off", "minimal", "low", "medium", "high"]);
 	});
 
 	it("includes max but not xhigh for OpenRouter Opus 4.6 (openai-completions API)", () => {

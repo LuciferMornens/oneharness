@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -923,7 +924,7 @@ describe("issue #4257 update restart resume", () => {
 
 		expect(manifest.sessions).toHaveLength(1);
 		const session = manifest.sessions[0];
-		expect(session?.sessionFile.startsWith(`${sessionDir}/`)).toBe(true);
+		expect(session?.sessionFile.startsWith(`${resolve(sessionDir)}${sep}`)).toBe(true);
 		expect(harness.session.sessionFile).toBe(session?.sessionFile);
 		expect(readFileSync(session?.sessionFile ?? "", "utf8")).toContain('"type":"session"');
 		expect(session?.queue.actions.actions).toEqual([
@@ -952,7 +953,7 @@ describe("issue #4257 update restart resume", () => {
 
 		expect(manifest.sessions).toHaveLength(1);
 		const session = manifest.sessions[0];
-		expect(session?.sessionFile.startsWith(`${sessionDir}/`)).toBe(true);
+		expect(session?.sessionFile.startsWith(`${resolve(sessionDir)}${sep}`)).toBe(true);
 		expect(harness.session.sessionFile).toBe(session?.sessionFile);
 		expect(session).toMatchObject({
 			shouldResume: true,

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -61,7 +61,7 @@ describe("CommandRecoveryJournal", () => {
 		});
 	});
 
-	it("ignores a truncated final append", () => {
+	it("truncates a partial final append before the next durable receipt", () => {
 		const path = createPath();
 		const journal = new CommandRecoveryJournal(path);
 		journal.begin("client-a", "command-a", "prompt");
@@ -69,6 +69,19 @@ describe("CommandRecoveryJournal", () => {
 
 		const restored = new CommandRecoveryJournal(path);
 		expect(restored.begin("client-a", "command-a", "prompt")).toEqual({ status: "pending" });
+		expect(restored.begin("client-b", "command-b", "prompt")).toEqual({ status: "new" });
+		const records = readFileSync(path, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { key: string });
+		expect(records).toHaveLength(2);
+		expect(records.map((record) => record.key)).toEqual([
+			JSON.stringify(["client-a", "command-a"]),
+			JSON.stringify(["client-b", "command-b"]),
+		]);
+		const reloaded = new CommandRecoveryJournal(path);
+		expect(reloaded.lookup("client-a", "command-a")).toEqual({ status: "pending" });
+		expect(reloaded.lookup("client-b", "command-b")).toEqual({ status: "pending" });
 	});
 
 	it("durably removes acknowledged results", () => {
@@ -81,8 +94,10 @@ describe("CommandRecoveryJournal", () => {
 			command: "prompt",
 			success: true,
 		});
+		appendFileSync(path, '{"version":1,"type":"acknowledged"');
 		journal.acknowledge("client-a", "command-a");
 
+		expect(readFileSync(path, "utf8")).toBe("\n");
 		const restored = new CommandRecoveryJournal(path);
 		expect(restored.begin("client-a", "command-a", "prompt")).toEqual({ status: "new" });
 	});

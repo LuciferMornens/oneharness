@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
+	copyFileSync,
 	existsSync,
 	linkSync,
 	mkdirSync,
@@ -22,6 +23,8 @@ import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-li
 import {
 	acquireDaemonShutdownAdmission,
 	acquireDaemonSupervisorOwnership,
+	adoptLegacyDaemonSupervisorOwnershipFromHello,
+	listDaemonSupervisorRegistryDirs,
 } from "../../../src/modes/daemon/daemon-supervisor-ownership.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
@@ -126,7 +129,11 @@ async function createPaths(): Promise<TestPaths> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
-	linkSync(process.execPath, executablePath);
+	if (process.platform === "win32") {
+		copyFileSync(process.execPath, executablePath);
+	} else {
+		linkSync(process.execPath, executablePath);
+	}
 	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
 	socketTempDirs.add(socketTmpDir);
@@ -946,7 +953,11 @@ describe("ENG-4603 worker recovery convergence", () => {
 	it("serializes shutdown admission and reclaims an unrenewed live lease", async () => {
 		const paths = await createPaths();
 		const previousRegistryDir = process.env[supervisorRegistryDirEnv];
+		const previousLocalAppData = process.env.LOCALAPPDATA;
+		const previousXdgStateHome = process.env.XDG_STATE_HOME;
 		process.env[supervisorRegistryDirEnv] = paths.registryDir;
+		process.env.LOCALAPPDATA = join(paths.agentDir, "local-app-data");
+		process.env.XDG_STATE_HOME = join(paths.agentDir, "state");
 		try {
 			const first = await acquireDaemonShutdownAdmission();
 			const record = JSON.parse(readFileSync(join(paths.registryDir, "shutdown-admission.json"), "utf8")) as {
@@ -983,6 +994,102 @@ describe("ENG-4603 worker recovery convergence", () => {
 			} else {
 				process.env[supervisorRegistryDirEnv] = previousRegistryDir;
 			}
+			if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+			else process.env.LOCALAPPDATA = previousLocalAppData;
+			if (previousXdgStateHome === undefined) delete process.env.XDG_STATE_HOME;
+			else process.env.XDG_STATE_HOME = previousXdgStateHome;
+		}
+	}, 15_000);
+
+	it("discovers and fences a custom supervisor registry during global shutdown", async () => {
+		const paths = await createPaths();
+		const descriptorDir = join(paths.agentDir, "daemon-workers", "custom-admission");
+		const primaryRegistryDir = join(paths.agentDir, "shutdown-primary-registry");
+		const lateRegistryDir = join(paths.agentDir, "shutdown-late-registry");
+		const undiscoveredRegistryDir = join(paths.agentDir, "future-custom-registry");
+		const undiscoveredDescriptorDir = join(paths.agentDir, "daemon-workers", "future-custom-admission");
+		mkdirSync(descriptorDir, { recursive: true, mode: 0o700 });
+		mkdirSync(undiscoveredDescriptorDir, { recursive: true, mode: 0o700 });
+		const previousRegistryDir = process.env[supervisorRegistryDirEnv];
+		const previousLocalAppData = process.env.LOCALAPPDATA;
+		const previousXdgStateHome = process.env.XDG_STATE_HOME;
+		process.env[supervisorRegistryDirEnv] = paths.registryDir;
+		process.env.LOCALAPPDATA = join(paths.agentDir, "local-app-data");
+		process.env.XDG_STATE_HOME = join(paths.agentDir, "state");
+		let owner: Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>> | undefined;
+		let admission: Awaited<ReturnType<typeof acquireDaemonShutdownAdmission>> | undefined;
+		try {
+			owner = await acquireDaemonSupervisorOwnership({
+				agentDir: paths.agentDir,
+				appVersion: "test",
+				descriptorDir,
+				generation: "custom-admission-owner",
+				registryDir: paths.registryDir,
+				socketPath: paths.socketPath,
+			});
+			const canonicalRegistryDir = resolve(paths.registryDir).toLowerCase();
+			expect((await listDaemonSupervisorRegistryDirs()).map((path) => resolve(path).toLowerCase())).toContain(
+				canonicalRegistryDir,
+			);
+			expect(
+				await adoptLegacyDaemonSupervisorOwnershipFromHello(paths.socketPath, {
+					supervisorGeneration: owner.record.generation,
+					supervisorOwnerToken: owner.record.token,
+					supervisorPid: owner.record.pid,
+					supervisorProcessStartId: owner.record.processStartId,
+					supervisorSocketPath: owner.record.socketPath,
+				}),
+			).toBe(paths.registryDir);
+
+			process.env[supervisorRegistryDirEnv] = primaryRegistryDir;
+			admission = await acquireDaemonShutdownAdmission([primaryRegistryDir]);
+			const primaryAdmission = JSON.parse(
+				readFileSync(join(primaryRegistryDir, "shutdown-admission.json"), "utf8"),
+			) as { token: string };
+			const customAdmission = JSON.parse(
+				readFileSync(join(paths.registryDir, "shutdown-admission.json"), "utf8"),
+			) as { token: string };
+			expect(customAdmission.token).toBe(primaryAdmission.token);
+			await admission.extendRegistryDirs([lateRegistryDir]);
+			const lateAdmission = JSON.parse(readFileSync(join(lateRegistryDir, "shutdown-admission.json"), "utf8")) as {
+				token: string;
+			};
+			expect(lateAdmission.token).toBe(primaryAdmission.token);
+			await expect(
+				acquireDaemonSupervisorOwnership({
+					agentDir: paths.agentDir,
+					appVersion: "test",
+					descriptorDir,
+					generation: "custom-admission-blocked",
+					registryDir: paths.registryDir,
+					socketPath: paths.socketPath,
+				}),
+			).rejects.toMatchObject({ code: "daemon_shutdown_in_progress" });
+			await expect(
+				acquireDaemonSupervisorOwnership({
+					agentDir: paths.agentDir,
+					appVersion: "test",
+					descriptorDir: undiscoveredDescriptorDir,
+					generation: "future-custom-admission-blocked",
+					registryDir: undiscoveredRegistryDir,
+					socketPath:
+						process.platform === "win32"
+							? `\\\\.\\pipe\\prime-agent-future-admission-${process.pid}`
+							: join(paths.agentDir, "future-admission.sock"),
+				}),
+			).rejects.toMatchObject({ code: "daemon_shutdown_in_progress" });
+		} finally {
+			await admission?.release();
+			await owner?.release();
+			if (previousRegistryDir === undefined) {
+				delete process.env[supervisorRegistryDirEnv];
+			} else {
+				process.env[supervisorRegistryDirEnv] = previousRegistryDir;
+			}
+			if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+			else process.env.LOCALAPPDATA = previousLocalAppData;
+			if (previousXdgStateHome === undefined) delete process.env.XDG_STATE_HOME;
+			else process.env.XDG_STATE_HOME = previousXdgStateHome;
 		}
 	}, 15_000);
 

@@ -14,8 +14,8 @@ async function waitForFile(path: string): Promise<void> {
 	}
 }
 
-describe.skipIf(process.platform === "win32")("execCommand", () => {
-	it("force kills a process that ignores SIGTERM and cleans up the fallback timer", async () => {
+describe("execCommand", () => {
+	it("settles an aborted process after exact tree termination", async () => {
 		const testDir = mkdtempSync(join(tmpdir(), "prime-agent-exec-test-"));
 		const readyFile = join(testDir, "ready");
 		const controller = new AbortController();
@@ -33,15 +33,20 @@ describe.skipIf(process.platform === "win32")("execCommand", () => {
 			);
 			await waitForFile(readyFile);
 
-			vi.useFakeTimers();
-			controller.abort();
-
-			await vi.advanceTimersByTimeAsync(5000);
+			if (process.platform === "win32") {
+				controller.abort();
+			} else {
+				vi.useFakeTimers();
+				controller.abort();
+				await vi.advanceTimersByTimeAsync(5000);
+			}
 			const result = await resultPromise;
 
 			expect(result.killed).toBe(true);
-			expect(result.code).toBe(SIGKILL_EXIT_CODE);
-			expect(vi.getTimerCount()).toBe(0);
+			if (process.platform !== "win32") {
+				expect(result.code).toBe(SIGKILL_EXIT_CODE);
+				expect(vi.getTimerCount()).toBe(0);
+			}
 		} finally {
 			vi.useRealTimers();
 			controller.abort();

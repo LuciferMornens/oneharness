@@ -17,7 +17,14 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
+import { getProcessStartId } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { waitForChildProcess } from "../../utils/child-process.js";
+import {
+	killProcessTreeByIdentity,
+	reconcileTrackedDetachedChildAfterExit,
+	trackChildProcess,
+} from "../../utils/shell.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import type {
@@ -72,6 +79,7 @@ export type RpcObservedSessionListener = (event: RpcObservedSessionEvent) => voi
 
 export class RpcClient {
 	private process: ChildProcess | null = null;
+	private processStartId?: string;
 	private stopReadingStdout: (() => void) | null = null;
 	private eventListeners: RpcEventListener[] = [];
 	private observedSessionListeners: RpcObservedSessionListener[] = [];
@@ -103,29 +111,61 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawn("node", [cliPath, ...args], {
+		const child = spawn("node", [cliPath, ...args], {
 			cwd: this.options.cwd,
+			detached: process.platform !== "win32",
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
 		});
+		this.process = child;
+		this.processStartId = trackChildProcess(child, {
+			unixDetachedSession: process.platform !== "win32",
+		});
 
 		// Collect stderr for debugging
-		this.process.stderr?.on("data", (data) => {
+		child.stderr?.on("data", (data) => {
 			this.stderr += data.toString();
 			process.stderr.write(data);
 		});
 
 		// Set up strict JSONL reader for stdout.
-		this.stopReadingStdout = attachJsonlLineReader(this.process.stdout!, (line) => {
+		this.stopReadingStdout = attachJsonlLineReader(child.stdout!, (line) => {
 			this.handleLine(line);
 		});
 
 		// Wait a moment for process to initialize
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		try {
+			await new Promise<void>((resolveReady, rejectReady) => {
+				const timer = setTimeout(() => {
+					child.off("error", onError);
+					resolveReady();
+				}, 100);
+				const onError = (error: Error) => {
+					clearTimeout(timer);
+					rejectReady(error);
+				};
+				child.once("error", onError);
+			});
+		} catch (error) {
+			this.stopReadingStdout?.();
+			this.stopReadingStdout = null;
+			if (child.pid !== undefined) {
+				const cleanupComplete = await killProcessTreeByIdentity(child.pid, this.processStartId);
+				if (cleanupComplete) reconcileTrackedDetachedChildAfterExit(child.pid);
+			}
+			this.process = null;
+			this.processStartId = undefined;
+			throw error;
+		}
 
-		if (this.process.exitCode !== null) {
-			throw new Error(`Agent process exited immediately with code ${this.process.exitCode}. Stderr: ${this.stderr}`);
+		if (child.exitCode !== null) {
+			this.stopReadingStdout?.();
+			this.stopReadingStdout = null;
+			if (child.pid !== undefined) reconcileTrackedDetachedChildAfterExit(child.pid);
+			this.process = null;
+			this.processStartId = undefined;
+			throw new Error(`Agent process exited immediately with code ${child.exitCode}. Stderr: ${this.stderr}`);
 		}
 	}
 
@@ -133,26 +173,46 @@ export class RpcClient {
 	 * Stop the RPC agent process.
 	 */
 	async stop(): Promise<void> {
-		if (!this.process) return;
+		const child = this.process;
+		if (!child) return;
+		const processStartId = this.processStartId;
 
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
-		this.process.kill("SIGTERM");
+		if (child.pid !== undefined && processStartId !== undefined && getProcessStartId(child.pid) === processStartId) {
+			child.kill("SIGTERM");
+		} else if (processStartId === undefined && child.exitCode === null && child.signalCode === null) {
+			child.kill("SIGTERM");
+		}
 
-		// Wait for process to exit
-		await new Promise<void>((resolve) => {
-			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
-				resolve();
-			}, 1000);
-
-			this.process?.on("exit", () => {
-				clearTimeout(timeout);
-				resolve();
-			});
-		});
+		let forced = false;
+		let timeout: NodeJS.Timeout | undefined;
+		await Promise.race([
+			waitForChildProcess(child).catch(() => {
+				forced = true;
+			}),
+			new Promise<void>((resolveTimeout) => {
+				timeout = setTimeout(() => {
+					forced = true;
+					resolveTimeout();
+				}, 1000);
+			}),
+		]);
+		if (timeout) clearTimeout(timeout);
+		let cleanupComplete = true;
+		if (child.pid !== undefined && processStartId !== undefined && (forced || process.platform !== "win32")) {
+			cleanupComplete = await killProcessTreeByIdentity(child.pid, processStartId);
+		} else if (forced && child.exitCode === null && child.signalCode === null) {
+			child.kill("SIGKILL");
+			cleanupComplete = false;
+		}
+		if (child.pid !== undefined && cleanupComplete) reconcileTrackedDetachedChildAfterExit(child.pid);
 
 		this.process = null;
+		this.processStartId = undefined;
+		for (const pending of this.pendingRequests.values()) {
+			pending.reject(new Error("RPC client stopped"));
+		}
 		this.pendingRequests.clear();
 	}
 

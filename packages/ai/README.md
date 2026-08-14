@@ -467,6 +467,8 @@ const response = await completeSimple(model, {
   reasoning: 'medium'  // 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 });
 
+// Omit `reasoning` to preserve the provider/model default.
+
 // Access thinking and text blocks
 for (const block of response.content) {
   if (block.type === 'thinking') {
@@ -507,6 +509,8 @@ await complete(googleModel, context, {
   }
 });
 ```
+
+For `openai-completions`, an explicit `reasoningEffort` also enables Z.AI, Qwen, and DeepSeek reasoning controls when `reasoningEnabled` is omitted. Across OpenAI Completions, Responses, Azure Responses, and Codex Responses options, `reasoningEnabled: false` overrides any supplied effort or summary: adapters send the model's native disable value when supported and otherwise omit reasoning controls. Provider-specific reasoning options are ignored when the selected model has `reasoning: false`.
 
 ### Streaming Thinking Content
 
@@ -839,7 +843,11 @@ const response = await stream(ollamaModel, context, {
 
 Some OpenAI-compatible servers do not understand the `developer` role used for reasoning-capable models. For those providers, set `compat.supportsDeveloperRole` to `false` so the system prompt is sent as a `system` message instead. If the server also does not support `reasoning_effort`, set `compat.supportsReasoningEffort` to `false` too.
 
-Use model-level `thinkingLevelMap` to describe model-specific thinking controls. Keys are Prime Agent thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Missing keys use provider defaults, string values are sent to the provider, and `null` marks a level unsupported.
+Use model-level `reasoningCapabilities` to describe exact model-specific thinking controls. `control` is `fixed`, `toggle`, `effort`, or `budget`. `levels` uses Prime Agent thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) as keys, and `null` or an omitted key means the level is unsupported. An `effort` value must be a non-empty native provider string. A `budget` value must be a finite native integer token count. For `toggle`, string values are exact support/mapping markers. Structural `thinkingFormat` adapters (`zai`, `moonshot`, `qwen`, `qwen-chat-template`, and toggle-only `deepseek`) emit their documented enabled/disabled object or boolean instead of copying the marker literally. Fixed reasoning is intrinsic to the route, so adapters do not send its internal level value on the wire.
+
+Omitting `SimpleStreamOptions.reasoning` preserves the provider/model default. For legacy `reasoning: true` models without metadata, `off`, `minimal`, `low`, `medium`, and `high` remain available with their legacy provider-default mappings.
+
+Built-in compatible routes retain their provider protocol rather than inheriting Claude controls: Fireworks Anthropic and Kimi Code K2.7 routes use token budgets starting at 1,024, Kimi Code K3 routes use native `low` / `high` / `max` effort mappings, native Moonshot K2.5/K2.6 routes use `thinking.type` enabled/disabled while K3 uses top-level `reasoning_effort` with selectable `low` / `high` / `max`, and Bedrock Nova 2 Lite uses `reasoningConfig` with `low` / `medium` / `high` while omission or `off` preserves its default-disabled mode. Bedrock Claude requests omit temperature only while extended thinking is active (or intrinsically always on); omitted/off/non-thinking requests retain it.
 
 This commonly applies to Ollama, vLLM, SGLang, and similar OpenAI-compatible servers. You can set `compat` at the provider level or per model.
 
@@ -855,19 +863,51 @@ const ollamaReasoningModel: Model<'openai-completions'> = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   contextWindow: 131072,
   maxTokens: 32000,
-  thinkingLevelMap: {
-    minimal: null,
-    low: null,
-    medium: null,
-    high: 'high',
-    xhigh: null,
+  reasoningCapabilities: {
+    control: 'effort',
+    levels: {
+      off: 'none',
+      minimal: 'minimal',
+      low: 'low',
+      medium: 'medium',
+      high: 'high',
+      xhigh: null,
+      max: null,
+    },
   },
   compat: {
     supportsDeveloperRole: false,
-    supportsReasoningEffort: false,
+    supportsReasoningEffort: true,
   }
 };
 ```
+
+`thinkingLevelMap` is the deprecated compatibility field. Its values remain `string | null`, and missing standard levels retain their legacy mappings. Numeric token budgets belong only in `reasoningCapabilities` with `control: 'budget'`; generated models do not mirror those numbers into `thinkingLevelMap`. When a programmatic clone of a generated model replaces only `thinkingLevelMap`, that map is merged over the retained generated contract and the effective contract is validated against its API and `thinkingFormat`. Replacing `reasoningCapabilities` with a new object is an intentional exact contract and takes precedence over any retained compatibility map. New custom models should set `reasoningCapabilities` and omit `thinkingLevelMap`.
+
+Do not copy a partial legacy map directly into an exact contract. For example, on a legacy OpenAI-compatible effort route, `thinkingLevelMap: { high: 'high' }` inherits `off`, `minimal`, `low`, and `medium`; its equivalent exact contract expands those values explicitly:
+
+```typescript
+reasoningCapabilities: {
+  control: 'effort',
+  levels: {
+    off: 'off',
+    minimal: 'minimal',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: null,
+    max: null,
+  },
+}
+```
+
+Use explicit `null` entries instead when an inherited legacy level should become unsupported.
+
+Budget-based adapters accept finite integer provider values, for example `levels: { minimal: 512, low: 1024, medium: 4096, high: 8192 }` with `control: 'budget'`. Active OpenAI-compatible and OpenRouter token budgets must be positive; a numeric `off` mapping must use the route's actual disable value, normally `0`, and never a positive budget. Anthropic and Bedrock Claude manual budgets must be at least 1,024 tokens; their structural disabled state is represented by `supportsOff: true`, not by a synthetic zero budget. Google budget contracts may use `-1` only for an active dynamic-thinking level and may use `0` for `off` only on model families that document disable support; Gemini 2.5 Pro accepts 128–32,768, Gemini 2.5 Flash accepts 1–24,576 plus `0`/`-1`, and Gemini 2.5 Flash-Lite accepts 512–24,576 plus `0`/`-1`. On `openai-completions`, `thinkingFormat: 'openai'` sends the selected number as top-level `reasoning_budget`, while `thinkingFormat: 'openrouter'` sends it as `reasoning: { max_tokens }`. Structural formats (`zai`, `moonshot`, `qwen`, `qwen-chat-template`, and `deepseek`) cannot carry numeric budget contracts and reject them instead of sending a level label or an unrelated toggle. `openai-responses`, `azure-openai-responses`, `openai-codex-responses`, and `mistral-conversations` expose string-only reasoning effort fields, so they reject numeric budget contracts; use string `control: 'effort'` mappings for those APIs.
+
+Fixed contracts expose exactly one selectable level. A legacy `thinkingLevelMap` overlay cannot add `off` or effort choices to a generated fixed route; replace `reasoningCapabilities` with an explicit non-fixed contract when the route really has a selectable native control. Exact Anthropic effort contracts use adaptive thinking plus `output_config.effort` (the built-in Kimi route retains its documented effort-only form). Exact Bedrock effort contracts must identify either a Claude adaptive-thinking route or a Nova 2 Lite `reasoningConfig` route through the model ID or name; other Bedrock effort contracts are rejected before payload construction.
+
+For a structural toggle route, use markers that describe the mapping without pretending they are wire values. For example, `control: 'toggle'`, `levels: { off: 'disabled', high: 'enabled' }`, and `thinkingFormat: 'qwen'` expose off/high while the adapter sends `enable_thinking: false` or `enable_thinking: true`; the strings themselves are not sent.
 
 ### OpenAI Compatibility Settings
 
@@ -886,14 +926,17 @@ interface OpenAICompletionsCompat {
   requiresAssistantAfterToolResult?: boolean; // Whether tool results must be followed by an assistant message (default: false)
   requiresThinkingAsText?: boolean;  // Whether thinking blocks must be converted to text (default: false)
   requiresReasoningContentOnAssistantMessages?: boolean; // Whether all replayed assistant messages must include empty reasoning_content when reasoning is enabled (default: auto-detected for DeepSeek)
-  thinkingFormat?: 'openai' | 'deepseek' | 'zai' | 'qwen' | 'qwen-chat-template'; // Format for reasoning param: 'openai' uses reasoning_effort, 'deepseek' uses thinking: { type } plus reasoning_effort, 'zai' uses enable_thinking, 'qwen' uses enable_thinking, 'qwen-chat-template' uses chat_template_kwargs.enable_thinking (default: openai)
+  thinkingFormat?: 'openai' | 'openrouter' | 'deepseek' | 'zai' | 'moonshot' | 'qwen' | 'qwen-chat-template'; // Named effort: 'openai' uses reasoning_effort and 'openrouter' uses reasoning: { effort }. Numeric budget: those formats use reasoning_budget and reasoning: { max_tokens }. Structural formats use their documented thinking/toggle fields (default: openai)
+  zaiToolStream?: boolean;         // Whether to send top-level tool_stream: true for streaming Z.AI tool calls (default: false)
   cacheControlFormat?: 'anthropic';  // Anthropic-style cache_control on system prompt, last tool, and last user/assistant text content
+  supportsLongCacheRetention?: boolean; // Whether long retention fields/TTL are supported (default: true)
   openRouterRouting?: OpenRouterRouting; // OpenRouter routing preferences (default: {})
   vercelGatewayRouting?: VercelGatewayRouting; // Vercel AI Gateway routing preferences (default: {})
 }
 
 interface OpenAIResponsesCompat {
-  // Reserved for future use
+  sendSessionIdHeader?: boolean;    // Whether to send the session_id cache-affinity header from sessionId (default: true)
+  supportsLongCacheRetention?: boolean; // Whether to send prompt_cache_retention: '24h' for long retention (default: true)
 }
 ```
 
@@ -1064,6 +1107,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Vercel AI Gateway | `AI_GATEWAY_API_KEY` |
 | zAI | `ZAI_API_KEY` |
 | MiniMax | `MINIMAX_API_KEY` |
+| Moonshot AI | `MOONSHOT_API_KEY` |
 | OpenCode Zen / OpenCode Go | `OPENCODE_API_KEY` |
 | Kimi For Coding | `KIMI_API_KEY` |
 | Xiaomi MiMo (API billing) | `XIAOMI_API_KEY` |

@@ -22,12 +22,39 @@ import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { parseIpythonBashCell } from "./ipython-cell-code.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
+const WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX = "__prime_agent_exec__";
+
 const RLM_BOOTSTRAP_BASE_CODE = `
 import asyncio
 import os as _prime_agent_os
 
 _prime_agent_os.environ["NO_COLOR"] = "1"
 get_ipython().colors = "nocolor"
+
+if _prime_agent_os.name == "nt":
+    import base64 as _prime_agent_base64
+    import json as _prime_agent_json
+    import IPython.core.magics.script as _prime_agent_script_magics
+
+    if not hasattr(_prime_agent_script_magics, "_prime_agent_original_arg_split"):
+        _prime_agent_script_magics._prime_agent_original_arg_split = _prime_agent_script_magics.arg_split
+
+    def _prime_agent_script_arg_split(commandline, posix=False, strict=True):
+        tokens = _prime_agent_script_magics._prime_agent_original_arg_split(
+            commandline,
+            posix=posix,
+            strict=strict,
+        )
+        if tokens and tokens[0].startswith("${WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX}"):
+            encoded_argv = tokens[0][len("${WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX}"):]
+            encoded_argv += "=" * (-len(encoded_argv) % 4)
+            argv = _prime_agent_json.loads(
+                _prime_agent_base64.urlsafe_b64decode(encoded_argv).decode("utf-8")
+            )
+            tokens[0:1] = argv
+        return tokens
+
+    _prime_agent_script_magics.arg_split = _prime_agent_script_arg_split
 
 try:
     import nest_asyncio as _prime_agent_nest_asyncio
@@ -297,42 +324,33 @@ export interface IpythonToolOptions {
 	provisioner?: IpythonKernelProvisioner;
 }
 
-function quoteWindowsCommandLineArgument(value: string): string {
-	if (value.length > 0 && !/[\s"]/u.test(value)) return value;
-
-	let quoted = '"';
-	let backslashes = 0;
-	for (const char of value) {
-		if (char === "\\") {
-			backslashes++;
-			continue;
-		}
-		if (char === '"') {
-			quoted += `${"\\".repeat(backslashes * 2 + 1)}"`;
-			backslashes = 0;
-			continue;
-		}
-		quoted += `${"\\".repeat(backslashes)}${char}`;
-		backslashes = 0;
-	}
-	return `${quoted}${"\\".repeat(backslashes * 2)}"`;
+function quoteScriptMagicArgument(value: string): string {
+	return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\"'\"'")}'`;
 }
 
-function quoteScriptMagicArgument(value: string): string {
-	if (process.platform === "win32") return quoteWindowsCommandLineArgument(value);
-	return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\"'\"'")}'`;
+function windowsScriptMagicCommand(shellPath: string, shellArgs: readonly string[]): string {
+	const encodedArgv = Buffer.from(JSON.stringify([shellPath, ...shellArgs]), "utf8").toString("base64url");
+	return `${WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX}${encodedArgv}`;
 }
 
 function scriptMagicCommand(shellPath: string): string {
 	const executableName = shellPath.split(/[\\/]/).at(-1)?.toLowerCase();
-	const powerShellStdinRunner = "$source = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($source)) @args";
+	const powerShellStdinRunner = [
+		"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)",
+		"$source = [Console]::In.ReadToEnd()",
+		"$source += [Environment]::NewLine + 'if (-not $?) { if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; exit 1 }'",
+		"& ([scriptblock]::Create($source)) @args",
+	].join("; ");
 	const args =
 		executableName === "pwsh" ||
 		executableName === "pwsh.exe" ||
 		executableName === "powershell" ||
 		executableName === "powershell.exe"
-			? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powerShellStdinRunner]
+			? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `& { ${powerShellStdinRunner} }`]
 			: [];
+	if (process.platform === "win32") {
+		return windowsScriptMagicCommand(shellPath, args);
+	}
 	return [shellPath, ...args].map(quoteScriptMagicArgument).join(" ");
 }
 

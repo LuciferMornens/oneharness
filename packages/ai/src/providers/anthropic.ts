@@ -9,6 +9,9 @@ import type {
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import {
+	assertValidReasoningBudgetValue,
+	assertValidReasoningCapabilities,
+	assertValidReasoningEffortValue,
 	calculateCost,
 	getReasoningCapabilities,
 	resolveSimpleThinkingLevel,
@@ -189,17 +192,15 @@ function getAnthropicCompat(model: Model<"anthropic-messages">): Required<Anthro
 export interface AnthropicOptions extends StreamOptions {
 	/**
 	 * Enable extended thinking.
-	 * For Opus 4.6 and Sonnet 4.6: uses adaptive thinking (model decides when/how much to think).
-	 * For older models: uses budget-based thinking with thinkingBudgetTokens.
+	 * Uses the selected route's adaptive, budget, toggle, or effort protocol.
 	 */
 	thinkingEnabled?: boolean;
 	/**
-	 * Token budget for extended thinking (older models only).
-	 * Ignored for Opus 4.6 and Sonnet 4.6, which use adaptive thinking.
+	 * Token budget for budget-based extended thinking routes.
 	 */
 	thinkingBudgetTokens?: number;
 	/**
-	 * Effort level for adaptive thinking (Opus 4.6+, Sonnet 4.6, Fable/Mythos).
+	 * Effort level for adaptive Claude and compatible native-effort routes.
 	 * Controls how much thinking Claude allocates:
 	 * - "max": Always thinks with no constraints (Opus 4.6+, Sonnet 4.6, Fable/Mythos)
 	 * - "xhigh": Highest reasoning level (Opus 4.7+, Fable 5, Mythos 5)
@@ -763,8 +764,22 @@ function supportsAdaptiveThinking(modelId: string): boolean {
 	);
 }
 
+function isClaudeFamily(model: Model<"anthropic-messages">): boolean {
+	return model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude");
+}
+
+function usesKimiCodingEffort(model: Model<"anthropic-messages">): boolean {
+	return model.provider === "kimi-coding" && model.reasoningCapabilities?.control === "effort";
+}
+
+function supportsTemperatureWithThinking(model: Model<"anthropic-messages">): boolean {
+	return model.provider === "fireworks" || model.provider === "kimi-coding";
+}
+
 function usesAdaptiveThinking(model: Model<"anthropic-messages">): boolean {
-	return supportsAdaptiveThinking(model.id) || model.reasoningCapabilities?.control === "effort";
+	const control = model.reasoningCapabilities?.control;
+	if (control !== undefined) return control === "effort" && !usesKimiCodingEffort(model);
+	return isClaudeFamily(model) && supportsAdaptiveThinking(model.id);
 }
 
 /**
@@ -809,22 +824,18 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
-	const offSupported = resolveSimpleThinkingLevel(model, undefined)?.enabled === false;
-	if ((!options?.reasoning || options.reasoning === "off") && offSupported) {
+	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
+	if (!resolvedReasoning) return streamAnthropic(model, context, base satisfies AnthropicOptions);
+	if (!resolvedReasoning.enabled) {
 		return streamAnthropic(model, context, { ...base, thinkingEnabled: false } satisfies AnthropicOptions);
 	}
-	if (!options?.reasoning) {
-		return streamAnthropic(model, context, base satisfies AnthropicOptions);
-	}
-	const resolvedReasoning = resolveThinkingLevel(model, options.reasoning);
-	if (!resolvedReasoning?.enabled) return streamAnthropic(model, context, base satisfies AnthropicOptions);
 	const control = getReasoningCapabilities(model)?.control;
 	if (control === "fixed") return streamAnthropic(model, context, base satisfies AnthropicOptions);
 
-	// For Opus 4.6 and Sonnet 4.6: use adaptive thinking with effort level
-	// For older models: use budget-based thinking
-	if (usesAdaptiveThinking(model)) {
-		const effort = mapThinkingLevelToEffort(model, options.reasoning);
+	// Exact effort contracts use the route's native effort mechanism. Legacy
+	// contractless Claude routes retain their family-based adaptive/budget split.
+	if (usesAdaptiveThinking(model) || usesKimiCodingEffort(model)) {
+		const effort = mapThinkingLevelToEffort(model, resolvedReasoning.level);
 		return streamAnthropic(model, context, {
 			...base,
 			thinkingEnabled: true,
@@ -836,9 +847,9 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	const budgetLevel = clampReasoning(reasoningLevel)!;
 	const capabilityBudget =
 		typeof resolvedReasoning.providerValue === "number" ? resolvedReasoning.providerValue : undefined;
-	const requestedBudget = options.thinkingBudgets?.[budgetLevel] ?? capabilityBudget;
+	const requestedBudget = options?.thinkingBudgets?.[budgetLevel] ?? capabilityBudget;
 	const adjusted = adjustMaxTokensForThinking(base.maxTokens || 0, model.maxTokens, reasoningLevel, {
-		...options.thinkingBudgets,
+		...options?.thinkingBudgets,
 		...(requestedBudget !== undefined ? { [budgetLevel]: requestedBudget } : {}),
 	});
 
@@ -864,7 +875,7 @@ function createClient(
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
 	// The beta header is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so skip it.
-	const needsInterleavedBeta = interleavedThinking && !usesAdaptiveThinking(model);
+	const needsInterleavedBeta = interleavedThinking && isClaudeFamily(model) && !usesAdaptiveThinking(model);
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
@@ -967,6 +978,13 @@ function buildParams(
 	options?: AnthropicOptions,
 	cacheControl?: CacheControlEphemeral,
 ): MessageCreateParamsStreaming {
+	const capabilities = assertValidReasoningCapabilities(model);
+	if (capabilities?.control === "effort" && options?.effort !== undefined) {
+		assertValidReasoningEffortValue(model, "request", options.effort);
+	}
+	if (capabilities?.control === "budget" && options?.thinkingBudgetTokens !== undefined) {
+		assertValidReasoningBudgetValue(model, "request", options.thinkingBudgetTokens);
+	}
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),
@@ -1005,8 +1023,11 @@ function buildParams(
 	// and always-on models reject sampling params outright.
 	if (
 		options?.temperature !== undefined &&
-		!options?.thinkingEnabled &&
-		(!model.reasoning || resolveSimpleThinkingLevel(model, undefined) !== undefined)
+		(!model.reasoning ||
+			supportsTemperatureWithThinking(model) ||
+			(!options.thinkingEnabled &&
+				getReasoningCapabilities(model)?.control !== "fixed" &&
+				resolveThinkingLevel(model, "off")?.enabled === false))
 	) {
 		params.temperature = options.temperature;
 	}
@@ -1023,11 +1044,17 @@ function buildParams(
 	// Configure thinking mode: adaptive (Opus 4.6+ and Sonnet 4.6),
 	// budget-based (older models), or explicitly disabled.
 	if (model.reasoning) {
-		if (options?.thinkingEnabled && getReasoningCapabilities(model)?.control !== "fixed") {
-			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
-			// older Claude 4 models (whose API default is also "summarized").
-			const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
+		if (usesKimiCodingEffort(model)) {
+			const effort =
+				options?.thinkingEnabled === false ? resolveThinkingLevel(model, "off")?.providerValue : options?.effort;
+			if (typeof effort === "string") {
+				params.output_config = { effort } as unknown as NonNullable<MessageCreateParamsStreaming["output_config"]>;
+			}
+		} else if (options?.thinkingEnabled && getReasoningCapabilities(model)?.control !== "fixed") {
 			if (usesAdaptiveThinking(model)) {
+				// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
+				// older Claude 4 models (whose API default is also "summarized").
+				const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
 				// Adaptive thinking: Claude decides when and how much to think.
 				params.thinking = { type: "adaptive", display };
 				if (options.effort) {
@@ -1040,14 +1067,17 @@ function buildParams(
 							: { effort: options.effort };
 				}
 			} else {
-				// Budget-based thinking for older models
+				const display: AnthropicThinkingDisplay | undefined = isClaudeFamily(model)
+					? (options.thinkingDisplay ?? "summarized")
+					: undefined;
+				// Budget-based thinking for Claude and compatible gateways.
 				params.thinking = {
 					type: "enabled",
 					budget_tokens: options.thinkingBudgetTokens || 1024,
-					display,
+					...(display !== undefined ? { display } : {}),
 				};
 			}
-		} else if (options?.thinkingEnabled === false && resolveSimpleThinkingLevel(model, undefined)) {
+		} else if (options?.thinkingEnabled === false && resolveThinkingLevel(model, "off")?.enabled === false) {
 			params.thinking = { type: "disabled" };
 		}
 	}

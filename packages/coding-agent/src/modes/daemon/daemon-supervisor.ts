@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -30,7 +39,6 @@ import {
 } from "../../core/cron-jobs.js";
 import {
 	clearOrphanProcessJournal,
-	isOrphanProcessIdentityCurrent,
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
 } from "../../core/orphan-process-journal.js";
@@ -43,7 +51,13 @@ import {
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
 import { readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
-import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
+import {
+	isProcessAlive,
+	processIdExists,
+	signalProcessGroupOrProcess,
+	terminateUnixProcessGroupByIdentity,
+	terminateWindowsProcessTreeByIdentity,
+} from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
@@ -99,6 +113,7 @@ import {
 import {
 	acquireDaemonSupervisorOwnership,
 	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
 	isDaemonShutdownAdmissionActive,
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
@@ -121,7 +136,7 @@ import {
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
-import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
+import { preserveUncertainWorkerOperations, WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
@@ -152,6 +167,7 @@ const IDLE_EVICTION_DRAIN_TIMEOUT_MS = 5_000;
 const CHILD_PASSIVATION_PER_WORKER_CAP = 2;
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
+const WORKER_PROCESS_IDENTITY_TIMEOUT_MS = 5000;
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -411,7 +427,11 @@ function isSessionSummary(value: unknown): value is SessionSummary {
 	if (!value || typeof value !== "object") {
 		return false;
 	}
-	const candidate = value as { id?: unknown; sessionId?: unknown; cwd?: unknown };
+	const candidate = value as {
+		id?: unknown;
+		sessionId?: unknown;
+		cwd?: unknown;
+	};
 	return (
 		typeof candidate.id === "string" && typeof candidate.sessionId === "string" && typeof candidate.cwd === "string"
 	);
@@ -653,6 +673,7 @@ export class DaemonSupervisor {
 				agentDir,
 				generation: this.generation,
 				appVersion: VERSION,
+				preserveLegacyWindowsWorkerOwnership: this.hasPersistedWorkerDescriptors(),
 			});
 			await prepareDaemonSocketPath(this.socketPath, this.socketLease);
 
@@ -904,7 +925,7 @@ export class DaemonSupervisor {
 	private supervisorAuthenticationClaim(): {
 		supervisorGeneration: string;
 		supervisorPid: number;
-		supervisorProcessStartId?: string;
+		supervisorProcessStartId: string;
 		supervisorSocketPath: string;
 	} {
 		const record = this.ownership?.record;
@@ -914,7 +935,7 @@ export class DaemonSupervisor {
 		return {
 			supervisorGeneration: this.generation,
 			supervisorPid: record.pid,
-			...(record.processStartId ? { supervisorProcessStartId: record.processStartId } : {}),
+			supervisorProcessStartId: record.processStartId,
 			supervisorSocketPath: record.socketPath,
 		};
 	}
@@ -977,12 +998,17 @@ export class DaemonSupervisor {
 			defaultSessionConfig: this.defaultSessionConfig,
 		};
 		const tempPath = `${this.supervisorConfigPath}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
+		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, {
+			mode: 0o600,
+		});
 		chmodSync(tempPath, 0o600);
 		renameSync(tempPath, this.supervisorConfigPath);
 	}
 
 	private hasPersistedWorkerDescriptors(): boolean {
+		if (!existsSync(this.descriptorDir)) {
+			return false;
+		}
 		return readdirSync(this.descriptorDir).some(
 			(name) => name !== SUPERVISOR_CONFIG_FILE_NAME && name.endsWith(".json"),
 		);
@@ -991,9 +1017,57 @@ export class DaemonSupervisor {
 	private persistWorker(worker: ResidentWorker): void {
 		worker.descriptor.updatedAt = new Date().toISOString();
 		const tempPath = `${worker.descriptorPath}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(worker.descriptor, null, 2)}\n`, { mode: 0o600 });
+		writeFileSync(tempPath, `${JSON.stringify(worker.descriptor, null, 2)}\n`, {
+			mode: 0o600,
+		});
 		chmodSync(tempPath, 0o600);
 		renameSync(tempPath, worker.descriptorPath);
+	}
+
+	private async captureLaunchedWorkerProcessStartId(child: ChildProcess, pid: number): Promise<string> {
+		const deadline = Date.now() + WORKER_PROCESS_IDENTITY_TIMEOUT_MS;
+		while (true) {
+			if (child.exitCode !== null || child.signalCode !== null || !isProcessAlive(pid)) {
+				throw new Error("Daemon session worker exited before its process identity was captured");
+			}
+			const processStartId = getProcessStartId(pid);
+			if (
+				processStartId &&
+				child.exitCode === null &&
+				child.signalCode === null &&
+				child.kill(0) &&
+				getProcessStartId(pid) === processStartId
+			) {
+				return processStartId;
+			}
+			if (Date.now() >= deadline) {
+				throw new Error("Failed to obtain daemon session worker process-start identity");
+			}
+			await delay(25);
+		}
+	}
+
+	private validateAndUpgradeWorkerProcessIdentity(worker: ResidentWorker): void {
+		const pid = worker.descriptor.pid;
+		const observedProcessStartId = getProcessStartId(pid);
+		if (!observedProcessStartId || !isProcessAlive(pid) || getProcessStartId(pid) !== observedProcessStartId) {
+			throw new Error(`Could not verify session worker ${worker.descriptor.workerId} process identity`);
+		}
+		const expectedProcessStartId = worker.descriptor.processStartId;
+		if (expectedProcessStartId) {
+			if (observedProcessStartId !== expectedProcessStartId) {
+				throw new Error(`Session worker ${worker.descriptor.workerId} process identity changed`);
+			}
+			return;
+		}
+
+		worker.descriptor.processStartId = observedProcessStartId;
+		try {
+			this.persistWorker(worker);
+		} catch (error) {
+			worker.descriptor.processStartId = undefined;
+			throw error;
+		}
 	}
 
 	private deleteWorkerDescriptor(worker: ResidentWorker): void {
@@ -1388,16 +1462,26 @@ export class DaemonSupervisor {
 			case "cancel_prompt_admission": {
 				const admission =
 					cancellationAdmission ?? this.getPromptAdmission(client, command.activeSessionId, command.admissionId);
-				if (!admission) return success(command.id, command.type, { status: "unknown" as const });
-				if (admission.status === "owned") return success(command.id, command.type, { status: "owned" as const });
+				if (!admission)
+					return success(command.id, command.type, {
+						status: "unknown" as const,
+					});
+				if (admission.status === "owned")
+					return success(command.id, command.type, {
+						status: "owned" as const,
+					});
 				// A definitive cancellation never downgrades to unknown/waiting.
 				if (admission.status === "cancelled") {
-					return success(command.id, command.type, { status: "cancelled" as const });
+					return success(command.id, command.type, {
+						status: "cancelled" as const,
+					});
 				}
 				if (!admission.worker || !admission.workerActiveSessionId) {
 					admission.status = "cancelled";
 					admission.controller.abort();
-					return success(command.id, command.type, { status: "cancelled" as const });
+					return success(command.id, command.type, {
+						status: "cancelled" as const,
+					});
 				}
 				const response = await this.forwardToWorker(admission.worker, {
 					...command,
@@ -1436,7 +1520,11 @@ export class DaemonSupervisor {
 					if (response.success && isSessionSummary(response.data)) {
 						await this.refreshWorkerSummaries(worker);
 						await this.syncAgentPeers().catch(() => undefined);
-						return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
+						return {
+							...response,
+							id: command.id,
+							data: this.publicSummary(worker, response.data),
+						};
 					}
 					return responseWithId(response, command.id);
 				}
@@ -1588,7 +1676,10 @@ export class DaemonSupervisor {
 				}
 				const first = [...this.workers.values()].find((worker) => this.isLiveWorker(worker) && worker.client);
 				if (!first) {
-					return success(command.id, command.type, { paused: false, limits: {} });
+					return success(command.id, command.type, {
+						paused: false,
+						limits: {},
+					});
 				}
 				return this.forwardToWorker(first, command);
 			}
@@ -1632,7 +1723,9 @@ export class DaemonSupervisor {
 						jobs.set(job.id, job);
 					}
 				}
-				return success(command.id, "cron_list", { jobs: sortCronJobs([...jobs.values()]) });
+				return success(command.id, "cron_list", {
+					jobs: sortCronJobs([...jobs.values()]),
+				});
 			}
 			case "heartbeats_list": {
 				if (command.activeSessionId) {
@@ -1641,33 +1734,36 @@ export class DaemonSupervisor {
 				}
 				const workers = [...this.workers.values()].filter((worker) => this.isLiveWorker(worker));
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
-				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
-					await Promise.all(
-						workers.map(async (worker) => {
-							if (worker.client && worker.descriptor.lifecycle === "ready") {
-								const response = await this.forwardToWorker(worker, command, 5000).catch((error: unknown) =>
-									failure(command.id, command.type, error, serializeDaemonError(error)),
-								);
-								if (response.success) {
-									const snapshot = heartbeatsFromResponse(response);
-									worker.heartbeatSnapshot = snapshot;
-									worker.heartbeatSnapshotStale = false;
-									return { heartbeats: snapshot };
-								}
-								this.log(`Could not list heartbeats from a worker: ${response.error}`);
-								if (worker.heartbeatSnapshot === undefined || worker.heartbeatSnapshotStale === true) {
-									return { response };
-								}
+				const snapshots: Array<{
+					heartbeats?: AgentConnectionHeartbeat[];
+					response?: DaemonResponse;
+				}> = await Promise.all(
+					workers.map(async (worker) => {
+						if (worker.client && worker.descriptor.lifecycle === "ready") {
+							const response = await this.forwardToWorker(worker, command, 5000).catch((error: unknown) =>
+								failure(command.id, command.type, error, serializeDaemonError(error)),
+							);
+							if (response.success) {
+								const snapshot = heartbeatsFromResponse(response);
+								worker.heartbeatSnapshot = snapshot;
+								worker.heartbeatSnapshotStale = false;
+								return { heartbeats: snapshot };
 							}
-							if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
-								return { heartbeats: worker.heartbeatSnapshot };
+							this.log(`Could not list heartbeats from a worker: ${response.error}`);
+							if (worker.heartbeatSnapshot === undefined || worker.heartbeatSnapshotStale === true) {
+								return { response };
 							}
-							const state =
-								worker.descriptor.lifecycle === "ready" ? "disconnected" : worker.descriptor.lifecycle;
-							const error = new Error(`Cannot list heartbeats while session worker is ${state}`);
-							return { response: failure(command.id, command.type, error, serializeDaemonError(error)) };
-						}),
-					);
+						}
+						if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
+							return { heartbeats: worker.heartbeatSnapshot };
+						}
+						const state = worker.descriptor.lifecycle === "ready" ? "disconnected" : worker.descriptor.lifecycle;
+						const error = new Error(`Cannot list heartbeats while session worker is ${state}`);
+						return {
+							response: failure(command.id, command.type, error, serializeDaemonError(error)),
+						};
+					}),
+				);
 				const failed = snapshots.find((snapshot) => snapshot.response)?.response;
 				if (failed) {
 					return failed;
@@ -1677,7 +1773,9 @@ export class DaemonSupervisor {
 						heartbeats.set(heartbeat.job.id, heartbeat);
 					}
 				}
-				return success(command.id, "heartbeats_list", { heartbeats: [...heartbeats.values()] });
+				return success(command.id, "heartbeats_list", {
+					heartbeats: [...heartbeats.values()],
+				});
 			}
 			case "heartbeat_manage": {
 				const cachedWorker = [...this.workers.values()].find((worker) =>
@@ -1858,7 +1956,10 @@ export class DaemonSupervisor {
 				);
 				return { ...response, id: command.id, command: command.type };
 			}
-			return this.forwardToWorker(target.worker, { ...command, targetActiveSessionId });
+			return this.forwardToWorker(target.worker, {
+				...command,
+				targetActiveSessionId,
+			});
 		}
 
 		if (!("activeSessionId" in command) || typeof command.activeSessionId !== "string") {
@@ -1957,7 +2058,10 @@ export class DaemonSupervisor {
 		}
 		const sessionDir = command.sessionDir ?? this.defaultSessionConfig.sessionDir;
 		const saved = await this.catalog.list(command.cwd ? resolve(command.cwd) : undefined, sessionDir);
-		return success(command.id, "list", { ...data, sessions: mergeSessionLists(active, saved) });
+		return success(command.id, "list", {
+			...data,
+			sessions: mergeSessionLists(active, saved),
+		});
 	}
 
 	private async handleSavedSessionList(
@@ -1998,7 +2102,9 @@ export class DaemonSupervisor {
 				}
 			: undefined;
 		const saved = await this.catalog.list(command.scope === "current" ? cwd : undefined, sessionDir, callbacks);
-		return success(command.id, "list_saved_sessions", { sessions: saved.map(serializeSavedSessionInfo) });
+		return success(command.id, "list_saved_sessions", {
+			sessions: saved.map(serializeSavedSessionInfo),
+		});
 	}
 
 	private async createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<ResidentWorker> {
@@ -2173,23 +2279,25 @@ export class DaemonSupervisor {
 		if (!supervisorRegistryDir) {
 			throw new Error("Daemon supervisor ownership registry is unavailable");
 		}
+		const environment = createCliSubprocessEnv({
+			...process.env,
+			...launchEnv,
+			[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV]: supervisorRegistryDir,
+			[DAEMON_WORKER_ROLE_ENV]: "1",
+			[DAEMON_WORKER_TOKEN_ENV]: token,
+			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
+			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
+			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
+			[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
+			[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
+			[SESSION_LEASES_ENABLED_ENV]: "1",
+			[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
+		});
+		delete environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
 		const child: ChildProcess = spawn(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
-			env: createCliSubprocessEnv({
-				...process.env,
-				...launchEnv,
-				[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]: supervisorRegistryDir,
-				[DAEMON_WORKER_ROLE_ENV]: "1",
-				[DAEMON_WORKER_TOKEN_ENV]: token,
-				[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
-				[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
-				[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
-				[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
-				[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
-				[SESSION_LEASES_ENABLED_ENV]: "1",
-				[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
-			}),
+			env: environment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
@@ -2211,7 +2319,7 @@ export class DaemonSupervisor {
 		const previousIntentionalStop = existing?.intentionalStop;
 		let descriptorAssigned = false;
 		let childPid: number;
-		let childProcessStartId: string | undefined;
+		let childProcessStartId: string;
 		let worker: ResidentWorker;
 		try {
 			if (!child.pid) {
@@ -2221,14 +2329,14 @@ export class DaemonSupervisor {
 				throw new Error("Failed to create daemon session worker startup gate");
 			}
 			childPid = child.pid;
-			childProcessStartId = getProcessStartId(childPid);
+			childProcessStartId = await this.captureLaunchedWorkerProcessStartId(child, childPid);
 			await this.assertRecoveryAllowed();
 
 			const descriptor: DaemonWorkerDescriptor = {
 				version: 1,
 				workerId,
 				pid: childPid,
-				...(childProcessStartId ? { processStartId: childProcessStartId } : {}),
+				processStartId: childProcessStartId,
 				socketPath,
 				recoveryJournalPath,
 				orphanProcessJournalPath,
@@ -2390,7 +2498,14 @@ export class DaemonSupervisor {
 			const client = new DaemonWorkerClient(worker.descriptor.socketPath);
 			try {
 				await client.connect(Math.min(500, Math.max(50, deadline - Date.now())));
-				await client.waitForHello(1000);
+				const hello = await client.waitForHello(1000);
+				const helloSocketMatches =
+					process.platform === "win32"
+						? hello.socketPath.toLowerCase() === worker.descriptor.socketPath.toLowerCase()
+						: hello.socketPath === worker.descriptor.socketPath;
+				if (!helloSocketMatches) {
+					throw new Error("Daemon session worker hello reported a different socket");
+				}
 				await client.authenticateWorker(
 					worker.descriptor.authenticationToken,
 					this.supervisorAuthenticationClaim(),
@@ -2445,13 +2560,9 @@ export class DaemonSupervisor {
 				// the start id observed while it was alive can be persisted (and
 				// the connected client gives stopWorker its graceful IPC path).
 				if (worker.descriptor.processStartId === undefined && isProcessAlive(worker.descriptor.pid)) {
-					const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
 					try {
 						await this.connectWorker(worker, 2000);
-						if (observedProcessStartId) {
-							worker.descriptor.processStartId = observedProcessStartId;
-							this.persistWorker(worker);
-						}
+						this.validateAndUpgradeWorkerProcessIdentity(worker);
 					} catch {
 						// Unverifiable identity stays untrusted; the stop below
 						// still runs its graceful path and the finalizer keeps
@@ -2472,13 +2583,10 @@ export class DaemonSupervisor {
 			if (!isProcessAlive(worker.descriptor.pid)) {
 				throw new Error("Session worker process is no longer running");
 			}
-			const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
 			await this.connectWorker(worker, 2000);
+			this.validateAndUpgradeWorkerProcessIdentity(worker);
 			await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
 			await this.refreshWorkerSummaries(worker, true);
-			if (worker.descriptor.processStartId === undefined && observedProcessStartId) {
-				worker.descriptor.processStartId = observedProcessStartId;
-			}
 			await this.assertRecoveryAllowed();
 			worker.descriptor.lifecycle = "ready";
 			worker.descriptor.consecutiveFailures = 0;
@@ -2812,13 +2920,11 @@ export class DaemonSupervisor {
 					if (processAlive && processIdentityMatches) {
 						try {
 							await this.connectWorker(worker, 1500);
+							this.validateAndUpgradeWorkerProcessIdentity(worker);
 							await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
 							await this.refreshWorkerSummaries(worker, true);
 							if (this.isWorkerRecoveryCancelled(worker)) {
 								return;
-							}
-							if (worker.descriptor.processStartId === undefined && observedProcessStartId) {
-								worker.descriptor.processStartId = observedProcessStartId;
 							}
 							await this.assertRecoveryAllowed();
 							worker.descriptor.lifecycle = "ready";
@@ -2849,9 +2955,7 @@ export class DaemonSupervisor {
 							`Cannot safely replace live session worker ${worker.descriptor.workerId} without a verified process identity`,
 						);
 					}
-					const safeToKillWorkerProcess =
-						processAlive && processIdentityMatches && worker.descriptor.processStartId !== undefined;
-					await this.recoverUncertainWorkerOperations(worker, safeToKillWorkerProcess);
+					await this.recoverUncertainWorkerOperations(worker, processAlive && processIdentityMatches);
 					if (this.isWorkerRecoveryCancelled(worker)) {
 						return;
 					}
@@ -2900,85 +3004,114 @@ export class DaemonSupervisor {
 
 	private async recoverUncertainWorkerOperations(worker: ResidentWorker, killWorkerProcess = true): Promise<void> {
 		await this.assertRecoveryAllowed();
-		if (killWorkerProcess) {
-			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
-		}
+		WorkerRecoveryJournal.readLatest(worker.descriptor.recoveryJournalPath);
 		const orphanProcessJournalPath = worker.descriptor.orphanProcessJournalPath;
-		if (orphanProcessJournalPath) {
-			try {
-				for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, worker.descriptor.pid)) {
-					if (!isOrphanProcessIdentityCurrent(orphan)) {
-						continue;
+		const activeOrphans = orphanProcessJournalPath
+			? readActiveOrphanProcesses(orphanProcessJournalPath, worker.descriptor.pid)
+			: [];
+		const workerStillExists = isProcessAlive(worker.descriptor.pid);
+		const workerIdentityMismatch =
+			worker.descriptor.processStartId !== undefined &&
+			getProcessStartId(worker.descriptor.pid) !== worker.descriptor.processStartId;
+		if (killWorkerProcess || !workerStillExists || workerIdentityMismatch) {
+			if (process.platform === "win32") {
+				const processStartId = worker.descriptor.processStartId;
+				if (!processStartId) {
+					if (workerStillExists) {
+						throw new Error(`Cannot reap worker ${worker.descriptor.workerId} without an exact process identity`);
 					}
-					const { pid } = orphan;
-					if (process.platform === "win32") {
-						signalProcessGroupOrProcess(pid, "SIGKILL");
-						continue;
-					}
-					try {
-						process.kill(-pid, "SIGKILL");
-					} catch {
-						try {
-							process.kill(pid, "SIGKILL");
-						} catch {
-							// The detached resource may already have exited.
-						}
+				} else {
+					const result = await terminateWindowsProcessTreeByIdentity(
+						worker.descriptor.pid,
+						processStartId,
+						activeOrphans,
+					);
+					if (result === "failed") {
+						throw new Error(`Could not completely reap worker process tree ${worker.descriptor.workerId}`);
 					}
 				}
-				clearOrphanProcessJournal(orphanProcessJournalPath);
+			} else {
+				const processStartId = worker.descriptor.processStartId;
+				if (!processStartId) {
+					if (workerStillExists) {
+						throw new Error(`Cannot reap worker ${worker.descriptor.workerId} without an exact process identity`);
+					}
+				} else {
+					const result = await terminateUnixProcessGroupByIdentity(
+						worker.descriptor.pid,
+						processStartId,
+						getProcessStartId,
+					);
+					if (result === "failed") {
+						throw new Error(`Could not completely reap worker process tree ${worker.descriptor.workerId}`);
+					}
+				}
+			}
+		}
+		if (orphanProcessJournalPath) {
+			try {
+				const currentOrphans = readActiveOrphanProcesses(orphanProcessJournalPath, worker.descriptor.pid);
+				const trackedByIdentity = new Map(
+					[...activeOrphans, ...currentOrphans].map((orphan) => [
+						`${orphan.pid}\0${orphan.processStartId}`,
+						orphan,
+					]),
+				);
+				const trackedOrphans = [...trackedByIdentity.values()];
+				if (process.platform === "win32") {
+					const activeTrackedOrphans = trackedOrphans.filter(
+						(orphan) => getProcessStartId(orphan.pid) === orphan.processStartId,
+					);
+					const [primaryOrphan, ...remainingOrphans] = activeTrackedOrphans;
+					if (primaryOrphan) {
+						const result = await terminateWindowsProcessTreeByIdentity(
+							primaryOrphan.pid,
+							primaryOrphan.processStartId,
+							remainingOrphans,
+						);
+						if (result === "failed") {
+							throw new Error(
+								`Could not completely reap orphan process trees for ${worker.descriptor.workerId}`,
+							);
+						}
+					}
+					if (activeTrackedOrphans.some((orphan) => getProcessStartId(orphan.pid) === orphan.processStartId)) {
+						throw new Error(`Could not confirm orphan process trees exited for ${worker.descriptor.workerId}`);
+					}
+				}
+				for (const orphan of process.platform === "win32" ? [] : trackedOrphans) {
+					const result = await terminateUnixProcessGroupByIdentity(
+						orphan.pid,
+						orphan.processStartId,
+						getProcessStartId,
+					);
+					if (result === "failed") {
+						throw new Error(`Could not completely reap orphan process tree ${orphan.pid}`);
+					}
+				}
 			} catch (error) {
 				this.log(`Could not reap orphaned worker resources: ${String(error)}`);
+				throw error;
 			}
 		}
-		const journal = new WorkerRecoveryJournal(worker.descriptor.recoveryJournalPath);
-		const latest = journal.getLatest();
-		const uncertain = latest.filter((record) => record.busy);
-		if (uncertain.length === 0) {
+		const stableJournal = new WorkerRecoveryJournal(worker.descriptor.recoveryJournalPath);
+		const stableLatest = stableJournal.getLatest();
+		await this.assertRecoveryAllowed();
+		const uncertainOperations = await preserveUncertainWorkerOperations(stableJournal, stableLatest, {
+			rootActiveSessionId: worker.descriptor.rootActiveSessionId,
+			rootSessionFile: worker.descriptor.sessionFile,
+			markInterrupted: (sessionFile, activeSessionId, operations, recoveryId) =>
+				this.catalog.markInterrupted(sessionFile, activeSessionId, operations, recoveryId),
+			beforeJournalUpdate: () => this.assertRecoveryAllowed(),
+		});
+		if (orphanProcessJournalPath) {
+			clearOrphanProcessJournal(orphanProcessJournalPath);
+		}
+		if (uncertainOperations.length === 0) {
 			return;
 		}
-		const interruptedSessions = new Map<
-			string,
-			{ activeSessionId: string; sessionFile: string; operations: Set<string> }
-		>();
-		for (const record of uncertain) {
-			const sessionFile =
-				record.sessionFile ??
-				(record.activeSessionId === worker.descriptor.rootActiveSessionId
-					? worker.descriptor.sessionFile
-					: undefined);
-			if (!sessionFile) {
-				continue;
-			}
-			const key = `${record.activeSessionId}\0${sessionFile}`;
-			let interrupted = interruptedSessions.get(key);
-			if (!interrupted) {
-				interrupted = { activeSessionId: record.activeSessionId, sessionFile, operations: new Set() };
-				interruptedSessions.set(key, interrupted);
-			}
-			interrupted.operations.add(record.operation);
-		}
-		await this.assertRecoveryAllowed();
-		await Promise.all(
-			[...interruptedSessions.values()].map((interrupted) =>
-				this.catalog.markInterrupted(interrupted.sessionFile, interrupted.activeSessionId, [
-					...interrupted.operations,
-				]),
-			),
-		);
-		await this.assertRecoveryAllowed();
-		for (const record of latest) {
-			journal.record({
-				activeSessionId: record.activeSessionId,
-				sessionId: record.sessionId,
-				...(record.sessionFile ? { sessionFile: record.sessionFile } : {}),
-				busy: false,
-				operation: "recovery_hold",
-			});
-		}
 		this.log(
-			`Recovered worker ${worker.descriptor.workerId} without replaying uncertain operations: ${uncertain
-				.map((record) => record.operation)
-				.join(", ")}`,
+			`Recovered worker ${worker.descriptor.workerId} without replaying uncertain operations: ${uncertainOperations.join(", ")}`,
 		);
 	}
 
@@ -3036,7 +3169,12 @@ export class DaemonSupervisor {
 	}
 
 	private async withSessionNameReservation<T>(
-		input: { name: string; depth: number; parentSessionId?: string; parentSessionPath?: string },
+		input: {
+			name: string;
+			depth: number;
+			parentSessionId?: string;
+			parentSessionPath?: string;
+		},
 		action: () => Promise<T>,
 	): Promise<T> {
 		const key = sessionNameReservationKey(input);
@@ -3067,7 +3205,12 @@ export class DaemonSupervisor {
 	private async savedSessionNameReservationInput(
 		sessionPath: string,
 		name: string,
-	): Promise<{ name: string; depth: number; parentSessionId?: string; parentSessionPath?: string }> {
+	): Promise<{
+		name: string;
+		depth: number;
+		parentSessionId?: string;
+		parentSessionPath?: string;
+	}> {
 		const targetPath = canonicalSessionPath(sessionPath);
 		const active = [...this.workers.values()]
 			.flatMap((worker) => [...worker.summaries.values()])
@@ -3086,7 +3229,12 @@ export class DaemonSupervisor {
 	private summaryNameReservationInput(
 		target: Pick<SessionSummary, "rlmDepth" | "parentSessionId" | "parentSessionPath">,
 		name: string,
-	): { name: string; depth: number; parentSessionId?: string; parentSessionPath?: string } {
+	): {
+		name: string;
+		depth: number;
+		parentSessionId?: string;
+		parentSessionPath?: string;
+	} {
 		const depth = target.rlmDepth ?? (target.parentSessionPath ? 1 : 0);
 		return {
 			name,
@@ -3123,7 +3271,9 @@ export class DaemonSupervisor {
 					depth: setDepth,
 					status: classifySessionRosterStatus(summary),
 					...(summary.parentSessionPath
-						? { parentSessionPath: canonicalSessionPath(summary.parentSessionPath) }
+						? {
+								parentSessionPath: canonicalSessionPath(summary.parentSessionPath),
+							}
 						: {}),
 				};
 			}),
@@ -3356,11 +3506,19 @@ export class DaemonSupervisor {
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
 		const response = await client.request(withoutCommandId(command), timeoutMs);
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
-			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
+			return {
+				...response,
+				id: command.id,
+				data: this.publicSummary(worker, response.data),
+			};
 		}
 		if (command.type === "rename" && response.success && isSessionSummary(response.data)) {
 			await this.refreshWorkerSummaries(worker);
-			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
+			return {
+				...response,
+				id: command.id,
+				data: this.publicSummary(worker, response.data),
+			};
 		}
 		return responseWithId(response, command.id);
 	}
@@ -3532,7 +3690,12 @@ export class DaemonSupervisor {
 				});
 			}
 			void this.syncWorkerExtensionUi(activeSessionId);
-			return { result: publicResult, worker: match.worker, transcript, releaseTranscript };
+			return {
+				result: publicResult,
+				worker: match.worker,
+				transcript,
+				releaseTranscript,
+			};
 		} catch (error) {
 			releaseTranscript?.();
 			if (!wasAttached) {
@@ -3824,7 +3987,10 @@ export class DaemonSupervisor {
 			}
 			client.catchupActiveSessionIds?.delete(resolvedId);
 			client.catchupPurposes?.delete(resolvedId);
-			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
+			this.write(client, {
+				type: "session_detached",
+				activeSessionId: resolvedId,
+			});
 			void this.syncWorkerExtensionUi(resolvedId);
 		}
 	}
@@ -4613,7 +4779,11 @@ export class DaemonSupervisor {
 		const path = getDaemonUpdateRestartManifestPath(this.socketPath, agentDir);
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 		const tempPath = `${path}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+		const persistedManifest = {
+			...manifest,
+			...(this.ownership?.registryDir ? { supervisorRegistryDir: resolve(this.ownership.registryDir) } : {}),
+		};
+		writeFileSync(tempPath, `${JSON.stringify(persistedManifest)}\n`, { mode: 0o600 });
 		chmodSync(tempPath, 0o600);
 		const validated = JSON.parse(readFileSync(tempPath, "utf8")) as DaemonUpdateRestartManifest;
 		if (!Array.isArray(validated.sessions) || validated.sessions.length !== manifest.sessions.length) {
@@ -4703,6 +4873,9 @@ export class DaemonSupervisor {
 		// (rescinded, even before the successor pid lands).
 		const entryPid = worker.descriptor.pid;
 		const entryStartId = worker.descriptor.processStartId;
+		const trackedOrphans = worker.descriptor.orphanProcessJournalPath
+			? readActiveOrphanProcesses(worker.descriptor.orphanProcessJournalPath, entryPid)
+			: [];
 		const assertStopStillApplies = () => {
 			if (directChild) {
 				return;
@@ -4714,6 +4887,7 @@ export class DaemonSupervisor {
 				throw new Error(`Session worker ${worker.descriptor.workerId} was relaunched during stop`);
 			}
 		};
+		let rollbackStateError: unknown;
 		try {
 			if (removeDescriptor) {
 				this.persistWorkerStopTombstone(worker, archiveSession);
@@ -4726,6 +4900,7 @@ export class DaemonSupervisor {
 			if (!directChild) {
 				throw error;
 			}
+			rollbackStateError = error;
 			this.reportCleanupFailure(`worker rollback state ${worker.descriptor.workerId}`, error);
 		}
 		const transferError = new Error("Session worker stopped during snapshot transfer");
@@ -4761,12 +4936,10 @@ export class DaemonSupervisor {
 			worker.client.close();
 			worker.client = undefined;
 		} else if (directChild) {
-			if (process.platform === "win32") {
-				signalProcessGroupOrProcess(entryPid, "SIGTERM");
-			} else {
+			if (process.platform !== "win32") {
 				directChild.child.kill("SIGTERM");
 			}
-		} else if (this.processIdentity(entryPid, entryStartId) === "current") {
+		} else if (process.platform !== "win32" && this.processIdentity(entryPid, entryStartId) === "current") {
 			signalProcessGroupOrProcess(entryPid, "SIGTERM");
 		}
 		// Identity-aware in both directions: a replaced pid counts as gone (never
@@ -4794,24 +4967,34 @@ export class DaemonSupervisor {
 			await delay(25);
 		}
 		let sigkillSent = false;
-		if (force && isWorkerProcessAlive()) {
-			if (directChild) {
-				if (process.platform === "win32") {
-					signalProcessGroupOrProcess(entryPid, "SIGKILL");
-					sigkillSent = true;
-				} else {
-					sigkillSent = directChild.child.kill("SIGKILL");
+		let exactTreeTerminationFailed = false;
+		if (force && (isWorkerProcessAlive() || process.platform !== "win32")) {
+			if (process.platform === "win32") {
+				if (entryStartId) {
+					const result = await terminateWindowsProcessTreeByIdentity(entryPid, entryStartId, trackedOrphans);
+					exactTreeTerminationFailed = result === "failed";
+					sigkillSent = result === "terminated";
 				}
-			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
-				// Fresh, unthrottled check: the cached verdict may be up to 500ms
-				// old, long enough for the pid to be recycled.
-				signalProcessGroupOrProcess(entryPid, "SIGKILL");
-				sigkillSent = true;
+			} else if (entryStartId) {
+				const result = await terminateUnixProcessGroupByIdentity(entryPid, entryStartId, getProcessStartId);
+				exactTreeTerminationFailed = result === "failed";
+				sigkillSent = result === "terminated";
+			} else {
+				exactTreeTerminationFailed = true;
 			}
 			const forceDeadline = Date.now() + 1000;
 			while (isWorkerProcessAlive() && Date.now() < forceDeadline) {
 				await delay(25);
 			}
+		}
+		if (exactTreeTerminationFailed) {
+			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
+			if (removeDescriptor) {
+				this.scheduleWorkerStopFinalization(worker);
+			}
+			throw new WorkerStopTimeoutError(
+				`Session worker ${worker.descriptor.workerId} process tree was only partially stopped`,
+			);
 		}
 		if (isWorkerProcessAlive()) {
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
@@ -4826,12 +5009,75 @@ export class DaemonSupervisor {
 			await directChild.closed;
 		}
 		assertStopStillApplies();
+		if (worker.descriptor.orphanProcessJournalPath) {
+			let currentOrphans: ReturnType<typeof readActiveOrphanProcesses>;
+			try {
+				currentOrphans = readActiveOrphanProcesses(worker.descriptor.orphanProcessJournalPath, entryPid);
+			} catch (error) {
+				worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
+				if (removeDescriptor) {
+					this.scheduleWorkerStopFinalization(worker);
+				}
+				throw new WorkerStopTimeoutError(
+					`Could not read child process records for session worker ${worker.descriptor.workerId}: ${String(error)}`,
+				);
+			}
+			const trackedByIdentity = new Map(
+				[...trackedOrphans, ...currentOrphans].map((orphan) => [`${orphan.pid}\0${orphan.processStartId}`, orphan]),
+			);
+			const trackedOrphanProcesses = [...trackedByIdentity.values()];
+			let orphanCleanupFailed = false;
+			if (process.platform === "win32") {
+				const activeTrackedOrphans = trackedOrphanProcesses.filter(
+					(orphan) => getProcessStartId(orphan.pid) === orphan.processStartId,
+				);
+				const [primaryOrphan, ...remainingOrphans] = activeTrackedOrphans;
+				if (primaryOrphan) {
+					const result = await terminateWindowsProcessTreeByIdentity(
+						primaryOrphan.pid,
+						primaryOrphan.processStartId,
+						remainingOrphans,
+					);
+					orphanCleanupFailed = result === "failed";
+				}
+			} else {
+				for (const orphan of trackedOrphanProcesses) {
+					const result = await terminateUnixProcessGroupByIdentity(
+						orphan.pid,
+						orphan.processStartId,
+						getProcessStartId,
+					);
+					if (result === "failed" || result === "identity-mismatch") {
+						orphanCleanupFailed = true;
+						break;
+					}
+				}
+			}
+			if (
+				orphanCleanupFailed ||
+				trackedOrphanProcesses.some((orphan) => getProcessStartId(orphan.pid) === orphan.processStartId)
+			) {
+				worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
+				if (removeDescriptor) {
+					this.scheduleWorkerStopFinalization(worker);
+				}
+				throw new WorkerStopTimeoutError(
+					`Session worker ${worker.descriptor.workerId} child process trees were only partially stopped`,
+				);
+			}
+		}
 		if (removeDescriptor && worker.descriptor.archiveOnStop) {
 			if (force) {
 				this.reclaimStoppedWorkerCronLock(worker);
 			}
 			await this.finalizeArchivedWorkerStop(worker);
 			assertStopStillApplies();
+		}
+		if (rollbackStateError !== undefined) {
+			throw rollbackStateError;
+		}
+		if (worker.descriptor.orphanProcessJournalPath) {
+			clearOrphanProcessJournal(worker.descriptor.orphanProcessJournalPath);
 		}
 		this.workers.delete(worker.descriptor.workerId);
 		if (removeDescriptor) {
@@ -4914,10 +5160,28 @@ export class DaemonSupervisor {
 				// to be recycled by an unrelated process. A transiently
 				// unobservable identity skips this attempt but keeps escalation
 				// armed so a wedged worker is still killed on a later pass.
-				const observedNow = processStartId === undefined ? undefined : getProcessStartId(pid);
-				if (processStartId === undefined || observedNow === processStartId) {
-					signalProcessGroupOrProcess(pid, "SIGKILL");
-					killed = true;
+				if (process.platform === "win32" && processStartId) {
+					let trackedOrphans: ReturnType<typeof readActiveOrphanProcesses> = [];
+					if (worker.descriptor.orphanProcessJournalPath) {
+						try {
+							trackedOrphans = readActiveOrphanProcesses(worker.descriptor.orphanProcessJournalPath, pid);
+						} catch (error) {
+							this.reportCleanupFailure(`worker child process records ${worker.descriptor.workerId}`, error);
+							await unrefDelay(STOP_FINALIZATION_RECHECK_MS);
+							continue;
+						}
+					}
+					const result = await terminateWindowsProcessTreeByIdentity(pid, processStartId, trackedOrphans);
+					killed = result !== "failed";
+				} else if (processStartId) {
+					const result = await terminateUnixProcessGroupByIdentity(pid, processStartId, getProcessStartId);
+					killed = result === "terminated" || result === "not-found";
+					if (result === "failed" || result === "identity-mismatch") {
+						this.reportCleanupFailure(
+							`worker process tree ${worker.descriptor.workerId}`,
+							new Error(`Exact Unix process-tree cleanup returned ${result}`),
+						);
+					}
 				}
 			}
 			await unrefDelay(STOP_FINALIZATION_RECHECK_MS);
@@ -5190,6 +5454,7 @@ export class DaemonSupervisor {
 		this.socketLease = undefined;
 		await this.runCleanupStep("daemon socket lock", async () => lease?.release());
 		const ownership = this.ownership;
+		const supervisorRegistryDir = ownership?.registryDir;
 		this.ownership = undefined;
 		await this.runCleanupStep("daemon ownership", async () => ownership?.release());
 		if (relaunch) {
@@ -5201,6 +5466,12 @@ export class DaemonSupervisor {
 			delete environment[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV];
 			delete environment[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			delete environment[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+			delete environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+			if (supervisorRegistryDir) {
+				environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] = supervisorRegistryDir;
+			} else {
+				delete environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV];
+			}
 			delete environment[ORPHAN_PROCESS_JOURNAL_ENV];
 			delete environment[SESSION_LEASES_ENABLED_ENV];
 			delete environment[SESSION_LEASE_OWNER_ID_ENV];

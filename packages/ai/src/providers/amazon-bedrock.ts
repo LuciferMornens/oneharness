@@ -21,7 +21,13 @@ import {
 	ToolResultStatus,
 } from "@aws-sdk/client-bedrock-runtime";
 import type { DocumentType } from "@smithy/types";
-import { calculateCost, getReasoningCapabilities, resolveThinkingLevel } from "../models.js";
+import {
+	assertValidReasoningBudgetValue,
+	assertValidReasoningCapabilities,
+	calculateCost,
+	getReasoningCapabilities,
+	resolveThinkingLevel,
+} from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -195,16 +201,24 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		}
 
 		try {
+			const capabilities = assertValidReasoningCapabilities(model);
+			if (capabilities?.control === "budget") {
+				for (const [level, budget] of Object.entries(options.thinkingBudgets ?? {})) {
+					if (budget !== undefined) assertValidReasoningBudgetValue(model, level, budget);
+				}
+			}
 			const client = new BedrockRuntimeClient(config);
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
+			const novaHighReasoning = isNova2LiteHighReasoning(model, options);
 			let commandInput = {
 				modelId: model.id,
 				messages: convertMessages(context, model, cacheRetention),
 				system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
 				inferenceConfig: {
-					...(options.maxTokens !== undefined && { maxTokens: options.maxTokens }),
+					...(options.maxTokens !== undefined && !novaHighReasoning && { maxTokens: options.maxTokens }),
 					...(options.temperature !== undefined &&
-						!supportsAlwaysOnAdaptiveThinking(model.id, model.name) && { temperature: options.temperature }),
+						!novaHighReasoning &&
+						!usesIncompatibleClaudeThinking(model, options) && { temperature: options.temperature }),
 				},
 				toolConfig: convertToolConfig(context.tools, options.toolChoice),
 				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
@@ -321,15 +335,18 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const base = buildBaseOptions(model, options, undefined);
+	if (!model.reasoning) return streamBedrock(model, context, base satisfies BedrockOptions);
 	const resolvedReasoning = resolveThinkingLevel(model, options?.reasoning);
 	if (!resolvedReasoning) return streamBedrock(model, context, base satisfies BedrockOptions);
 	if (!resolvedReasoning.enabled) return streamBedrock(model, context, base satisfies BedrockOptions);
 	const reasoning = resolvedReasoning.level as ThinkingLevel;
 	const thinkingBudgets = options?.thinkingBudgets;
 	const reasoningControl = getReasoningCapabilities(model)?.control;
-	const adaptiveThinking =
-		isAnthropicClaudeModel(model) &&
-		(supportsAdaptiveThinking(model.id, model.name) || model.reasoningCapabilities?.control === "effort");
+	if (reasoningControl === "fixed") return streamBedrock(model, context, base satisfies BedrockOptions);
+	if (isAmazonNova2LiteModel(model)) {
+		return streamBedrock(model, context, { ...base, reasoning } satisfies BedrockOptions);
+	}
+	const adaptiveThinking = isAnthropicClaudeModel(model) && usesAdaptiveThinking(model);
 
 	if (adaptiveThinking) {
 		return streamBedrock(model, context, {
@@ -338,32 +355,28 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 			thinkingBudgets,
 		} satisfies BedrockOptions);
 	}
-
-	if (reasoningControl !== "fixed") {
-		const level = clampReasoning(reasoning)!;
-		const capabilityBudget =
-			typeof resolvedReasoning.providerValue === "number" ? resolvedReasoning.providerValue : undefined;
-		const requestedBudget = thinkingBudgets?.[level] ?? capabilityBudget;
-		const adjusted = adjustMaxTokensForThinking(base.maxTokens || 0, model.maxTokens, reasoning, {
-			...thinkingBudgets,
-			...(requestedBudget !== undefined ? { [level]: requestedBudget } : {}),
-		});
-
-		return streamBedrock(model, context, {
-			...base,
-			maxTokens: adjusted.maxTokens,
-			reasoning,
-			thinkingBudgets: {
-				...(thinkingBudgets || {}),
-				[level]: adjusted.thinkingBudget,
-			},
-		} satisfies BedrockOptions);
+	if (reasoningControl === "effort") {
+		// streamBedrock validates unsupported exact effort routes before onPayload.
+		return streamBedrock(model, context, { ...base, reasoning } satisfies BedrockOptions);
 	}
+
+	const level = clampReasoning(reasoning)!;
+	const capabilityBudget =
+		typeof resolvedReasoning.providerValue === "number" ? resolvedReasoning.providerValue : undefined;
+	const requestedBudget = thinkingBudgets?.[level] ?? capabilityBudget;
+	const adjusted = adjustMaxTokensForThinking(base.maxTokens || 0, model.maxTokens, reasoning, {
+		...thinkingBudgets,
+		...(requestedBudget !== undefined ? { [level]: requestedBudget } : {}),
+	});
 
 	return streamBedrock(model, context, {
 		...base,
+		maxTokens: adjusted.maxTokens,
 		reasoning,
-		thinkingBudgets,
+		thinkingBudgets: {
+			...(thinkingBudgets || {}),
+			[level]: adjusted.thinkingBudget,
+		},
 	} satisfies BedrockOptions);
 };
 
@@ -526,6 +539,46 @@ function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean 
 function supportsAlwaysOnAdaptiveThinking(modelId: string, modelName?: string): boolean {
 	const candidates = getModelMatchCandidates(modelId, modelName);
 	return candidates.some((s) => s.includes("fable-5") || s.includes("mythos-5") || s.includes("mythos-preview"));
+}
+
+function isAmazonNova2LiteModel(model: Model<"bedrock-converse-stream">): boolean {
+	return getModelMatchCandidates(model.id, model.name).some((value) => /(?:^|-)nova-2-lite(?:-|$)/.test(value));
+}
+
+function mapNova2LiteReasoningEffort(
+	model: Model<"bedrock-converse-stream">,
+	level: ThinkingLevel,
+): "low" | "medium" | "high" {
+	const mapped = resolveThinkingLevel(model, level)?.providerValue;
+	if (mapped === "low" || mapped === "medium" || mapped === "high") return mapped;
+	if (level === "minimal" || level === "low") return "low";
+	if (level === "medium") return "medium";
+	return "high";
+}
+
+function isNova2LiteHighReasoning(model: Model<"bedrock-converse-stream">, options: BedrockOptions): boolean {
+	return (
+		model.reasoning &&
+		isAmazonNova2LiteModel(model) &&
+		options.reasoning !== undefined &&
+		mapNova2LiteReasoningEffort(model, options.reasoning) === "high"
+	);
+}
+
+function usesAdaptiveThinking(model: Model<"bedrock-converse-stream">): boolean {
+	if (!model.reasoning) return false;
+	const control = model.reasoningCapabilities?.control;
+	return control !== undefined ? control === "effort" : supportsAdaptiveThinking(model.id, model.name);
+}
+
+function usesIncompatibleClaudeThinking(model: Model<"bedrock-converse-stream">, options: BedrockOptions): boolean {
+	if (!model.reasoning) return false;
+	if (supportsAlwaysOnAdaptiveThinking(model.id, model.name)) return true;
+	return (
+		options.reasoning !== undefined &&
+		isAnthropicClaudeModel(model) &&
+		getReasoningCapabilities(model)?.control !== "fixed"
+	);
 }
 
 function mapThinkingLevelToEffort(
@@ -914,16 +967,24 @@ function buildAdditionalModelRequestFields(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
 ): Record<string, any> | undefined {
-	if (!options.reasoning || !model.reasoning) {
+	if (!options.reasoning || !model.reasoning || getReasoningCapabilities(model)?.control === "fixed") {
 		return undefined;
+	}
+
+	if (isAmazonNova2LiteModel(model)) {
+		return {
+			reasoningConfig: {
+				type: "enabled",
+				maxReasoningEffort: mapNova2LiteReasoningEffort(model, options.reasoning),
+			},
+		};
 	}
 
 	if (isAnthropicClaudeModel(model)) {
 		// GovCloud Bedrock currently rejects the Claude thinking.display field.
 		// Omit it there until the GovCloud Converse schema catches up.
 		const display = isGovCloudBedrockTarget(model, options) ? undefined : (options.thinkingDisplay ?? "summarized");
-		const adaptiveThinking =
-			supportsAdaptiveThinking(model.id, model.name) || model.reasoningCapabilities?.control === "effort";
+		const adaptiveThinking = usesAdaptiveThinking(model);
 		const result: Record<string, any> = adaptiveThinking
 			? {
 					thinking: { type: "adaptive", ...(display !== undefined ? { display } : {}) },

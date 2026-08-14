@@ -15,15 +15,18 @@ import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
 import { isLocalPath } from "../utils/paths.js";
 import { isValidThinkingLevel } from "./args.js";
+import { createDaemonSupervisorLaunchEnvironment, probeDaemonVersion, StaleDaemonError } from "./daemon-launch.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
 import { runPs, runReap } from "./daemon-ps.js";
 
 interface ParsedDaemonClientCommand {
 	command: string;
-	socketPath: string;
+	socketPath?: string;
 	json: boolean;
 	positionals: string[];
 }
+
+type ResolvedDaemonClientCommand = ParsedDaemonClientCommand & { socketPath: string };
 
 const DAEMON_CLIENT_COMMANDS = new Set([
 	"start",
@@ -67,7 +70,7 @@ export async function handleDaemonCommand(args: string[]): Promise<boolean> {
 }
 
 function parseDaemonClientCommand(args: string[]): ParsedDaemonClientCommand {
-	let socketPath = defaultDaemonSocketPath();
+	let socketPath: string | undefined;
 	let json = false;
 	const positionals: string[] = [];
 	let passthrough = false;
@@ -130,22 +133,23 @@ function parseDaemonClientCommand(args: string[]): ParsedDaemonClientCommand {
 }
 
 async function runDaemonClientCommand(parsed: ParsedDaemonClientCommand): Promise<void> {
-	if (parsed.command === "open") {
-		await runOpen(parsed);
-		return;
-	}
-
-	if (parsed.command === "start") {
-		await runStart(parsed);
-		return;
-	}
-
 	if (parsed.command === "ps") {
 		await runPsCommand(parsed);
 		return;
 	}
+	const resolved = { ...parsed, socketPath: parsed.socketPath ?? defaultDaemonSocketPath() };
 
-	const client = new DaemonClient(parsed.socketPath);
+	if (parsed.command === "open") {
+		await runOpen(resolved);
+		return;
+	}
+
+	if (parsed.command === "start") {
+		await runStart(resolved);
+		return;
+	}
+
+	const client = new DaemonClient(resolved.socketPath);
 	await client.connect();
 
 	try {
@@ -263,7 +267,7 @@ async function runShutdown(client: DaemonClient, args: string[], json: boolean):
 	await printResponseData(client, { type: "shutdown", force }, json);
 }
 
-async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
+async function runOpen(parsed: ResolvedDaemonClientCommand): Promise<void> {
 	const sessionArgs = parseSessionArgs(parsed.positionals);
 	if (!(await canConnectToDaemon(parsed.socketPath, 250))) {
 		await runStart({ ...parsed, command: "start", positionals: sessionArgs.daemonArgs });
@@ -670,10 +674,14 @@ function nextDefaultSessionName(sessions: SessionSummary[]): string {
 	return fallback;
 }
 
-async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
-	if (await canConnectToDaemon(parsed.socketPath, 250)) {
+async function runStart(parsed: ResolvedDaemonClientCommand): Promise<void> {
+	const running = await probeDaemonVersion(parsed.socketPath);
+	if (running.status === "current") {
 		console.log(`Daemon already running on ${parsed.socketPath}`);
 		return;
+	}
+	if (running.status === "stale") {
+		throw new StaleDaemonError(parsed.socketPath, running.hello);
 	}
 
 	const entrypoint = process.argv[1];
@@ -694,7 +702,7 @@ async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
 	const child = spawn(process.execPath, daemonArgs, {
 		cwd: sessionArgs.config?.cwd ?? process.cwd(),
 		detached: true,
-		env: process.env,
+		env: createDaemonSupervisorLaunchEnvironment(),
 		stdio: "ignore",
 		windowsHide: true,
 	});
@@ -702,7 +710,7 @@ async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
 
 	const deadline = Date.now() + 10000;
 	while (Date.now() < deadline) {
-		if (await canConnectToDaemon(parsed.socketPath, 250)) {
+		if ((await probeDaemonVersion(parsed.socketPath)).status === "current") {
 			console.log(`Daemon started on ${parsed.socketPath} (pid ${child.pid})`);
 			return;
 		}

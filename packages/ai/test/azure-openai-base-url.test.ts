@@ -4,7 +4,7 @@ import {
 	streamAzureOpenAIResponses,
 	streamSimpleAzureOpenAIResponses,
 } from "../src/providers/azure-openai-responses.js";
-import type { Context } from "../src/types.js";
+import type { Context, Model } from "../src/types.js";
 
 interface CapturedAzureClientOptions {
 	apiKey: string;
@@ -86,7 +86,7 @@ async function captureClientBaseUrl(baseUrl: string): Promise<string> {
 }
 
 describe("azure-openai-responses base URL normalization", () => {
-	it("uses authoritative capability values for max and default off reasoning", async () => {
+	it("uses authoritative capability values, preserves defaults, and keeps fixed controls wire-silent", async () => {
 		process.env.AZURE_OPENAI_BASE_URL = "https://my-resource.openai.azure.com";
 		let payload: unknown;
 		await streamSimpleAzureOpenAIResponses(getModel("azure-openai-responses", "gpt-5.6"), context, {
@@ -104,7 +104,68 @@ describe("azure-openai-responses base URL normalization", () => {
 				payload = value;
 			},
 		}).result();
+		expect(payload).not.toMatchObject({ reasoning: expect.anything() });
+
+		const fixedModel = {
+			...getModel("azure-openai-responses", "gpt-5.6"),
+			reasoningCapabilities: { control: "fixed" as const, levels: { high: "always" } },
+			thinkingLevelMap: { high: "always" },
+		};
+		await streamSimpleAzureOpenAIResponses(fixedModel, context, {
+			apiKey: "test-api-key",
+			reasoning: "high",
+			onPayload: (value) => {
+				payload = value;
+			},
+		}).result();
+		expect(payload).not.toMatchObject({ reasoning: expect.anything() });
+
+		await streamAzureOpenAIResponses(getModel("azure-openai-responses", "gpt-5.6"), context, {
+			apiKey: "test-api-key",
+			reasoningEnabled: false,
+			reasoningEffort: "max",
+			reasoningSummary: "detailed",
+			onPayload: (value) => {
+				payload = value;
+			},
+		}).result();
 		expect(payload).toMatchObject({ reasoning: { effort: "none" } });
+		expect(payload).not.toMatchObject({ reasoning: { summary: expect.anything() } });
+
+		await streamAzureOpenAIResponses(getModel("azure-openai-responses", "gpt-5-pro"), context, {
+			apiKey: "test-api-key",
+			reasoningEnabled: false,
+			reasoningEffort: "high",
+			reasoningSummary: "detailed",
+			onPayload: (value) => {
+				payload = value;
+			},
+		}).result();
+		expect(payload).not.toMatchObject({ reasoning: expect.anything() });
+	});
+
+	it("rejects numeric budget contracts before building an Azure Responses request", async () => {
+		process.env.AZURE_OPENAI_BASE_URL = "https://my-resource.openai.azure.com";
+		let payloadBuilt = false;
+		const model: Model<"azure-openai-responses"> = {
+			...getModel("azure-openai-responses", "gpt-5.6"),
+			provider: "custom-budget",
+			reasoningCapabilities: { control: "budget", levels: { off: 0, high: 8192 } },
+		};
+
+		const result = await streamAzureOpenAIResponses(model, context, {
+			apiKey: "test-api-key",
+			reasoningEffort: "high",
+			onPayload: () => {
+				payloadBuilt = true;
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(
+			'API "azure-openai-responses" accepts only string reasoning effort values and cannot serialize a numeric reasoning budget',
+		);
+		expect(payloadBuilt).toBe(false);
 	});
 
 	it("normalizes Cognitive Services root endpoints to /openai/v1", async () => {

@@ -1,6 +1,12 @@
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
+import {
+	appendRecoveryJournalLine,
+	readAndRepairRecoveryJournal,
+	replaceRecoveryJournal,
+	withRecoveryJournalLock,
+} from "./recovery-journal-file.js";
 
 interface ReceivedRecord {
 	version: 1;
@@ -56,7 +62,7 @@ export class CommandRecoveryJournal {
 
 	constructor(private readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-		this.load();
+		this.load(withRecoveryJournalLock(this.path, () => readAndRepairRecoveryJournal(this.path)));
 	}
 
 	lookup(
@@ -125,16 +131,7 @@ export class CommandRecoveryJournal {
 		}
 	}
 
-	private load(): void {
-		let contents: string;
-		try {
-			contents = readFileSync(this.path, "utf8");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-				return;
-			}
-			throw error;
-		}
+	private load(contents: string): void {
 		for (const line of contents.split("\n")) {
 			if (!line) {
 				continue;
@@ -172,19 +169,14 @@ export class CommandRecoveryJournal {
 	}
 
 	private append(record: JournalRecord): void {
-		const descriptor = openSync(this.path, "a", 0o600);
-		try {
-			writeSync(descriptor, `${JSON.stringify(record)}\n`);
-			fsyncSync(descriptor);
-		} finally {
-			closeSync(descriptor);
-		}
-		chmodSync(this.path, 0o600);
+		withRecoveryJournalLock(this.path, () => {
+			readAndRepairRecoveryJournal(this.path);
+			appendRecoveryJournalLine(this.path, JSON.stringify(record));
+		});
 		this.recordCount++;
 	}
 
 	private compact(): void {
-		const tempPath = `${this.path}.${process.pid}.tmp`;
 		const records: JournalRecord[] = [];
 		for (const [key, entry] of this.entries) {
 			records.push(entry.received);
@@ -198,22 +190,13 @@ export class CommandRecoveryJournal {
 				});
 			}
 		}
-		const descriptor = openSync(tempPath, "w", 0o600);
-		try {
-			writeSync(descriptor, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
-			fsyncSync(descriptor);
-		} finally {
-			closeSync(descriptor);
-		}
-		renameSync(tempPath, this.path);
-		if (process.platform !== "win32") {
-			const directoryDescriptor = openSync(dirname(this.path), "r");
-			try {
-				fsyncSync(directoryDescriptor);
-			} finally {
-				closeSync(directoryDescriptor);
-			}
-		}
+		withRecoveryJournalLock(this.path, () => {
+			readAndRepairRecoveryJournal(this.path);
+			replaceRecoveryJournal(
+				this.path,
+				records.map((record) => JSON.stringify(record)),
+			);
+		});
 		this.recordCount = records.length;
 	}
 }

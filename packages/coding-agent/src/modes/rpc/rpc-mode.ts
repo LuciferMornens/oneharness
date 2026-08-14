@@ -187,6 +187,7 @@ async function runRpcModeWithConnectionInternal(
 			process.exit(exitCode);
 		}
 		shuttingDown = true;
+		await killTrackedDetachedChildren();
 		await cancelPendingExtensionUi();
 		for (const cleanup of signalCleanupHandlers) cleanup();
 		unsubscribe();
@@ -199,7 +200,6 @@ async function runRpcModeWithConnectionInternal(
 
 	for (const signal of ["SIGTERM", ...(process.platform === "win32" ? [] : ["SIGHUP"])] as NodeJS.Signals[]) {
 		const handler = () => {
-			killTrackedDetachedChildren();
 			void shutdown(signal === "SIGHUP" ? 129 : 143);
 		};
 		process.on(signal, handler);

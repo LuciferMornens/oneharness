@@ -467,6 +467,126 @@ describe("openai-codex streaming", () => {
 		expect(requestedReasoning).toEqual({ effort: "xhigh", summary: "auto" });
 	});
 
+	it("gives explicit reasoning disable precedence over effort and summary", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+		const token = mockToken();
+		let requestedReasoning: unknown;
+
+		global.fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+			}
+			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+			}
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+				requestedReasoning = body?.reasoning;
+				return new Response(buildSSEPayload({ status: "completed" }), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			reasoningCapabilities: { control: "effort", levels: { off: "none", high: "high" } },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			reasoningEnabled: false,
+			reasoningEffort: "high",
+			reasoningSummary: "detailed",
+		}).result();
+
+		expect(requestedReasoning).toEqual({ effort: "none" });
+
+		requestedReasoning = null;
+		await streamOpenAICodexResponses(
+			{
+				...model,
+				reasoningCapabilities: { control: "effort", levels: { off: null, high: "high" } },
+			},
+			context,
+			{
+				apiKey: token,
+				reasoningEnabled: false,
+				reasoningEffort: "high",
+				reasoningSummary: "detailed",
+			},
+		).result();
+
+		expect(requestedReasoning).toBeUndefined();
+
+		requestedReasoning = null;
+		await streamOpenAICodexResponses({ ...model, reasoning: false }, context, {
+			apiKey: token,
+			reasoningEnabled: true,
+			reasoningEffort: "high",
+			reasoningEffortValue: "xhigh",
+			reasoningSummary: "detailed",
+		}).result();
+
+		expect(requestedReasoning).toBeUndefined();
+	});
+
+	it("rejects numeric budget contracts before building a Codex Responses request", async () => {
+		const token = mockToken();
+		let payloadBuilt = false;
+		const fetchMock = vi.fn();
+		global.fetch = fetchMock as typeof fetch;
+		const model: Model<"openai-codex-responses"> = {
+			id: "custom-codex-budget",
+			name: "Custom Codex budget",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			reasoningCapabilities: { control: "budget", levels: { off: 0, high: 8192 } },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			reasoningEffort: "high",
+			onPayload: () => {
+				payloadBuilt = true;
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(
+			'API "openai-codex-responses" accepts only string reasoning effort values and cannot serialize a numeric reasoning budget',
+		);
+		expect(payloadBuilt).toBe(false);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it.each(["gpt-5.3-codex", "gpt-5.4", "gpt-5.5"])("clamps %s minimal reasoning effort to low", async (modelId) => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;

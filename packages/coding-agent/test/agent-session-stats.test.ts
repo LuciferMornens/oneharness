@@ -78,6 +78,25 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 }
 
 describe("AgentSession.getSessionStats", () => {
+	it("leaves thinking state unchanged when no reasoning level is selectable", () => {
+		const { session } = createSession();
+
+		try {
+			session.agent.state.model = {
+				...model,
+				reasoningCapabilities: { control: "effort", levels: {} },
+				thinkingLevelMap: {},
+			};
+			const previousLevel = session.thinkingLevel;
+
+			expect(session.getAvailableThinkingLevels()).toEqual([]);
+			expect(session.cycleThinkingLevel()).toBeUndefined();
+			expect(session.thinkingLevel).toBe(previousLevel);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("exposes the current context usage alongside token totals", () => {
 		const { session, sessionManager } = createSession();
 

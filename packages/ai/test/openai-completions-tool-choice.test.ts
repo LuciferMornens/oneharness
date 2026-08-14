@@ -931,7 +931,7 @@ describe("openai-completions tool_choice", () => {
 		expect((payload as { reasoning?: unknown }).reasoning).toBeUndefined();
 	});
 
-	it("requests off for omitted and explicit off reasoning on Prime effort models", async () => {
+	it("preserves omitted reasoning and uses native off values for OpenRouter and Prime effort models", async () => {
 		const model = getModel("prime-inference", "moonshotai/kimi-k3")!;
 		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
 		let payload: unknown;
@@ -942,7 +942,7 @@ describe("openai-completions tool_choice", () => {
 				payload = params;
 			},
 		}).result();
-		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
+		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBeUndefined();
 
 		await streamSimple(model, context, {
 			apiKey: "test",
@@ -952,6 +952,26 @@ describe("openai-completions tool_choice", () => {
 			},
 		}).result();
 		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
+
+		for (const modelId of ["openai/gpt-5.4", "moonshotai/kimi-k3"] as const) {
+			await streamSimple(getModel("prime-inference", modelId), context, {
+				apiKey: "test",
+				reasoning: "off",
+				onPayload: (params: unknown) => {
+					payload = params;
+				},
+			}).result();
+			expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
+		}
+
+		await streamSimple(getModel("openrouter", "moonshotai/kimi-k3"), context, {
+			apiKey: "test",
+			reasoning: "off",
+			onPayload: (params: unknown) => {
+				payload = params;
+			},
+		}).result();
+		expect((payload as { reasoning?: unknown }).reasoning).toEqual({ effort: "none" });
 	});
 
 	it("serializes explicit off only for models that allow disabling reasoning", async () => {
@@ -1042,5 +1062,65 @@ describe("openai-completions tool_choice", () => {
 			},
 		}).result();
 		expect((payload as { reasoning?: unknown }).reasoning).toEqual({ enabled: false });
+	});
+
+	it("serializes native Moonshot K2 toggles and exact K3 effort", async () => {
+		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
+		let payload: unknown;
+		const capture = (params: unknown) => {
+			payload = params;
+		};
+
+		for (const model of [
+			getModel("moonshotai", "kimi-k2.5"),
+			getModel("moonshotai", "kimi-k2.6"),
+			getModel("moonshotai-cn", "kimi-k2.5"),
+			getModel("moonshotai-cn", "kimi-k2.6"),
+		]) {
+			expect(model.reasoningCapabilities).toEqual({
+				control: "toggle",
+				levels: {
+					off: "disabled",
+					minimal: null,
+					low: null,
+					medium: null,
+					high: "enabled",
+					xhigh: null,
+					max: null,
+				},
+			});
+
+			await streamSimple(model, context, { apiKey: "test", reasoning: "high", onPayload: capture }).result();
+			expect((payload as { thinking?: unknown }).thinking).toEqual({ type: "enabled" });
+			expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBeUndefined();
+
+			await streamSimple(model, context, { apiKey: "test", reasoning: "off", onPayload: capture }).result();
+			expect((payload as { thinking?: unknown }).thinking).toEqual({ type: "disabled" });
+		}
+
+		for (const model of [getModel("moonshotai", "kimi-k3"), getModel("moonshotai-cn", "kimi-k3")]) {
+			expect(model.reasoningCapabilities).toEqual({
+				control: "effort",
+				levels: {
+					off: null,
+					minimal: null,
+					low: "low",
+					medium: null,
+					high: "high",
+					xhigh: null,
+					max: "max",
+				},
+			});
+
+			await streamSimple(model, context, { apiKey: "test", onPayload: capture }).result();
+			expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBeUndefined();
+
+			await streamSimple(model, context, { apiKey: "test", reasoning: "low", onPayload: capture }).result();
+			expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("low");
+			expect((payload as { thinking?: unknown }).thinking).toBeUndefined();
+
+			await streamSimple(model, context, { apiKey: "test", reasoning: "max", onPayload: capture }).result();
+			expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("max");
+		}
 	});
 });

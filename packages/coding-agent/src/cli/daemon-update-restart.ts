@@ -1,12 +1,16 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { ENV_AGENT_DIR, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
 import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
+import {
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
+} from "../modes/daemon/daemon-supervisor-ownership.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
@@ -85,6 +89,7 @@ export interface LaunchDaemonUpdateRestartCoordinatorOptions {
 	cwd?: string;
 	originActiveSessionId?: string;
 	timeoutMs?: number;
+	supervisorRegistryDir?: string;
 }
 
 export interface AcquireDaemonUpdateRestartCoordinatorOptions {
@@ -159,12 +164,21 @@ function socketKey(socketPath: string): string {
 
 function writeJsonAtomically(path: string, value: unknown): void {
 	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+	let descriptor: number | undefined;
 	try {
-		writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+		descriptor = openSync(tempPath, "wx", 0o600);
+		writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+		fsyncSync(descriptor);
+		closeSync(descriptor);
+		descriptor = undefined;
 		renameSync(tempPath, path);
-	} catch (error) {
+		if (process.platform !== "win32") {
+			descriptor = openSync(dirname(path), "r");
+			fsyncSync(descriptor);
+		}
+	} finally {
+		if (descriptor !== undefined) closeSync(descriptor);
 		rmSync(tempPath, { force: true });
-		throw error;
 	}
 }
 
@@ -514,7 +528,7 @@ function createStatusPath(agentDir: string, socketPath: string, requestId: strin
 	return resolve(directory, `${socketKey(socketPath).slice(0, 16)}-${requestId}.json`);
 }
 
-function coordinatorEnvironment(agentDir: string): NodeJS.ProcessEnv {
+function coordinatorEnvironment(agentDir: string, supervisorRegistryDir?: string): NodeJS.ProcessEnv {
 	const environment = { ...process.env };
 	environment[ENV_AGENT_DIR] = agentDir;
 	delete environment[SELF_UPDATE_INTERACTIVE_CHILD_ENV];
@@ -526,6 +540,12 @@ function coordinatorEnvironment(agentDir: string): NodeJS.ProcessEnv {
 	delete environment[ORPHAN_PROCESS_JOURNAL_ENV];
 	delete environment[SESSION_LEASES_ENABLED_ENV];
 	delete environment[SESSION_LEASE_OWNER_ID_ENV];
+	delete environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+	if (supervisorRegistryDir) {
+		environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] = resolve(supervisorRegistryDir);
+	} else {
+		delete environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV];
+	}
 	return environment;
 }
 
@@ -550,17 +570,23 @@ export async function launchDaemonUpdateRestartCoordinator(
 	const child = spawn(launch.command, launch.args, {
 		cwd: options.cwd ?? process.cwd(),
 		detached: true,
-		env: coordinatorEnvironment(agentDir),
+		env: coordinatorEnvironment(agentDir, options.supervisorRegistryDir),
 		stdio: "ignore",
 		windowsHide: true,
 	});
 	let launchError: Error | undefined;
 	let exitDescription: string | undefined;
+	let resolveCoordinatorExit: (() => void) | undefined;
+	const coordinatorExit = new Promise<void>((resolveExit) => {
+		resolveCoordinatorExit = resolveExit;
+	});
 	child.once("error", (error) => {
 		launchError = error;
+		resolveCoordinatorExit?.();
 	});
 	child.once("exit", (code, signal) => {
 		exitDescription = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+		resolveCoordinatorExit?.();
 	});
 	child.unref();
 
@@ -580,6 +606,7 @@ export async function launchDaemonUpdateRestartCoordinator(
 			lastLivenessAt = Date.now();
 		}
 		if (status && TERMINAL_PHASES.has(status.phase)) {
+			await Promise.race([coordinatorExit, delay(2000)]);
 			return status;
 		}
 		if (launchError) {

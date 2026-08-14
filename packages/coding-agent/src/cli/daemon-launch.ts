@@ -13,13 +13,20 @@ import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
 import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
+import { DAEMON_CATALOG_ROLE_ENV } from "../modes/daemon/daemon-role-env.js";
 import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
 import { isSessionSummaryBusy, type SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
 import {
+	adoptLegacyDaemonSupervisorOwnershipFromHello,
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
+} from "../modes/daemon/daemon-supervisor-ownership.js";
+import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
 	DAEMON_WORKER_ROLE_ENV,
+	DAEMON_WORKER_STARTUP_GATE_FD_ENV,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
@@ -66,6 +73,66 @@ type DaemonVersionProbe =
 	| { status: "current"; hello: DaemonHello }
 	| { status: "stale"; hello?: DaemonHello };
 
+function normalizedDaemonEndpoint(path: string): string {
+	return process.platform === "win32" ? path.toLowerCase() : resolve(path);
+}
+
+function validOptionalIdentityString(value: unknown): value is string | undefined {
+	return value === undefined || (typeof value === "string" && value.length > 0);
+}
+
+async function reconcilePublicDaemonHello(socketPath: string, hello: DaemonHello): Promise<DaemonHello | undefined> {
+	const normalizedSocketPath = normalizedDaemonEndpoint(socketPath);
+	if (
+		typeof hello.socketPath !== "string" ||
+		normalizedDaemonEndpoint(hello.socketPath) !== normalizedSocketPath ||
+		!validOptionalIdentityString(hello.supervisorGeneration) ||
+		!validOptionalIdentityString(hello.supervisorOwnerToken) ||
+		!validOptionalIdentityString(hello.supervisorProcessStartId) ||
+		!validOptionalIdentityString(hello.supervisorSocketPath) ||
+		(hello.supervisorSocketPath !== undefined &&
+			normalizedDaemonEndpoint(hello.supervisorSocketPath) !== normalizedSocketPath) ||
+		(hello.supervisorPid !== undefined && (!Number.isInteger(hello.supervisorPid) || hello.supervisorPid <= 0)) ||
+		(hello.supervisorProcessStartId !== undefined && hello.supervisorPid === undefined)
+	) {
+		return undefined;
+	}
+
+	let reconciledHello = hello;
+	let capturedProcessStartId: string | undefined;
+	if (hello.supervisorPid !== undefined) {
+		capturedProcessStartId = getProcessStartId(hello.supervisorPid);
+		if (
+			!capturedProcessStartId ||
+			(hello.supervisorProcessStartId !== undefined && hello.supervisorProcessStartId !== capturedProcessStartId)
+		) {
+			return undefined;
+		}
+		reconciledHello = { ...hello, supervisorProcessStartId: capturedProcessStartId };
+	}
+
+	if (
+		reconciledHello.supervisorGeneration !== undefined &&
+		reconciledHello.supervisorOwnerToken !== undefined &&
+		reconciledHello.supervisorPid !== undefined &&
+		reconciledHello.supervisorSocketPath !== undefined
+	) {
+		try {
+			await adoptLegacyDaemonSupervisorOwnershipFromHello(socketPath, reconciledHello);
+		} catch {
+			return undefined;
+		}
+	}
+
+	if (
+		reconciledHello.supervisorPid !== undefined &&
+		getProcessStartId(reconciledHello.supervisorPid) !== capturedProcessStartId
+	) {
+		return undefined;
+	}
+	return reconciledHello;
+}
+
 /** Connect to a running daemon and check whether it matches this client's protocol and app version. */
 export async function probeDaemonVersion(socketPath: string): Promise<DaemonVersionProbe> {
 	let client: DaemonClient | undefined;
@@ -83,14 +150,25 @@ export async function probeDaemonVersion(socketPath: string): Promise<DaemonVers
 		return { status: "absent" };
 	}
 	try {
-		const hello = await client.waitForHello(2000);
+		let hello: DaemonHello;
+		try {
+			hello = await client.waitForHello(2000);
+		} catch {
+			// Connected but no recognizable greeting: assume a stale daemon.
+			logDaemonLaunch(`running daemon on ${socketPath} sent no recognizable hello; treating as stale`);
+			return { status: "stale" };
+		}
+		const reconciledHello = await reconcilePublicDaemonHello(socketPath, hello);
+		const publicSupervisor = reconciledHello !== undefined;
+		hello = reconciledHello ?? hello;
 		const current =
+			publicSupervisor &&
 			hello.protocol.version === DAEMON_PROTOCOL_VERSION &&
 			hello.schemaId === DAEMON_SCHEMA_ID &&
 			hello.appVersion === VERSION;
 		if (!current) {
 			logDaemonLaunch(
-				`running daemon on ${socketPath} is stale: daemon v${hello.appVersion}/proto${hello.protocol.version}` +
+				`running daemon on ${socketPath} is stale${publicSupervisor ? "" : " or is not a public supervisor"}: daemon v${hello.appVersion}/proto${hello.protocol.version}` +
 					`/schema ${hello.schemaId ?? "legacy"}/build ${hello.runtime?.buildId ?? "unknown"} vs client ` +
 					`v${VERSION}/proto${DAEMON_PROTOCOL_VERSION}/schema ${DAEMON_SCHEMA_ID}/build ${getDaemonRuntimeIdentity().buildId}`,
 			);
@@ -99,13 +177,30 @@ export async function probeDaemonVersion(socketPath: string): Promise<DaemonVers
 			return { status: "current", hello };
 		}
 		return { status: "stale", hello };
-	} catch {
-		// Connected but no recognizable greeting: assume a stale daemon.
-		logDaemonLaunch(`running daemon on ${socketPath} sent no recognizable hello; treating as stale`);
-		return { status: "stale" };
 	} finally {
 		client.close();
 	}
+}
+
+export function createDaemonSupervisorLaunchEnvironment(supervisorRegistryDir?: string): NodeJS.ProcessEnv {
+	const environment = createCliSubprocessEnv();
+	delete environment[DAEMON_CATALOG_ROLE_ENV];
+	delete environment[DAEMON_WORKER_ROLE_ENV];
+	delete environment[DAEMON_WORKER_TOKEN_ENV];
+	delete environment[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV];
+	delete environment[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
+	delete environment[DAEMON_WORKER_STARTUP_GATE_FD_ENV];
+	delete environment[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+	delete environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+	if (supervisorRegistryDir) {
+		environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] = resolve(supervisorRegistryDir);
+	} else {
+		delete environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV];
+	}
+	delete environment[ORPHAN_PROCESS_JOURNAL_ENV];
+	delete environment[SESSION_LEASES_ENABLED_ENV];
+	delete environment[SESSION_LEASE_OWNER_ID_ENV];
+	return environment;
 }
 
 export async function listActiveDaemonSessionSummaries(
@@ -337,7 +432,11 @@ async function shutdownStaleDaemonIfNotBusy(socketPath: string): Promise<boolean
 	return shutdownDaemonAndWait(socketPath);
 }
 
-async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promise<void> {
+async function ensureDaemonRunning(
+	socketPath: string,
+	spawnCwd?: string,
+	supervisorRegistryDir?: string,
+): Promise<void> {
 	const probe = await probeDaemonVersion(socketPath);
 	if (probe.status === "current") {
 		return;
@@ -350,17 +449,9 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 	// Strip inherited daemon worker/supervisor role env vars so the spawned
 	// daemon supervisor does not inherit worker-mode behavior. Without this,
 	// a CLI running inside a daemon worker (e.g. a test spawned by the Prime
-	// Agent daemon) would launch the supervisor in worker mode, which listens
-	// on the socket but never sends the daemon_hello handshake.
-	const env = createCliSubprocessEnv();
-	delete env[DAEMON_WORKER_ROLE_ENV];
-	delete env[DAEMON_WORKER_TOKEN_ENV];
-	delete env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV];
-	delete env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
-	delete env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
-	delete env[ORPHAN_PROCESS_JOURNAL_ENV];
-	delete env[SESSION_LEASES_ENABLED_ENV];
-	delete env[SESSION_LEASE_OWNER_ID_ENV];
+	// Agent daemon) would launch another worker role instead of a public
+	// supervisor with a durable ownership identity.
+	const env = createDaemonSupervisorLaunchEnvironment(supervisorRegistryDir);
 
 	const logOffset = currentDaemonLogSize(socketPath);
 	const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", socketPath]);
@@ -456,14 +547,19 @@ const ensurePromises = new Map<string, Promise<void>>();
  * main.ts share one probe/spawn; failed attempts are forgotten so a later call
  * retries (and surfaces the real error at its await site).
  */
-export function ensureInteractiveDaemonRunning(socketPath: string, spawnCwd?: string): Promise<void> {
-	let promise = ensurePromises.get(socketPath);
+export function ensureInteractiveDaemonRunning(
+	socketPath: string,
+	spawnCwd?: string,
+	supervisorRegistryDir?: string,
+): Promise<void> {
+	const ensureKey = `${socketPath}\0${supervisorRegistryDir ? resolve(supervisorRegistryDir) : ""}`;
+	let promise = ensurePromises.get(ensureKey);
 	if (!promise) {
-		promise = ensureDaemonRunning(socketPath, spawnCwd);
-		ensurePromises.set(socketPath, promise);
+		promise = ensureDaemonRunning(socketPath, spawnCwd, supervisorRegistryDir);
+		ensurePromises.set(ensureKey, promise);
 		const clear = () => {
-			if (ensurePromises.get(socketPath) === promise) {
-				ensurePromises.delete(socketPath);
+			if (ensurePromises.get(ensureKey) === promise) {
+				ensurePromises.delete(ensureKey);
 			}
 		};
 		promise.then(clear, clear);

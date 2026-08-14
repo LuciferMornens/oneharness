@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { assertValidReasoningCapabilities } from "../src/models.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
@@ -17,7 +18,11 @@ import {
 	type AnthropicMessagesCompat,
 	KnownProvider,
 	Model,
+	type ModelReasoningCapabilities,
 	type OpenAICompletionsCompat,
+	type ReasoningBudgetLevelMap,
+	type ReasoningEffortLevelMap,
+	type ThinkingLevelMap,
 } from "../src/types.js";
 import { MODELS as EXISTING_MODELS } from "../src/models.generated.js";
 
@@ -117,6 +122,84 @@ const KIMI_K3_THINKING_LEVEL_MAP = {
 	xhigh: null,
 	max: "max",
 } as const;
+
+const FIREWORKS_ANTHROPIC_BUDGET_LEVEL_MAP = {
+	minimal: 1024,
+	low: 2048,
+	medium: 8192,
+	high: 16384,
+	xhigh: 32768,
+	max: 65536,
+} as const;
+
+const KIMI_CODING_K3_EFFORT_LEVEL_MAP = {
+	off: "none",
+	minimal: "low",
+	low: "low",
+	medium: "high",
+	high: "high",
+	xhigh: "max",
+	max: "max",
+} as const;
+
+const BEDROCK_NOVA_2_LITE_REASONING_LEVEL_MAP = {
+	off: "off",
+	minimal: null,
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: null,
+	max: null,
+} as const;
+
+const MOONSHOT_K2_TOGGLE_LEVEL_MAP = {
+	off: "disabled",
+	minimal: null,
+	low: null,
+	medium: null,
+	high: "enabled",
+	xhigh: null,
+	max: null,
+} as const;
+
+const MOONSHOT_K3_EFFORT_LEVEL_MAP = {
+	off: null,
+	minimal: null,
+	low: "low",
+	medium: null,
+	high: "high",
+	xhigh: null,
+	max: "max",
+} as const;
+
+const FIXED_REASONING_LEVEL_MAP = {
+	off: null,
+	minimal: null,
+	low: null,
+	medium: null,
+	high: "always",
+	xhigh: null,
+	max: null,
+} as const;
+
+// GitHub's configurable-reasoning table is authoritative for Copilot routes:
+// https://docs.github.com/en/copilot/reference/ai-models/supported-models#models-with-extended-capabilities
+const GITHUB_COPILOT_CONFIGURABLE_REASONING_MODELS = new Set([
+	"claude-fable-5",
+	"claude-opus-4.6",
+	"claude-opus-4.7",
+	"claude-opus-4.8",
+	"claude-opus-4.8-fast",
+	"claude-opus-5",
+	"claude-sonnet-4.6",
+	"claude-sonnet-5",
+	"gpt-5.3-codex",
+	"gpt-5.4",
+	"gpt-5.5",
+	"gpt-5.6-luna",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+]);
 
 const DEEPSEEK_V4_COMPAT: OpenAICompletionsCompat = {
 	requiresReasoningContentOnAssistantMessages: true,
@@ -266,6 +349,24 @@ function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["t
 	model.thinkingLevelMap = { ...model.thinkingLevelMap, ...map };
 }
 
+function syncLegacyThinkingLevelMap(model: Model<any>): void {
+	if (!model.reasoningCapabilities) return;
+	if (model.reasoningCapabilities.control === "budget") {
+		delete model.thinkingLevelMap;
+		return;
+	}
+	model.thinkingLevelMap = { ...model.reasoningCapabilities.levels };
+}
+
+function replaceReasoningOffValue(model: Model<any>, off: string | number | null): void {
+	if (!model.reasoningCapabilities) return;
+	model.reasoningCapabilities = {
+		...model.reasoningCapabilities,
+		levels: { ...model.reasoningCapabilities.levels, off },
+	};
+	syncLegacyThinkingLevelMap(model);
+}
+
 function supportsOpenAiXhigh(modelId: string): boolean {
 	return (
 		modelId.includes("gpt-5.2") ||
@@ -290,6 +391,9 @@ function getOpenAiReasoningLevelMap(modelId: string): Model<any>["thinkingLevelM
 	}
 	if (id.includes("gpt-5.6")) {
 		return { off: "none", minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
+	}
+	if (/(?:^|\/)gpt-5-(?:mini|nano)(?:-|$)/.test(id)) {
+		return { off: null, minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: null, max: null };
 	}
 	if (/gpt-5\.[1-5]/.test(id)) {
 		return {
@@ -335,12 +439,60 @@ function isGoogleThinkingApi(model: Model<any>): boolean {
 	return model.api === "google-generative-ai" || model.api === "google-vertex";
 }
 
+function hasNumericReasoningLevels(levels: ModelReasoningCapabilities["levels"] | undefined): boolean {
+	return Object.values(levels ?? {}).some((value) => typeof value === "number");
+}
+
+function getGoogleBudgetLevelMap(modelId: string): ReasoningBudgetLevelMap | undefined {
+	if (isGemini25ProModel(modelId)) {
+		return { off: null, minimal: 128, low: 2048, medium: 8192, high: 32768, xhigh: null, max: null };
+	}
+	if (isGemini25FlashModel(modelId)) {
+		return { off: 0, minimal: 128, low: 2048, medium: 8192, high: 24576, xhigh: null, max: null };
+	}
+	if (isGemini25FlashLiteModel(modelId)) {
+		return { off: 0, minimal: 512, low: 2048, medium: 8192, high: 24576, xhigh: null, max: null };
+	}
+	return undefined;
+}
+
 function isGemini3ProModel(modelId: string): boolean {
 	return /gemini-3(?:\.\d+)?-pro/.test(modelId.toLowerCase());
 }
 
+function supportsGemini3ProMedium(modelId: string): boolean {
+	return /gemini-3\.(?:[1-9]\d*)-pro/.test(modelId.toLowerCase());
+}
+
 function isGemini3FlashModel(modelId: string): boolean {
 	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
+}
+
+function isGemini35FlashAlias(modelId: string): boolean {
+	return modelId.toLowerCase() === "gemini-flash-latest";
+}
+
+function isGemini35FlashLiteAlias(modelId: string): boolean {
+	return modelId.toLowerCase() === "gemini-flash-lite-latest";
+}
+
+function isGemini37FlashModel(modelId: string): boolean {
+	return /^gemini-3\.7-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/.test(modelId.toLowerCase());
+}
+
+function getGeminiFlashThinkingLevelMap(modelId: string): Model<any>["thinkingLevelMap"] | undefined {
+	if (!isGemini3FlashModel(modelId) && !isGemini35FlashAlias(modelId) && !isGemini35FlashLiteAlias(modelId)) {
+		return undefined;
+	}
+	return {
+		off: null,
+		minimal: isGemini37FlashModel(modelId) ? null : "MINIMAL",
+		low: "LOW",
+		medium: "MEDIUM",
+		high: "HIGH",
+		xhigh: null,
+		max: null,
+	};
 }
 
 function isGemma4Model(modelId: string): boolean {
@@ -377,23 +529,222 @@ function isAdaptiveClaudeModel(modelId: string, modelName?: string): boolean {
 	);
 }
 
+function isNativeAnthropicClaudeRoute(model: Model<any>): boolean {
+	if (model.api !== "anthropic-messages") return false;
+	const claudeRoute = model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude");
+	return (
+		claudeRoute &&
+		(model.provider === "anthropic" ||
+			model.provider === "github-copilot" ||
+			model.provider === "opencode" ||
+			model.provider === "cloudflare-ai-gateway" ||
+			model.provider === "vercel-ai-gateway")
+	);
+}
+
 function isMistralReasoningEffortModel(modelId: string): boolean {
 	return (
 		modelId === "mistral-small-2603" ||
 		modelId === "mistral-small-latest" ||
-		modelId === "mistral-medium-3.5"
+		modelId === "mistral-medium-3.5" ||
+		modelId === "mistral-medium-3-5" ||
+		modelId === "mistral-medium-2604" ||
+		modelId === "mistral-medium-latest"
+	);
+}
+
+function isNativeMagistralReasoningModel(model: Model<any>): boolean {
+	return (
+		model.api === "mistral-conversations" &&
+		/^magistral-(?:small|medium)(?:-|$)/.test(model.id.toLowerCase())
+	);
+}
+
+function isBedrockNova2LiteModel(model: Model<any>): boolean {
+	return model.api === "bedrock-converse-stream" && /(?:^|[.])nova-2-lite(?:-|$)/.test(model.id.toLowerCase());
+}
+
+function isNativeMoonshotModel(model: Model<any>): boolean {
+	return (
+		model.api === "openai-completions" &&
+		(model.provider === "moonshotai" || model.provider === "moonshotai-cn")
+	);
+}
+
+function applyProviderSpecificReasoningMetadata(model: Model<any>): boolean {
+	let control: "fixed" | "toggle" | "effort" | "budget" | undefined;
+	let levels: ThinkingLevelMap | ReasoningBudgetLevelMap | undefined;
+
+	if (model.api === "anthropic-messages" && model.provider === "fireworks") {
+		control = "budget";
+		levels = { ...FIREWORKS_ANTHROPIC_BUDGET_LEVEL_MAP };
+	} else if (model.api === "anthropic-messages" && model.provider === "kimi-coding") {
+		const kimiK3 = /^k3(?:-|$)/.test(model.id.toLowerCase());
+		control = kimiK3 ? "effort" : "budget";
+		levels = kimiK3 ? { ...KIMI_CODING_K3_EFFORT_LEVEL_MAP } : { ...FIREWORKS_ANTHROPIC_BUDGET_LEVEL_MAP };
+	} else if (isBedrockNova2LiteModel(model)) {
+		control = "effort";
+		levels = { ...BEDROCK_NOVA_2_LITE_REASONING_LEVEL_MAP };
+	} else if (isNativeMoonshotModel(model) && /^kimi-k2\.(?:5|6)(?:-|$)/.test(model.id.toLowerCase())) {
+		control = "toggle";
+		levels = { ...MOONSHOT_K2_TOGGLE_LEVEL_MAP };
+		model.compat = {
+			...model.compat,
+			supportsReasoningEffort: false,
+			thinkingFormat: "moonshot",
+		};
+	} else if (isNativeMoonshotModel(model) && /^kimi-k3(?:-|$)/.test(model.id.toLowerCase())) {
+		control = "effort";
+		levels = { ...MOONSHOT_K3_EFFORT_LEVEL_MAP };
+		model.compat = {
+			...model.compat,
+			supportsReasoningEffort: true,
+			thinkingFormat: "openai",
+		};
+	} else if (isNativeMagistralReasoningModel(model)) {
+		control = "fixed";
+		levels = { ...FIXED_REASONING_LEVEL_MAP };
+	}
+
+	if (!control || !levels) return false;
+	model.reasoningCapabilities =
+		control === "budget"
+			? { control, levels: { ...levels } as ReasoningBudgetLevelMap, supportsOff: true }
+			: control === "effort"
+				? { control, levels: { ...levels } as ReasoningEffortLevelMap }
+				: { control, levels: { ...levels } as ThinkingLevelMap };
+	syncLegacyThinkingLevelMap(model);
+	return true;
+}
+
+function isOpenRouterDeepSeekV4Route(model: Model<any>): boolean {
+	return (
+		model.provider === "openrouter" &&
+		model.api === "openai-completions" &&
+		model.id.toLowerCase().includes("deepseek-v4")
+	);
+}
+
+function isPrimeDeepSeekV4Route(model: Model<any>): boolean {
+	return (
+		model.provider === "prime-inference" &&
+		model.api === "openai-completions" &&
+		model.id.toLowerCase().includes("deepseek-v4")
+	);
+}
+
+// Snapshot of the per-alias reasoning schema published by OpenRouter. Preserve
+// mode cannot refetch the catalog, so feed the published fields through the
+// same parser used by live generation instead of borrowing DeepSeek's direct
+// API contract.
+const OPENROUTER_DEEPSEEK_V4_REASONING_SCHEMA: Record<string, unknown> = {
+	"deepseek/deepseek-v4-flash": {
+		supported_parameters: ["reasoning"],
+		reasoning: { mandatory: false, supported_efforts: ["xhigh", "high"] },
+	},
+	"deepseek/deepseek-v4-pro": {
+		supported_parameters: ["reasoning"],
+		reasoning: { mandatory: false, supported_efforts: ["xhigh", "high"] },
+	},
+	"deepseek/deepseek-v4-pro-0813": {
+		supported_parameters: ["reasoning"],
+		reasoning: { mandatory: false, supported_efforts: ["max", "high", "low"] },
+	},
+	"deepseek/deepseek-v4-flash-0731": {
+		supported_parameters: ["reasoning"],
+		reasoning: { mandatory: false, supported_efforts: ["max", "high", "low"] },
+	},
+	"~deepseek/deepseek-v4-flash-latest": {
+		supported_parameters: ["reasoning"],
+		reasoning: { mandatory: false, supported_efforts: ["max", "high", "low"] },
+	},
+};
+
+function applyOpenRouterDeepSeekV4Compat(model: Model<any>): void {
+	const compat = { ...model.compat };
+	delete compat.requiresReasoningContentOnAssistantMessages;
+	model.compat = {
+		...compat,
+		supportsReasoningEffort: true,
+		thinkingFormat: "openrouter",
+	};
+}
+
+function refreshPreservedOpenRouterDeepSeekV4Reasoning(model: Model<any>): void {
+	applyOpenRouterDeepSeekV4Compat(model);
+	const schema = OPENROUTER_DEEPSEEK_V4_REASONING_SCHEMA[model.id.toLowerCase()];
+	const parsed = getOpenRouterReasoningCapabilities(schema);
+	if (!parsed?.thinkingLevelMap) return;
+
+	model.thinkingLevelMap = { ...parsed.thinkingLevelMap };
+	model.reasoningCapabilities = {
+		control: parsed.supportsReasoningEffort ? "effort" : "toggle",
+		levels: { ...parsed.thinkingLevelMap },
+	};
+}
+
+function refreshPrimeDeepSeekV4Reasoning(model: Model<any>): void {
+	const schema = OPENROUTER_DEEPSEEK_V4_REASONING_SCHEMA[model.id.toLowerCase()];
+	const parsed = getOpenRouterReasoningCapabilities(schema);
+	if (!parsed?.thinkingLevelMap) return;
+
+	model.thinkingLevelMap = { ...parsed.thinkingLevelMap };
+	model.reasoningCapabilities = {
+		control: parsed.supportsReasoningEffort ? "effort" : "toggle",
+		levels: { ...parsed.thinkingLevelMap },
+	};
+	model.compat = {
+		...model.compat,
+		supportsReasoningEffort: parsed.supportsReasoningEffort,
+	};
+}
+
+function isPrimeGpt56Route(model: Model<any>): boolean {
+	return (
+		model.provider === "prime-inference" &&
+		model.api === "openai-completions" &&
+		/(?:^|\/)gpt-5\.6(?:-|$)/.test(model.id.toLowerCase())
 	);
 }
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
+	if (!model.reasoning) {
+		delete model.thinkingLevelMap;
+		delete model.reasoningCapabilities;
+		return;
+	}
+	if (applyProviderSpecificReasoningMetadata(model)) return;
+	if (
+		model.provider === "github-copilot" &&
+		!GITHUB_COPILOT_CONFIGURABLE_REASONING_MODELS.has(model.id.toLowerCase())
+	) {
+		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
+		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
+		return;
+	}
+	if (model.reasoningCapabilities) return;
+	if (isOpenRouterDeepSeekV4Route(model)) {
+		applyOpenRouterDeepSeekV4Compat(model);
+	}
+	if (isPrimeDeepSeekV4Route(model)) {
+		refreshPrimeDeepSeekV4Reasoning(model);
+	}
+	if (
+		model.api === "openai-completions" &&
+		(model.provider === "opencode" || model.provider === "opencode-go") &&
+		model.id.toLowerCase().includes("deepseek-v4")
+	) {
+		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
+		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
+		return;
+	}
+
 	const nativeOpenAiRoute =
 		model.api === "openai-responses" ||
 		model.api === "azure-openai-responses" ||
 		model.api === "openai-codex-responses";
 	const nativeAnthropicRoute =
-		(model.api === "anthropic-messages" &&
-			model.id.toLowerCase().includes("claude") &&
-			(model.provider === "anthropic" || model.provider === "github-copilot" || model.provider === "opencode")) ||
+		isNativeAnthropicClaudeRoute(model) ||
 		(model.api === "bedrock-converse-stream" &&
 			(model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude")));
 	const openAiReasoningLevelMap = getOpenAiReasoningLevelMap(model.id);
@@ -413,6 +764,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		OPENAI_RESPONSES_NONE_REASONING_MODELS.has(model.id)
 	) {
 		mergeThinkingLevelMap(model, { off: "none" });
+	}
+	if (model.api === "openai-responses" && model.provider === "github-copilot") {
+		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (nativeOpenAiRoute && supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
@@ -460,6 +814,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		model.compat = { ...model.compat, supportsReasoningEffort: supportsEffort };
 	}
 	const kimiK3Id = model.id.toLowerCase();
+	if (
+		model.api === "openai-completions" &&
+		model.compat?.supportsReasoningEffort === true &&
+		(/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))
+	) {
+		mergeThinkingLevelMap(model, { off: "none" });
+	}
 	if (!model.thinkingLevelMap && (/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))) {
 		mergeThinkingLevelMap(model, KIMI_K3_THINKING_LEVEL_MAP);
 	}
@@ -468,58 +829,18 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 			off: null,
 			minimal: null,
 			low: "LOW",
-			medium: "MEDIUM",
+			medium: supportsGemini3ProMedium(model.id) ? "MEDIUM" : null,
 			high: "HIGH",
 			xhigh: null,
 			max: null,
 		});
 	}
-	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
-		mergeThinkingLevelMap(model, {
-			off: null,
-			minimal: "MINIMAL",
-			low: "LOW",
-			medium: "MEDIUM",
-			high: "HIGH",
-			xhigh: null,
-			max: null,
-		});
+	const geminiFlashThinkingLevelMap = getGeminiFlashThinkingLevelMap(model.id);
+	if (isGoogleThinkingApi(model) && geminiFlashThinkingLevelMap) {
+		mergeThinkingLevelMap(model, geminiFlashThinkingLevelMap);
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
 		mergeThinkingLevelMap(model, { off: "MINIMAL", minimal: null, low: null, medium: null, high: "HIGH" });
-	}
-	if (isGoogleThinkingApi(model) && isGemini25ProModel(model.id)) {
-		mergeThinkingLevelMap(model, {
-			off: null,
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 32768,
-			xhigh: null,
-			max: null,
-		});
-	}
-	if (isGoogleThinkingApi(model) && isGemini25FlashModel(model.id)) {
-		mergeThinkingLevelMap(model, {
-			off: 0,
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 24576,
-			xhigh: null,
-			max: null,
-		});
-	}
-	if (isGoogleThinkingApi(model) && isGemini25FlashLiteModel(model.id)) {
-		mergeThinkingLevelMap(model, {
-			off: 0,
-			minimal: 512,
-			low: 2048,
-			medium: 8192,
-			high: 24576,
-			xhigh: null,
-			max: null,
-		});
 	}
 	if (
 		model.provider === "openai-codex" &&
@@ -543,15 +864,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		});
 	}
 
-	if (!model.reasoning) return;
-
 	const isClaudeBedrock =
 		model.api === "bedrock-converse-stream" &&
 		(model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude"));
-	const directClaudeApi =
-		model.api === "anthropic-messages" &&
-		model.id.toLowerCase().includes("claude") &&
-		(model.provider === "anthropic" || model.provider === "github-copilot" || model.provider === "opencode");
+	const directClaudeApi = isNativeAnthropicClaudeRoute(model);
 	const googleThinking = model.api === "google-generative-ai" || model.api === "google-vertex";
 	const adaptiveClaude = (directClaudeApi || isClaudeBedrock) && isAdaptiveClaudeModel(model.id, model.name);
 	const budgetBased = (directClaudeApi || isClaudeBedrock) && !adaptiveClaude;
@@ -592,9 +908,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	const defaultLevels = adaptiveClaude
 		? { off: "off", low: "low", medium: "medium", high: "high" }
 		: budgetBased
-			? { off: 0, minimal: 1024, low: 2048, medium: 8192, high: 16384 }
+			? { minimal: 1024, low: 2048, medium: 8192, high: 16384 }
 			: namedEffort
-				? { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high" }
+				? { off: null, minimal: "minimal", low: "low", medium: "medium", high: "high" }
 				: googleThinking
 					? { off: 0, high: -1 }
 					: fixedReasoning
@@ -610,21 +926,23 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 			([level, value]) => level !== "off" && value !== null && value !== undefined,
 		).length > 1 ||
 		(model.api === "mistral-conversations" && !!model.thinkingLevelMap) ||
-		(googleThinking && !!model.thinkingLevelMap && !Object.values(model.thinkingLevelMap).some((value) => typeof value === "number"));
+		(googleThinking && !!model.thinkingLevelMap && !hasNumericReasoningLevels(model.thinkingLevelMap));
+	const googleBudgetLevels = googleThinking ? getGoogleBudgetLevelMap(model.id) : undefined;
+	const reasoningLevels = googleBudgetLevels ?? { ...defaultLevels, ...model.thinkingLevelMap };
 	model.reasoningCapabilities = fixedReasoning
 		? { control: "fixed", levels: { off: null, high: "always" } }
-		: {
-		control:
-			budgetBased || (googleThinking && Object.values(model.thinkingLevelMap ?? {}).some((value) => typeof value === "number"))
-				? "budget"
-				: supportsNamedEffort
-					? "effort"
-					: "toggle",
-		levels: { ...defaultLevels, ...model.thinkingLevelMap },
-	};
-	// Keep the legacy field as a complete mirror so existing custom model
-	// overrides remain exact rather than inheriting hidden base levels.
-	model.thinkingLevelMap = { ...model.reasoningCapabilities.levels };
+		: budgetBased || (googleThinking && hasNumericReasoningLevels(reasoningLevels))
+			? {
+					control: "budget",
+					levels: reasoningLevels as ReasoningBudgetLevelMap,
+					...(budgetBased ? { supportsOff: true } : {}),
+				}
+			: supportsNamedEffort
+				? { control: "effort", levels: reasoningLevels as ReasoningEffortLevelMap }
+				: { control: "toggle", levels: reasoningLevels };
+	// Keep the deprecated string map for named controls only. Numeric budgets
+	// live exclusively in reasoningCapabilities.
+	syncLegacyThinkingLevelMap(model);
 }
 
 function getAnthropicMessagesCompat(provider: string, modelId: string): AnthropicMessagesCompat | undefined {
@@ -1851,7 +2169,222 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 	}
 }
 
+function getExistingCatalogModels(): Model<any>[] {
+	const providers = EXISTING_MODELS as unknown as Record<string, Record<string, Model<any>>>;
+	return Object.values(providers).flatMap((models) =>
+		Object.values(models).map((model) => ({
+			...model,
+			input: [...model.input],
+			cost: { ...model.cost },
+			...(model.headers ? { headers: { ...model.headers } } : {}),
+			...(model.compat ? { compat: { ...model.compat } } : {}),
+			...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
+			...(model.reasoningCapabilities
+				? {
+						reasoningCapabilities: {
+							control: model.reasoningCapabilities.control,
+							levels: { ...model.reasoningCapabilities.levels },
+							...(model.reasoningCapabilities.control === "budget" &&
+							model.reasoningCapabilities.supportsOff
+								? { supportsOff: true }
+								: {}),
+						},
+					}
+				: {}),
+		})),
+	);
+}
+
+function updatePreservedReasoningMetadata(model: Model<any>): void {
+	if (!model.reasoning) {
+		delete model.thinkingLevelMap;
+		delete model.reasoningCapabilities;
+		return;
+	}
+	if (applyProviderSpecificReasoningMetadata(model)) return;
+	if (
+		model.provider === "github-copilot" &&
+		!GITHUB_COPILOT_CONFIGURABLE_REASONING_MODELS.has(model.id.toLowerCase())
+	) {
+		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
+		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
+		return;
+	}
+	if (
+		isNativeAnthropicClaudeRoute(model) &&
+		(model.provider === "cloudflare-ai-gateway" || model.provider === "vercel-ai-gateway")
+	) {
+		delete model.thinkingLevelMap;
+		delete model.reasoningCapabilities;
+		applyThinkingLevelMetadata(model);
+		return;
+	}
+	if (
+		model.api === "openai-completions" &&
+		(model.provider === "opencode" || model.provider === "opencode-go") &&
+		model.id.toLowerCase().includes("deepseek-v4")
+	) {
+		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
+		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
+		return;
+	}
+	if (isOpenRouterDeepSeekV4Route(model)) {
+		refreshPreservedOpenRouterDeepSeekV4Reasoning(model);
+	}
+	if (isPrimeDeepSeekV4Route(model)) {
+		refreshPrimeDeepSeekV4Reasoning(model);
+	}
+	if (isPrimeGpt56Route(model)) {
+		const levels = getOpenAiReasoningLevelMap(model.id);
+		if (levels) {
+			model.thinkingLevelMap = { ...levels };
+			model.reasoningCapabilities = { control: "effort", levels: { ...levels } };
+			model.compat = {
+				...model.compat,
+				supportsReasoningEffort: true,
+				thinkingFormat: "openai",
+			};
+		}
+	}
+	const kimiK3Id = model.id.toLowerCase();
+	if (
+		model.api === "openai-completions" &&
+		model.compat?.supportsReasoningEffort === true &&
+		(/^k3(-|$)/.test(kimiK3Id) || /(^|\/)kimi-k3(-|$)/.test(kimiK3Id))
+	) {
+		mergeThinkingLevelMap(model, { off: "none" });
+		if (model.reasoningCapabilities) {
+			model.reasoningCapabilities = {
+				...model.reasoningCapabilities,
+				levels: { ...model.reasoningCapabilities.levels, off: "none" },
+			};
+		}
+	}
+
+	if (!model.reasoningCapabilities) {
+		applyThinkingLevelMetadata(model);
+	}
+	if (!model.reasoningCapabilities) {
+		return;
+	}
+	if (model.api === "openai-responses" && model.provider === "github-copilot") {
+		replaceReasoningOffValue(model, null);
+	}
+	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
+		model.reasoningCapabilities = {
+			...model.reasoningCapabilities,
+			levels: {
+				...model.reasoningCapabilities.levels,
+				medium: supportsGemini3ProMedium(model.id) ? "MEDIUM" : null,
+			},
+		};
+		syncLegacyThinkingLevelMap(model);
+	}
+	const geminiFlashThinkingLevelMap = getGeminiFlashThinkingLevelMap(model.id);
+	if (isGoogleThinkingApi(model) && geminiFlashThinkingLevelMap) {
+		model.reasoningCapabilities = { control: "effort", levels: { ...geminiFlashThinkingLevelMap } };
+		model.thinkingLevelMap = { ...geminiFlashThinkingLevelMap };
+	}
+	const googleBudgetLevels = isGoogleThinkingApi(model) ? getGoogleBudgetLevelMap(model.id) : undefined;
+	if (googleBudgetLevels) {
+		model.reasoningCapabilities = {
+			control: "budget",
+			levels: { ...googleBudgetLevels },
+		};
+		syncLegacyThinkingLevelMap(model);
+	} else if (isGoogleThinkingApi(model) && hasNumericReasoningLevels(model.reasoningCapabilities.levels)) {
+		model.reasoningCapabilities = {
+			control: "budget",
+			levels: { ...model.reasoningCapabilities.levels },
+		};
+		syncLegacyThinkingLevelMap(model);
+	}
+	const preservedClaudeBudget =
+		model.reasoningCapabilities.control === "budget" &&
+		(isNativeAnthropicClaudeRoute(model) ||
+			(model.api === "bedrock-converse-stream" &&
+				(model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude"))));
+	if (preservedClaudeBudget) {
+		const { off: _legacyOff, ...levels } = model.reasoningCapabilities.levels;
+		model.reasoningCapabilities = {
+			control: "budget",
+			levels: levels as ReasoningBudgetLevelMap,
+			supportsOff: true,
+		};
+		syncLegacyThinkingLevelMap(model);
+	}
+	if (model.api === "openai-completions" && model.provider === "openrouter") {
+		model.compat = {
+			...model.compat,
+			supportsReasoningEffort: model.reasoningCapabilities.control === "effort",
+		};
+		if (model.reasoningCapabilities.levels.off === "off") {
+			replaceReasoningOffValue(model, "none");
+		}
+	}
+	if (
+		model.api === "openai-completions" &&
+		model.provider === "prime-inference" &&
+		model.reasoningCapabilities.levels.off === "off" &&
+		model.compat?.thinkingFormat !== "zai" &&
+		model.compat?.thinkingFormat !== "deepseek" &&
+		model.compat?.thinkingFormat !== "qwen" &&
+		model.compat?.thinkingFormat !== "qwen-chat-template"
+	) {
+		replaceReasoningOffValue(model, "none");
+	}
+	if (model.api === "mistral-conversations" && isMistralReasoningEffortModel(model.id)) {
+		model.reasoningCapabilities = {
+			control: "effort",
+			levels: {
+				...model.reasoningCapabilities.levels,
+				off: "none",
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+		};
+		syncLegacyThinkingLevelMap(model);
+		return;
+	}
+
+	const namedEffort =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	if (!model.reasoning || !namedEffort) return;
+
+	const documentedLevels = getOpenAiReasoningLevelMap(model.id);
+	const documentedOff = documentedLevels?.off;
+	const off =
+		model.provider === "github-copilot"
+			? null
+			: documentedOff !== undefined
+			? documentedOff
+			: model.reasoningCapabilities.levels.off === "none"
+				? "none"
+				: null;
+	const supportsMinimal = /(?:^|\/)gpt-5-(?:mini|nano)(?:-|$)/.test(model.id.toLowerCase());
+	model.reasoningCapabilities = {
+		control: "effort",
+		levels: {
+			...model.reasoningCapabilities.levels,
+			...(supportsMinimal ? { minimal: "minimal" } : {}),
+			off,
+		},
+	};
+	syncLegacyThinkingLevelMap(model);
+}
+
 async function generateModels() {
+	if (process.argv.includes("--preserve-catalog")) {
+		writeGeneratedModels(getExistingCatalogModels(), true);
+		return;
+	}
+
 	// Fetch models from both sources
 	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
 	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
@@ -2629,9 +3162,19 @@ async function generateModels() {
 			baseUrl: "",
 		}));
 	allModels.push(...azureOpenAiModels);
+	writeGeneratedModels(allModels);
+}
 
+function writeGeneratedModels(allModels: Model<any>[], preserveCatalog = false): void {
 	for (const model of allModels) {
-		applyThinkingLevelMetadata(model);
+		if (preserveCatalog) {
+			updatePreservedReasoningMetadata(model);
+		} else {
+			applyThinkingLevelMetadata(model);
+			updatePreservedReasoningMetadata(model);
+		}
+		syncLegacyThinkingLevelMap(model);
+		assertValidReasoningCapabilities(model);
 	}
 
 	// Group by provider and deduplicate by model ID
@@ -2681,10 +3224,10 @@ export const MODELS = {
 `;
 			}
 			output += `\t\t\treasoning: ${model.reasoning},\n`;
-			if (model.thinkingLevelMap) {
+			if (model.reasoning && model.thinkingLevelMap) {
 				output += `\t\t\tthinkingLevelMap: ${JSON.stringify(model.thinkingLevelMap)},\n`;
 			}
-			if (model.reasoningCapabilities) {
+			if (model.reasoning && model.reasoningCapabilities) {
 				output += `\t\t\treasoningCapabilities: ${JSON.stringify(model.reasoningCapabilities)},\n`;
 			}
 			output += `\t\t\tinput: [${model.input.map(i => `"${i}"`).join(", ")}],\n`;

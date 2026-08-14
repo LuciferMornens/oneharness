@@ -5,7 +5,15 @@ import {
 	type ThinkingConfig,
 } from "@google/genai";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost, resolveSimpleThinkingLevel } from "../models.js";
+import {
+	assertValidReasoningBudgetValue,
+	assertValidReasoningCapabilities,
+	assertValidReasoningEffortValue,
+	calculateCost,
+	clampThinkingLevel,
+	getReasoningCapabilities,
+	resolveSimpleThinkingLevel,
+} from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -29,10 +37,15 @@ import type { GoogleThinkingLevel } from "./google-shared.js";
 import {
 	convertMessages,
 	convertTools,
+	getGoogleThinkingBudget,
+	getLegacyGoogleDisabledThinking,
+	getLegacyGoogleThinkingLevel,
 	isThinkingPart,
 	mapStopReason,
 	mapToolChoice,
+	resolveGoogleThinkingOption,
 	retainThoughtSignature,
+	usesGoogleThinkingLevels,
 } from "./google-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
@@ -293,6 +306,28 @@ export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleSt
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
+	if (getReasoningCapabilities(model)?.control === "fixed") {
+		return streamGoogle(model, context, base satisfies GoogleOptions);
+	}
+	if (!model.reasoningCapabilities && !model.thinkingLevelMap && options?.reasoning !== undefined) {
+		const legacyLevel = clampThinkingLevel(model, options.reasoning);
+		if (legacyLevel === "off") {
+			return streamGoogle(model, context, {
+				...base,
+				thinking: { enabled: false, ...getLegacyGoogleDisabledThinking(model.id) },
+			} satisfies GoogleOptions);
+		}
+		const effort = legacyLevel === "xhigh" || legacyLevel === "max" ? "high" : legacyLevel;
+		return streamGoogle(model, context, {
+			...base,
+			thinking: usesGoogleThinkingLevels(model.id)
+				? { enabled: true, level: getLegacyGoogleThinkingLevel(model.id, effort) }
+				: {
+						enabled: true,
+						budgetTokens: getGoogleThinkingBudget(model.id, effort, options.thinkingBudgets),
+					},
+		} satisfies GoogleOptions);
+	}
 	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
 	if (!resolvedReasoning) return streamGoogle(model, context, base satisfies GoogleOptions);
 	if (!resolvedReasoning.enabled) {
@@ -358,6 +393,29 @@ function buildParams(
 	context: Context,
 	options: GoogleOptions = {},
 ): GenerateContentParameters {
+	const capabilities = assertValidReasoningCapabilities(model);
+	if (capabilities?.control === "effort" && options.thinking?.level !== undefined) {
+		assertValidReasoningEffortValue(model, "request", options.thinking.level);
+	}
+	if (capabilities?.control === "budget" && options.thinking?.budgetTokens !== undefined) {
+		assertValidReasoningBudgetValue(
+			model,
+			options.thinking.enabled ? "request" : "off",
+			options.thinking.budgetTokens,
+		);
+	}
+	if (model.reasoningCapabilities || model.thinkingLevelMap) {
+		if (capabilities?.control === "effort" && options.thinking?.budgetTokens !== undefined) {
+			throw new Error(
+				`Model ${model.provider}/${model.id}: an effort control cannot serialize a numeric thinking budget.`,
+			);
+		}
+		if (capabilities?.control === "budget" && options.thinking?.level !== undefined) {
+			throw new Error(
+				`Model ${model.provider}/${model.id}: a budget control cannot serialize a named thinking level.`,
+			);
+		}
+	}
 	const contents = convertMessages(model, context);
 
 	const generationConfig: GenerateContentConfig = {};
@@ -384,19 +442,21 @@ function buildParams(
 		config.toolConfig = undefined;
 	}
 
-	if (options.thinking?.enabled && model.reasoning) {
+	const reasoningControllable = model.reasoning && getReasoningCapabilities(model)?.control !== "fixed";
+	const thinking = options.thinking ? resolveGoogleThinkingOption(model, options.thinking) : undefined;
+	if (thinking?.enabled && reasoningControllable) {
 		const thinkingConfig: ThinkingConfig = { includeThoughts: true };
-		if (options.thinking.level !== undefined) {
+		if (thinking.level !== undefined) {
 			// Cast to any since our GoogleThinkingLevel mirrors Google's ThinkingLevel enum values
-			thinkingConfig.thinkingLevel = options.thinking.level as any;
-		} else if (options.thinking.budgetTokens !== undefined) {
-			thinkingConfig.thinkingBudget = options.thinking.budgetTokens;
+			thinkingConfig.thinkingLevel = thinking.level as any;
+		} else if (thinking.budgetTokens !== undefined) {
+			thinkingConfig.thinkingBudget = thinking.budgetTokens;
 		}
 		config.thinkingConfig = thinkingConfig;
-	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
-		config.thinkingConfig = options.thinking.level
-			? { thinkingLevel: options.thinking.level as any }
-			: { thinkingBudget: options.thinking.budgetTokens ?? 0 };
+	} else if (reasoningControllable && thinking && !thinking.enabled) {
+		config.thinkingConfig = thinking.level
+			? { thinkingLevel: thinking.level as any }
+			: { thinkingBudget: thinking.budgetTokens ?? 0 };
 	}
 
 	if (options.signal) {

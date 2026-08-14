@@ -12,6 +12,8 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
+import { signalProcessGroupOrProcess } from "../../utils/child-process.js";
+import { getProcessStartId } from "../session-lease.js";
 import { FORK_SERVER_SCRIPT } from "./fork-server-script.js";
 
 const READY_TIMEOUT_MS = 30_000;
@@ -62,10 +64,15 @@ interface SpawnParams {
 }
 
 type PendingSpawn = {
-	resolve: (pid: number) => void;
+	resolve: (identity: ForkedKernelProcessIdentity) => void;
 	reject: (err: Error) => void;
 	timer: ReturnType<typeof setTimeout>;
 };
+
+export interface ForkedKernelProcessIdentity {
+	pid: number;
+	processStartId: string;
+}
 
 class ForkServer {
 	private readonly params: ForkServerParams;
@@ -75,6 +82,7 @@ class ForkServer {
 	// mutation of process.env can't make a stale template look compatible.
 	private readonly launchEnv: NodeJS.ProcessEnv;
 	private proc?: ChildProcess;
+	private processStartId?: string;
 	private server?: Server;
 	private conn?: Socket;
 	private socketDir?: string;
@@ -173,11 +181,13 @@ class ForkServer {
 				// The template only imports; its own cwd/env are irrelevant since each
 				// forked child applies the per-kernel cwd/env itself. Inherit the daemon's.
 				const proc = spawn(this.params.python, ["-c", FORK_SERVER_SCRIPT, socketPath], {
+					detached: true,
 					env: this.launchEnv,
 					stdio: ["ignore", "ignore", "pipe"],
 					windowsHide: true,
 				});
 				this.proc = proc;
+				this.processStartId = proc.pid === undefined ? undefined : getProcessStartId(proc.pid);
 				proc.stderr?.on("data", (buf: Buffer) => {
 					this.stderrTail = `${this.stderrTail}${buf.toString()}`.slice(-STDERR_TAIL_MAX);
 				});
@@ -195,7 +205,7 @@ class ForkServer {
 			const line = this.buffer.slice(0, idx);
 			this.buffer = this.buffer.slice(idx + 1);
 			if (!line.trim()) continue;
-			let msg: { type?: string; id?: number; pid?: number; error?: string };
+			let msg: { type?: string; id?: number; pid?: number; processStartId?: string; error?: string };
 			try {
 				msg = JSON.parse(line);
 			} catch {
@@ -210,9 +220,15 @@ class ForkServer {
 			if (!p) {
 				// A pid for a request the caller already abandoned (timed out): the
 				// fork succeeded but nobody owns it, so kill the orphan here.
-				if (this.abandoned.delete(msg.id) && typeof msg.pid === "number") {
+				if (
+					this.abandoned.delete(msg.id) &&
+					typeof msg.pid === "number" &&
+					typeof msg.processStartId === "string"
+				) {
 					try {
-						process.kill(msg.pid, "SIGTERM");
+						if (getProcessStartId(msg.pid) === msg.processStartId) {
+							signalProcessGroupOrProcess(msg.pid, "SIGTERM");
+						}
 					} catch {
 						// Orphan already exited.
 					}
@@ -221,19 +237,19 @@ class ForkServer {
 			}
 			this.pending.delete(msg.id);
 			clearTimeout(p.timer);
-			if (typeof msg.pid === "number") {
-				p.resolve(msg.pid);
+			if (typeof msg.pid === "number" && typeof msg.processStartId === "string") {
+				p.resolve({ pid: msg.pid, processStartId: msg.processStartId });
 			} else {
 				p.reject(new ForkServerUnavailable(this.withStderr(msg.error ?? "forkserver fork failed")));
 			}
 		}
 	}
 
-	async spawnKernel(spawn: SpawnParams): Promise<number> {
+	async spawnKernel(spawn: SpawnParams): Promise<ForkedKernelProcessIdentity> {
 		await this.ensureReady();
 		if (this.dead || !this.conn) throw new ForkServerUnavailable("forkserver connection unavailable");
 		const id = this.nextId++;
-		return new Promise<number>((resolve, reject) => {
+		return new Promise<ForkedKernelProcessIdentity>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
 				// The fork may still land after we give up; remember the id so its late
@@ -286,10 +302,24 @@ class ForkServer {
 			// Already closed.
 		}
 		try {
-			this.proc?.kill("SIGTERM");
+			if (
+				this.proc?.pid !== undefined &&
+				this.processStartId !== undefined &&
+				getProcessStartId(this.proc.pid) === this.processStartId
+			) {
+				signalProcessGroupOrProcess(this.proc.pid, "SIGTERM");
+			} else if (
+				this.proc !== undefined &&
+				this.processStartId === undefined &&
+				this.proc.exitCode === null &&
+				this.proc.signalCode === null
+			) {
+				this.proc?.kill("SIGTERM");
+			}
 		} catch {
 			// Already exited.
 		}
+		this.processStartId = undefined;
 		if (this.socketDir) {
 			try {
 				rmSync(this.socketDir, { recursive: true, force: true });
@@ -333,7 +363,7 @@ function registerForkServerCleanupOnce(): void {
  * ForkServerUnavailable if forking is disabled or fails — callers fall back to
  * direct spawn. Returns the forked child's pid (owned/killed by the caller).
  */
-export async function forkKernel(python: string, spawn: SpawnParams): Promise<number> {
+export async function forkKernel(python: string, spawn: SpawnParams): Promise<ForkedKernelProcessIdentity> {
 	if (!isForkServerEnabled()) throw new ForkServerUnavailable("forkserver disabled");
 	registerForkServerCleanupOnce();
 	const key = keyFor({ python });

@@ -6937,6 +6937,7 @@ export class AgentSession {
 		if (!this.supportsThinking()) return undefined;
 
 		const levels = this.getAvailableThinkingLevels();
+		if (levels.length === 0) return undefined;
 		const currentIndex = levels.indexOf(this.thinkingLevel);
 		const nextIndex = (currentIndex + 1) % levels.length;
 		const nextLevel = levels[nextIndex];

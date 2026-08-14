@@ -89,10 +89,95 @@ describe("openai-responses provider defaults", () => {
 		expect(capturedPayload).not.toMatchObject({
 			reasoning: expect.anything(),
 		});
+
+		const fixedModel: Model<"openai-responses"> = {
+			...getModel("openai", "gpt-5.4"),
+			reasoningCapabilities: { control: "fixed", levels: { high: "always" } },
+			thinkingLevelMap: { high: "always" },
+		};
+		capturedPayload = undefined;
+		await streamOpenAIResponses(
+			fixedModel,
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{
+				apiKey: "test-key",
+				reasoningEffort: "high",
+				reasoningEffortValue: "always",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			},
+		).result();
+		expect(capturedPayload).not.toMatchObject({ reasoning: expect.anything() });
+	});
+
+	it("gives explicit reasoning disable precedence over effort and summary", async () => {
+		let capturedPayload: Record<string, unknown> | undefined;
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("data: [DONE]\n\n", {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+
+		await streamOpenAIResponses(
+			getModel("openai", "gpt-5.4"),
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{
+				apiKey: "test-key",
+				reasoningEnabled: false,
+				reasoningEffort: "high",
+				reasoningSummary: "detailed",
+				onPayload: (payload) => {
+					capturedPayload = payload as Record<string, unknown>;
+				},
+			},
+		).result();
+
+		expect(capturedPayload?.reasoning).toEqual({ effort: "none" });
+		expect(capturedPayload?.include).toBeUndefined();
+	});
+
+	it("rejects numeric budget contracts before building a Responses request", async () => {
+		const fetchMock = vi.spyOn(globalThis, "fetch");
+		let payloadBuilt = false;
+		const model: Model<"openai-responses"> = {
+			...getModel("openai", "gpt-5.4"),
+			provider: "custom-budget",
+			reasoningCapabilities: { control: "budget", levels: { off: 0, high: 8192 } },
+		};
+
+		const result = await streamOpenAIResponses(
+			model,
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{
+				apiKey: "test-key",
+				reasoningEffort: "high",
+				onPayload: () => {
+					payloadBuilt = true;
+				},
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(
+			'API "openai-responses" accepts only string reasoning effort values and cannot serialize a numeric reasoning budget',
+		);
+		expect(payloadBuilt).toBe(false);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it.each(["gpt-5.1", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"] as const)(
-		"sends none reasoning effort for OpenAI %s when no reasoning is requested",
+		"preserves the provider reasoning default for OpenAI %s when no reasoning is requested",
 		async (modelId) => {
 			const model = getModel("openai", modelId);
 			let capturedPayload: unknown;
@@ -122,9 +207,7 @@ describe("openai-responses provider defaults", () => {
 				if (event.type === "done" || event.type === "error") break;
 			}
 
-			expect(capturedPayload).toMatchObject({
-				reasoning: { effort: "none" },
-			});
+			expect(capturedPayload).not.toMatchObject({ reasoning: expect.anything() });
 		},
 	);
 
@@ -149,6 +232,9 @@ describe("openai-responses provider defaults", () => {
 				},
 				{
 					apiKey: "test-key",
+					reasoningEnabled: false,
+					reasoningEffort: "high",
+					reasoningSummary: "detailed",
 					onPayload: (payload) => {
 						capturedPayload = payload;
 					},

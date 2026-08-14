@@ -54,22 +54,34 @@ export type Provider = KnownProvider | string;
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelThinkingLevel = "off" | ThinkingLevel;
 export type ThinkingLevelValue = string | number;
-export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, ThinkingLevelValue | null>>;
+export type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
+export type ReasoningEffortLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
+export type ReasoningBudgetLevelMap = Partial<Record<ModelThinkingLevel, number | null>>;
 
 export type ReasoningControl = "fixed" | "toggle" | "effort" | "budget";
 
 /**
  * Authoritative reasoning contract for a model route.
  *
- * `levels` is exact: a string or number is the provider value for a selectable level,
- * while null or a missing key means that level is unsupported. Adapters must
- * resolve selections through this contract rather than infer support from a
- * model name or API family.
+ * `levels` is exact: null or a missing key means that level is unsupported. An
+ * `effort` level is a native non-empty string. A `budget` level is a native,
+ * finite integer token value accepted by that model API. A numeric `off` entry
+ * must be the route's native disable value (normally `0`); it cannot be a
+ * positive budget or a dynamic-thinking sentinel. Budget routes whose native
+ * disable operation is structural may expose `supportsOff` without using a
+ * synthetic zero budget. A `fixed` contract exposes exactly one selectable
+ * level. For a structural `toggle` control, string values are support/mapping
+ * markers: adapters such
+ * as Z.AI, Moonshot, Qwen, and toggle-only DeepSeek emit their documented enabled
+ * or disabled request structure rather than copying the marker itself. Adapters
+ * must resolve selections through this contract instead of inferring support from
+ * a model name or API family. `fixed` values are internal markers and are not sent.
  */
-export interface ModelReasoningCapabilities {
-	control: ReasoningControl;
-	levels: ThinkingLevelMap;
-}
+export type ModelReasoningCapabilities =
+	| { control: "fixed"; levels: ThinkingLevelMap }
+	| { control: "toggle"; levels: ThinkingLevelMap }
+	| { control: "effort"; levels: ReasoningEffortLevelMap }
+	| { control: "budget"; levels: ReasoningBudgetLevelMap; supportsOff?: boolean };
 
 /** Token budgets for each thinking level (token-based providers only) */
 export interface ThinkingBudgets {
@@ -159,7 +171,7 @@ export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
-	/** Model reasoning selection. Omission requests off where supported; mandatory reasoning remains model-defined. */
+	/** Model reasoning selection. Omission preserves the provider/model default. */
 	reasoning?: ModelThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
@@ -325,8 +337,8 @@ export interface OpenAICompletionsCompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether all replayed assistant messages must include an empty reasoning_content field when reasoning is enabled. Default: auto-detected from URL. */
 	requiresReasoningContentOnAssistantMessages?: boolean;
-	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort, "zai" uses top-level enable_thinking: boolean, "qwen" uses top-level enable_thinking: boolean, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
-	thinkingFormat?: "openai" | "openrouter" | "deepseek" | "zai" | "qwen" | "qwen-chat-template";
+	/** Format for reasoning/thinking parameters. For named effort, "openai" uses reasoning_effort and "openrouter" uses reasoning: { effort }. For numeric budget controls, those formats use reasoning_budget and reasoning: { max_tokens }, respectively. "deepseek" uses thinking: { type } plus reasoning_effort, "zai" and "moonshot" use thinking: { type: "enabled" | "disabled" }, "qwen" uses top-level enable_thinking: boolean, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Structural formats cannot carry numeric budget contracts. Default: "openai". */
+	thinkingFormat?: "openai" | "openrouter" | "deepseek" | "zai" | "moonshot" | "qwen" | "qwen-chat-template";
 	/** OpenRouter-specific routing preferences. Only used when baseUrl points to OpenRouter. */
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
@@ -464,7 +476,11 @@ export interface Model<TApi extends Api> {
 	 * Exact model-aware reasoning controls and provider values.
 	 */
 	reasoningCapabilities?: ModelReasoningCapabilities;
-	/** @deprecated Use reasoningCapabilities. Kept for custom model compatibility. */
+	/**
+	 * @deprecated Use reasoningCapabilities. Kept for custom model compatibility.
+	 * A map override on a generated model is merged over its generated contract;
+	 * an explicitly replaced reasoningCapabilities object remains authoritative.
+	 */
 	thinkingLevelMap?: ThinkingLevelMap;
 	input: ("text" | "image")[];
 	cost: {

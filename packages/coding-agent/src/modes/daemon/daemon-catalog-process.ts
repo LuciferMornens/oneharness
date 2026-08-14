@@ -1,14 +1,24 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { closeSync, fsyncSync, openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import { waitForChildProcess } from "../../utils/child-process.js";
+import {
+	killProcessTreeByIdentity,
+	reconcileTrackedDetachedChildAfterExit,
+	trackChildProcess,
+} from "../../utils/shell.js";
+import { DAEMON_CATALOG_ROLE_ENV } from "./daemon-role-env.js";
 
-export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
+export { DAEMON_CATALOG_ROLE_ENV } from "./daemon-role-env.js";
+
 const CATALOG_IDLE_TIMEOUT_MS = 30_000;
+const CATALOG_SHUTDOWN_TIMEOUT_MS = 2000;
 
 interface SessionInfoWire extends Omit<SessionInfo, "created" | "modified"> {
 	created: string;
@@ -29,6 +39,7 @@ type CatalogRequest =
 			sessionPath: string;
 			activeSessionId: string;
 			operations: string[];
+			recoveryId: string;
 	  }
 	| { type: "request"; id: string; command: "shutdown" };
 
@@ -266,18 +277,40 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				});
 				return;
 			}
-			case "mark_interrupted":
-				SessionManager.open(request.sessionPath).appendCustomMessageEntry(
-					"prime-agent.worker_recovery",
-					"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
-					false,
-					{
-						activeSessionId: request.activeSessionId,
-						operations: request.operations,
-					},
-				);
+			case "mark_interrupted": {
+				const session = SessionManager.open(request.sessionPath);
+				const alreadyRecorded = session
+					.getEntries()
+					.some(
+						(entry) =>
+							entry.type === "custom_message" &&
+							entry.customType === "prime-agent.worker_recovery" &&
+							entry.details !== null &&
+							typeof entry.details === "object" &&
+							(entry.details as { activeSessionId?: unknown }).activeSessionId === request.activeSessionId &&
+							(entry.details as { recoveryId?: unknown }).recoveryId === request.recoveryId,
+					);
+				if (!alreadyRecorded) {
+					session.appendCustomMessageEntryWithRollback(
+						"prime-agent.worker_recovery",
+						"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
+						false,
+						{
+							activeSessionId: request.activeSessionId,
+							operations: request.operations,
+							recoveryId: request.recoveryId,
+						},
+					);
+				}
+				const descriptor = openSync(request.sessionPath, "r+");
+				try {
+					fsyncSync(descriptor);
+				} finally {
+					closeSync(descriptor);
+				}
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
 				return;
+			}
 			case "shutdown":
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
 				setImmediate(() => process.exit(0));
@@ -295,6 +328,7 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 
 export class DaemonCatalogClient {
 	private child?: ChildProcess;
+	private readonly childProcessStartIds = new WeakMap<ChildProcess, string | undefined>();
 	private starting?: Promise<void>;
 	private stopping?: Promise<void>;
 	private idleTimer?: ReturnType<typeof setTimeout>;
@@ -376,7 +410,12 @@ export class DaemonCatalogClient {
 		return data.archived;
 	}
 
-	async markInterrupted(sessionPath: string, activeSessionId: string, operations: string[]): Promise<void> {
+	async markInterrupted(
+		sessionPath: string,
+		activeSessionId: string,
+		operations: string[],
+		recoveryId: string,
+	): Promise<void> {
 		await this.request({
 			type: "request",
 			id: randomUUID(),
@@ -384,6 +423,7 @@ export class DaemonCatalogClient {
 			sessionPath,
 			activeSessionId,
 			operations,
+			recoveryId,
 		});
 	}
 
@@ -408,11 +448,29 @@ export class DaemonCatalogClient {
 	}
 
 	private async stopChild(child: ChildProcess): Promise<void> {
-		await this.request({ type: "request", id: randomUUID(), command: "shutdown" }, undefined, false).catch(
-			() => undefined,
-		);
+		await this.request(
+			{ type: "request", id: randomUUID(), command: "shutdown" },
+			undefined,
+			false,
+			CATALOG_SHUTDOWN_TIMEOUT_MS,
+		).catch(() => undefined);
 		this.clearIdleTimer();
 		if (child.connected) child.disconnect();
+		let exited = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([
+			waitForChildProcess(child).then(
+				() => {
+					exited = true;
+				},
+				() => undefined,
+			),
+			new Promise<void>((resolveTimeout) => {
+				timeout = setTimeout(resolveTimeout, CATALOG_SHUTDOWN_TIMEOUT_MS);
+			}),
+		]);
+		if (timeout) clearTimeout(timeout);
+		if (!exited || process.platform !== "win32") await this.terminateChild(child);
 		if (this.child === child) this.child = undefined;
 	}
 
@@ -420,11 +478,16 @@ export class DaemonCatalogClient {
 		const launch = createCliSubprocessLaunchSpec(["--version"]);
 		const child = spawn(launch.command, launch.args, {
 			cwd: process.cwd(),
+			detached: process.platform !== "win32",
 			env: createCliSubprocessEnv({ ...process.env, [DAEMON_CATALOG_ROLE_ENV]: "1" }),
 			stdio: ["ignore", "ignore", "ignore", "ipc"],
 			windowsHide: true,
 		});
 		this.child = child;
+		this.childProcessStartIds.set(
+			child,
+			trackChildProcess(child, { unixDetachedSession: process.platform !== "win32" }),
+		);
 		child.on("message", (value: unknown) => this.handleMessage(value));
 		child.on("error", (error) => this.handleClose(child, error));
 		child.on("exit", (code, signal) =>
@@ -438,7 +501,7 @@ export class DaemonCatalogClient {
 				if (child.connected) {
 					child.disconnect();
 				}
-				child.kill("SIGKILL");
+				void this.terminateChild(child);
 				rejectReady(error);
 			}, 5000);
 			const cleanup = () => {
@@ -465,6 +528,7 @@ export class DaemonCatalogClient {
 		request: CatalogRequest,
 		callbacks?: CatalogListCallbacks,
 		startIfNeeded = true,
+		timeoutMs = 5 * 60 * 1000,
 	): Promise<T> {
 		if (startIfNeeded) await this.start();
 		const child = this.child;
@@ -472,16 +536,13 @@ export class DaemonCatalogClient {
 			throw new Error("Daemon catalog is not connected");
 		}
 		return new Promise<T>((resolveRequest, rejectRequest) => {
-			const timeout = setTimeout(
-				() => {
-					if (!this.pending.delete(request.id)) {
-						return;
-					}
-					child.kill("SIGKILL");
-					rejectRequest(new Error(`Timed out waiting for daemon catalog ${request.command}`));
-				},
-				5 * 60 * 1000,
-			);
+			const timeout = setTimeout(() => {
+				if (!this.pending.delete(request.id)) {
+					return;
+				}
+				void this.terminateChild(child);
+				rejectRequest(new Error(`Timed out waiting for daemon catalog ${request.command}`));
+			}, timeoutMs);
 			this.pending.set(request.id, {
 				resolve: (data) => resolveRequest(data as T),
 				reject: rejectRequest,
@@ -529,6 +590,9 @@ export class DaemonCatalogClient {
 	}
 
 	private handleClose(child: ChildProcess, error: Error): void {
+		if (child.pid !== undefined && (child.exitCode !== null || child.signalCode !== null)) {
+			reconcileTrackedDetachedChildAfterExit(child.pid);
+		}
 		if (this.child !== child) {
 			return;
 		}
@@ -540,6 +604,14 @@ export class DaemonCatalogClient {
 			pending.reject(error);
 			this.pending.delete(id);
 		}
+	}
+
+	private async terminateChild(child: ChildProcess): Promise<boolean> {
+		const processStartId = this.childProcessStartIds.get(child);
+		const complete =
+			child.pid === undefined ? child.kill("SIGKILL") : await killProcessTreeByIdentity(child.pid, processStartId);
+		if (child.pid !== undefined && complete) reconcileTrackedDetachedChildAfterExit(child.pid);
+		return complete;
 	}
 
 	private scheduleIdleStop(): void {

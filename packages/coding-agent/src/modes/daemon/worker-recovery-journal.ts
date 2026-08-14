@@ -1,15 +1,11 @@
-import {
-	chmodSync,
-	closeSync,
-	fsyncSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	writeFileSync,
-	writeSync,
-} from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import {
+	appendRecoveryJournalLine,
+	readAndRepairRecoveryJournal,
+	replaceRecoveryJournal,
+	withRecoveryJournalLock,
+} from "./recovery-journal-file.js";
 
 export interface WorkerRecoveryRecord {
 	version: 1;
@@ -21,11 +17,23 @@ export interface WorkerRecoveryRecord {
 	recordedAt: string;
 }
 
+export interface WorkerRecoveryPreservationOptions {
+	rootActiveSessionId: string;
+	rootSessionFile?: string;
+	markInterrupted: (
+		sessionFile: string,
+		activeSessionId: string,
+		operations: string[],
+		recoveryId: string,
+	) => Promise<void>;
+	beforeJournalUpdate?: () => Promise<void>;
+}
+
 function parseRecords(path: string): Map<string, WorkerRecoveryRecord> {
 	const latest = new Map<string, WorkerRecoveryRecord>();
 	let contents: string;
 	try {
-		contents = readFileSync(path, "utf8");
+		contents = withRecoveryJournalLock(path, () => readAndRepairRecoveryJournal(path));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			return latest;
@@ -93,22 +101,76 @@ export class WorkerRecoveryJournal {
 	}
 
 	private append(record: WorkerRecoveryRecord): void {
-		const descriptor = openSync(this.path, "a", 0o600);
-		try {
-			writeSync(descriptor, `${JSON.stringify(record)}\n`);
-			fsyncSync(descriptor);
-		} finally {
-			closeSync(descriptor);
-		}
-		chmodSync(this.path, 0o600);
+		withRecoveryJournalLock(this.path, () => {
+			readAndRepairRecoveryJournal(this.path);
+			appendRecoveryJournalLine(this.path, JSON.stringify(record));
+		});
 	}
 
 	private compact(): void {
-		const tempPath = `${this.path}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${[...this.latest.values()].map((record) => JSON.stringify(record)).join("\n")}\n`, {
-			mode: 0o600,
+		withRecoveryJournalLock(this.path, () => {
+			readAndRepairRecoveryJournal(this.path);
+			replaceRecoveryJournal(
+				this.path,
+				[...this.latest.values()].map((record) => JSON.stringify(record)),
+			);
 		});
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, this.path);
 	}
+}
+
+export async function preserveUncertainWorkerOperations(
+	journal: WorkerRecoveryJournal,
+	latest: readonly WorkerRecoveryRecord[],
+	options: WorkerRecoveryPreservationOptions,
+): Promise<string[]> {
+	const uncertain = latest.filter((record) => record.busy);
+	if (uncertain.length === 0) {
+		return [];
+	}
+	const interruptedSessions = new Map<
+		string,
+		{ activeSessionId: string; sessionFile: string; operations: Set<string>; recoveryIds: Set<string> }
+	>();
+	for (const record of uncertain) {
+		const sessionFile =
+			record.sessionFile ??
+			(record.activeSessionId === options.rootActiveSessionId ? options.rootSessionFile : undefined);
+		if (!sessionFile) {
+			continue;
+		}
+		const key = `${record.activeSessionId}\0${sessionFile}`;
+		let interrupted = interruptedSessions.get(key);
+		if (!interrupted) {
+			interrupted = {
+				activeSessionId: record.activeSessionId,
+				sessionFile,
+				operations: new Set(),
+				recoveryIds: new Set(),
+			};
+			interruptedSessions.set(key, interrupted);
+		}
+		interrupted.operations.add(record.operation);
+		interrupted.recoveryIds.add(`${record.activeSessionId}:${record.recordedAt}`);
+	}
+	await Promise.all(
+		[...interruptedSessions.values()].map((interrupted) =>
+			options.markInterrupted(
+				interrupted.sessionFile,
+				interrupted.activeSessionId,
+				[...interrupted.operations],
+				[...interrupted.recoveryIds].sort().join("|"),
+			),
+		),
+	);
+	await options.beforeJournalUpdate?.();
+	for (const record of latest) {
+		journal.record({
+			activeSessionId: record.activeSessionId,
+			sessionId: record.sessionId,
+			...(record.sessionFile ? { sessionFile: record.sessionFile } : {}),
+			busy: false,
+			operation: "recovery_hold",
+		});
+	}
+	return uncertain.map((record) => record.operation);
 }

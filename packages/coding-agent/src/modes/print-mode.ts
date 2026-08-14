@@ -83,8 +83,7 @@ async function runPrintModeWithConnectionInternal(
 		...(process.platform === "win32" ? [] : ["SIGHUP"]),
 	] as NodeJS.Signals[]) {
 		const handler = () => {
-			killTrackedDetachedChildren();
-			void disposeConnection().finally(() => {
+			void Promise.allSettled([killTrackedDetachedChildren(), disposeConnection()]).finally(() => {
 				const exitCode = signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143;
 				process.exit(exitCode);
 			});
@@ -166,7 +165,7 @@ async function runPrintModeWithConnectionInternal(
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
-		await disposeConnection();
+		await Promise.allSettled([killTrackedDetachedChildren(), disposeConnection()]);
 		await flushRawStdout();
 	}
 }

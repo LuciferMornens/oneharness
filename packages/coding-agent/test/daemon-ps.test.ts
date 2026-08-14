@@ -1,8 +1,9 @@
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	type DaemonInfo,
 	evaluateShutdownQuietPeriod,
+	forceKillDaemon,
 	isWorkerSocketPath,
 	mergeDiscoveredDaemonProcesses,
 	parseLsofListeners,
@@ -112,6 +113,27 @@ describe("verifyHelloSupervisorPid", () => {
 		expect(verifyHelloSupervisorPid(process.pid, processStartId)).toBe(process.pid);
 		if (processStartId) {
 			expect(verifyHelloSupervisorPid(process.pid, `${processStartId}-stale`)).toBeUndefined();
+		}
+	});
+});
+
+describe("forceKillDaemon", () => {
+	it.runIf(process.platform !== "win32")("reports signal denial without claiming the daemon exited", async () => {
+		const processStartId = getProcessStartId(process.pid);
+		if (!processStartId) {
+			throw new Error("Could not identify the daemon kill probe process");
+		}
+		expect(await forceKillDaemon(process.pid, `${processStartId}-replaced`)).toBe("gone");
+
+		const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+			throw Object.assign(new Error("denied"), { code: "EPERM" });
+		});
+		try {
+			expect(await forceKillDaemon(process.pid, processStartId)).toBe("failed");
+			expect(kill).toHaveBeenCalled();
+			expect(getProcessStartId(process.pid)).toBe(processStartId);
+		} finally {
+			kill.mockRestore();
 		}
 	});
 });

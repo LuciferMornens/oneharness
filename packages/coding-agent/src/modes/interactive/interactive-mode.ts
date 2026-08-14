@@ -163,6 +163,7 @@ import type {
 	AgentConnectionToolDefinition,
 } from "../agent-connection/index.js";
 import { AgentConnectionPromptAdmissionError } from "../agent-connection/index.js";
+import { DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV } from "../daemon/daemon-supervisor-ownership.js";
 import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
 	checkForPackageUpdates,
@@ -6754,6 +6755,7 @@ export class InteractiveMode {
 	private async shutdown(): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
+		await killTrackedDetachedChildren();
 		this.unregisterSignalHandlers();
 		this.clearCtrlCExitHint({ render: false });
 
@@ -6841,7 +6843,7 @@ export class InteractiveMode {
 	private emergencyTerminalExit(): never {
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
-		killTrackedDetachedChildren();
+		void killTrackedDetachedChildren();
 		// The terminal is gone. Do not run normal shutdown because TUI and
 		// extension cleanup can write restore sequences and re-trigger EIO.
 		process.exit(129);
@@ -6868,7 +6870,6 @@ export class InteractiveMode {
 				if (signal === "SIGHUP") {
 					this.emergencyTerminalExit();
 				}
-				killTrackedDetachedChildren();
 				void this.shutdown();
 			};
 			process.prependListener(signal, handler);
@@ -8746,6 +8747,7 @@ export class InteractiveMode {
 						agentDir: getAgentDir(),
 						cwd: updateCwd,
 						originActiveSessionId: this.connectionState?.activeSessionId,
+						supervisorRegistryDir: process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV],
 					});
 					const report = buildDaemonUpdateRestartReport(status);
 					for (const message of report.info) {

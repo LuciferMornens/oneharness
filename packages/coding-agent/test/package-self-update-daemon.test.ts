@@ -83,6 +83,7 @@ interface MockUpdateRestartManifest {
 	formatVersion: 1;
 	createdAt: string;
 	sessions: MockUpdateRestartSession[];
+	supervisorRegistryDir?: string;
 }
 
 function createMockTurnExecutionPolicy(): Record<string, unknown> {
@@ -161,6 +162,8 @@ const mockState = vi.hoisted(() => ({
 	successorSocketPath: undefined as string | undefined,
 	spawnExitCodes: [] as number[],
 	shutdownResult: true,
+	waitedStartupFenceRegistryDir: undefined as string | undefined,
+	ensuredDaemonRegistryDir: undefined as string | undefined,
 }));
 
 function useFixedOwnerHello(): void {
@@ -173,6 +176,10 @@ function useFixedOwnerHello(): void {
 		supervisorProcessStartId: "process-start",
 		supervisorSocketPath: mockState.socketPath,
 	};
+}
+
+function isNpmUpdateSpawn(call: string): boolean {
+	return call.startsWith("spawn:") && call.includes("npm") && call.includes("install");
 }
 
 vi.mock("child_process", () => ({
@@ -224,9 +231,18 @@ vi.mock("../src/modes/daemon/daemon-socket.js", async (importOriginal) => ({
 }));
 
 vi.mock("../src/modes/daemon/daemon-supervisor-ownership.js", () => ({
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV: "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR",
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV: "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR",
+	adoptLegacyDaemonSupervisorOwnershipFromHello: vi.fn(async () => {
+		mockState.calls.push("adopt-daemon-supervisor-registry");
+		return "authoritative-registry";
+	}),
 	acquireDaemonShutdownAdmission: vi.fn(async () => {
 		mockState.calls.push("acquire-daemon-shutdown-admission");
 		return {
+			extendRegistryDirs: vi.fn(async (registryDirs: string[]) => {
+				mockState.calls.push(`extend-daemon-shutdown-admission:${registryDirs.join(",")}`);
+			}),
 			assertOrRenew: vi.fn(async () => {
 				mockState.calls.push("renew-daemon-shutdown-admission");
 			}),
@@ -237,15 +253,18 @@ vi.mock("../src/modes/daemon/daemon-supervisor-ownership.js", () => ({
 	}),
 	persistDaemonStartupFenceFromOwner: vi.fn(async () => {
 		mockState.calls.push("persist-daemon-startup-fence");
+		return "authoritative-registry";
 	}),
-	waitForDaemonStartupFence: vi.fn(async () => {
+	waitForDaemonStartupFence: vi.fn(async (_socketPath: string, _timeoutMs: number, registryDir?: string) => {
 		mockState.calls.push("wait-daemon-startup-fence");
+		mockState.waitedStartupFenceRegistryDir = registryDir;
 	}),
 }));
 
 vi.mock("../src/cli/daemon-launch.js", () => ({
-	ensureInteractiveDaemonRunning: vi.fn(async () => {
+	ensureInteractiveDaemonRunning: vi.fn(async (_socketPath: string, _runtime: unknown, registryDir?: string) => {
 		mockState.calls.push("ensure-daemon");
+		mockState.ensuredDaemonRegistryDir = registryDir;
 	}),
 	isDaemonSessionSummary: (value: unknown) => {
 		if (!value || typeof value !== "object") {
@@ -501,6 +520,8 @@ describe("self-update daemon restart", () => {
 		mockState.restoreNextTurnFailures = 0;
 		mockState.spawnExitCodes = [];
 		mockState.shutdownResult = true;
+		mockState.waitedStartupFenceRegistryDir = undefined;
+		mockState.ensuredDaemonRegistryDir = undefined;
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(join(agentDir, "daemon-update-restarts"), { recursive: true });
 		mkdirSync(projectDir, { recursive: true });
@@ -575,7 +596,7 @@ describe("self-update daemon restart", () => {
 		await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
 
 		expect(process.exitCode).toBe(SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE);
-		expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(false);
+		expect(mockState.calls.some(isNpmUpdateSpawn)).toBe(false);
 	});
 
 	it("does not use the no-change sentinel when interactive self-update is cancelled", async () => {
@@ -598,7 +619,7 @@ describe("self-update daemon restart", () => {
 			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
 
 			expect(process.exitCode).toBe(1);
-			expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(false);
+			expect(mockState.calls.some(isNpmUpdateSpawn)).toBe(false);
 		} finally {
 			errorSpy.mockRestore();
 		}
@@ -629,7 +650,7 @@ describe("self-update daemon restart", () => {
 		await expect(handlePackageCommand(["update", "--self", "--daemon-socket", customSocketPath])).resolves.toBe(true);
 
 		expect(mockState.probeSocketPaths).toEqual([customSocketPath]);
-		expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(true);
+		expect(mockState.calls.some(isNpmUpdateSpawn)).toBe(true);
 		expect(mockState.calls.some((call) => call.startsWith("launch-coordinator:"))).toBe(false);
 	});
 
@@ -885,11 +906,14 @@ describe("self-update daemon restart", () => {
 			await expect(performUpdateAndRunCoordinator()).resolves.toBeUndefined();
 
 			expect(process.exitCode).toBeUndefined();
-			const spawnIndex = mockState.calls.findIndex((call) => call.startsWith("spawn:npm "));
+			const spawnIndex = mockState.calls.findIndex(isNpmUpdateSpawn);
 			const launchIndex = mockState.calls.indexOf(`launch-coordinator:${mockState.socketPath}`);
 			const fenceIndex = mockState.calls.indexOf("persist-daemon-startup-fence");
 			const prepareIndex = mockState.calls.indexOf("daemon-request:prepare_update_restart");
 			const admissionIndex = mockState.calls.indexOf("acquire-daemon-shutdown-admission");
+			const extendAdmissionIndex = mockState.calls.indexOf(
+				"extend-daemon-shutdown-admission:authoritative-registry",
+			);
 			const shutdownIndex = mockState.calls.indexOf("shutdown-daemon");
 			const startupFenceIndex = mockState.calls.indexOf("wait-daemon-startup-fence");
 			const releaseAdmissionIndex = mockState.calls.indexOf("release-daemon-shutdown-admission");
@@ -897,10 +921,13 @@ describe("self-update daemon restart", () => {
 			expect(spawnIndex).toBeGreaterThanOrEqual(0);
 			expect(launchIndex).toBeGreaterThan(spawnIndex);
 			expect(admissionIndex).toBeGreaterThan(launchIndex);
+			expect(extendAdmissionIndex).toBeGreaterThan(admissionIndex);
+			expect(prepareIndex).toBeGreaterThan(extendAdmissionIndex);
 			expect(prepareIndex).toBeGreaterThan(admissionIndex);
 			expect(fenceIndex).toBeGreaterThan(prepareIndex);
 			expect(shutdownIndex).toBeGreaterThan(fenceIndex);
 			expect(startupFenceIndex).toBeGreaterThan(shutdownIndex);
+			expect(mockState.waitedStartupFenceRegistryDir).toBe("authoritative-registry");
 			expect(releaseAdmissionIndex).toBeGreaterThan(startupFenceIndex);
 			expect(ensureIndex).toBeGreaterThan(releaseAdmissionIndex);
 			expect(ensureIndex).toBeGreaterThan(shutdownIndex);
@@ -911,6 +938,30 @@ describe("self-update daemon restart", () => {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();
 		}
+	});
+
+	it("uses the prepared manifest registry for an offline successor", async () => {
+		const supervisorRegistryDir = join(tempDir, "manifest-supervisor-registry");
+		mockState.daemonProbe = { reachable: false };
+		mockState.helloCount = 1;
+		const manifest: MockUpdateRestartManifest = {
+			...createAcceptedRecoveryManifest(),
+			supervisorRegistryDir,
+		};
+		writeFileSync(mockState.preparedManifestPath, `${JSON.stringify(manifest)}\n`);
+		const restartDirectory = join(agentDir, "update-restarts");
+		mkdirSync(restartDirectory, { recursive: true });
+
+		const status = await runDaemonUpdateRestartCoordinator({
+			socketPath: mockState.socketPath,
+			agentDir,
+			statusPath: join(restartDirectory, "offline-status.json"),
+		});
+
+		expect(status.phase).toBe("complete");
+		expect(mockState.calls).toContain(`extend-daemon-shutdown-admission:${supervisorRegistryDir}`);
+		expect(mockState.waitedStartupFenceRegistryDir).toBe(supervisorRegistryDir);
+		expect(mockState.ensuredDaemonRegistryDir).toBe(supervisorRegistryDir);
 	});
 
 	it("does not persist a predecessor fence when restart preparation fails", async () => {

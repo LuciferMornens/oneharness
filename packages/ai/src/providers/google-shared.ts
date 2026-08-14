@@ -3,42 +3,46 @@
  */
 
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.js";
+import { resolveThinkingLevel } from "../models.js";
+import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { type GoogleThinkingLevel, getLegacyGoogleDisabledThinking } from "./google-thinking.js";
 import { transformMessages } from "./transform-messages.js";
+
+export type { GoogleThinkingLevel } from "./google-thinking.js";
+export {
+	getGoogleThinkingBudget,
+	getLegacyGoogleDisabledThinking,
+	getLegacyGoogleReasoningLevels,
+	getLegacyGoogleThinkingLevel,
+	usesGoogleThinkingLevels,
+} from "./google-thinking.js";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
 
-/**
- * Thinking level for Gemini 3 models.
- * Mirrors Google's ThinkingLevel enum values.
- */
-export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export interface GoogleThinkingOption {
+	enabled: boolean;
+	budgetTokens?: number;
+	level?: GoogleThinkingLevel;
+}
 
-type GoogleBudgetThinkingLevel = "minimal" | "low" | "medium" | "high";
+export function resolveGoogleThinkingOption<TApi extends GoogleApiType>(
+	model: Model<TApi>,
+	thinking: GoogleThinkingOption,
+): GoogleThinkingOption {
+	if (thinking.enabled) return thinking;
 
-export function getGoogleThinkingBudget(
-	modelId: string,
-	effort: GoogleBudgetThinkingLevel,
-	customBudgets?: ThinkingBudgets,
-): number {
-	if (customBudgets?.[effort] !== undefined) {
-		return customBudgets[effort]!;
+	if (model.reasoningCapabilities || model.thinkingLevelMap) {
+		const resolved = resolveThinkingLevel(model, "off");
+		if (resolved) {
+			return typeof resolved.providerValue === "number"
+				? { enabled: resolved.enabled, budgetTokens: resolved.providerValue }
+				: { enabled: resolved.enabled, level: resolved.providerValue as GoogleThinkingLevel };
+		}
 	}
 
-	if (modelId.includes("2.5-pro")) {
-		return { minimal: 128, low: 2048, medium: 8192, high: 32768 }[effort];
-	}
-
-	if (modelId.includes("2.5-flash-lite")) {
-		return { minimal: 512, low: 2048, medium: 8192, high: 24576 }[effort];
-	}
-
-	if (modelId.includes("2.5-flash")) {
-		return { minimal: 128, low: 2048, medium: 8192, high: 24576 }[effort];
-	}
-
-	return -1;
+	if (thinking.level !== undefined || thinking.budgetTokens !== undefined) return thinking;
+	return { enabled: false, ...getLegacyGoogleDisabledThinking(model.id) };
 }
 
 /**

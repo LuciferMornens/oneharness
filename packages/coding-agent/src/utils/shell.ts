@@ -1,9 +1,15 @@
 import { existsSync } from "node:fs";
 import { basename, delimiter } from "node:path";
-import { spawnSync } from "child_process";
+import { type ChildProcess, spawnSync } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
-import { signalProcessGroupOrProcess } from "./child-process.js";
+import { getProcessStartId } from "../core/session-lease.js";
+import {
+	inspectUnixProcessSessionByIdentity,
+	signalProcessGroupOrProcess,
+	terminateUnixProcessGroupByIdentity,
+	terminateWindowsProcessTreeByIdentity,
+} from "./child-process.js";
 
 export interface ShellConfig {
 	shell: string;
@@ -227,29 +233,130 @@ export function sanitizeBinaryOutput(str: string): string {
  * Detached child processes must be tracked so they can be killed on parent
  * shutdown signals (SIGHUP/SIGTERM).
  */
-const trackedDetachedChildPids = new Set<number>();
+interface TrackedDetachedChild {
+	processStartId: string | undefined;
+	unixDetachedSession: boolean;
+	unixDescendants: Map<number, string>;
+}
 
-export function trackDetachedChildPid(pid: number): void {
-	trackedDetachedChildPids.add(pid);
-	recordOrphanProcessState(pid, true);
+const trackedDetachedChildren = new Map<number, TrackedDetachedChild>();
+
+function setTrackedDetachedChild(pid: number, processStartId: string | undefined, unixDetachedSession: boolean): void {
+	trackedDetachedChildren.set(pid, { processStartId, unixDetachedSession, unixDescendants: new Map() });
+	recordOrphanProcessState(pid, true, processStartId ?? null);
+}
+
+export function trackDetachedChildPid(pid: number): string | undefined {
+	const processStartId = getProcessStartId(pid);
+	setTrackedDetachedChild(pid, processStartId, process.platform !== "win32");
+	return processStartId;
+}
+
+export function trackChildProcess(
+	child: ChildProcess,
+	options: { unixDetachedSession?: boolean } = {},
+): string | undefined {
+	if (!child.pid) {
+		return undefined;
+	}
+	const processStartId = getProcessStartId(child.pid);
+	if (child.exitCode !== null || child.signalCode !== null || !child.kill(0)) {
+		return undefined;
+	}
+	setTrackedDetachedChild(child.pid, processStartId, options.unixDetachedSession === true);
+	return processStartId;
 }
 
 export function untrackDetachedChildPid(pid: number): void {
-	trackedDetachedChildPids.delete(pid);
+	const tracked = trackedDetachedChildren.get(pid);
+	trackedDetachedChildren.delete(pid);
 	recordOrphanProcessState(pid, false);
+	for (const descendantPid of tracked?.unixDescendants.keys() ?? []) {
+		recordOrphanProcessState(descendantPid, false);
+	}
 }
 
-export function killTrackedDetachedChildren(): void {
-	for (const pid of trackedDetachedChildPids) {
-		killProcessTree(pid);
-		recordOrphanProcessState(pid, false);
+export function reconcileTrackedDetachedChildAfterExit(pid: number): "cleared" | "retained" {
+	const tracked = trackedDetachedChildren.get(pid);
+	if (!tracked) {
+		return "cleared";
 	}
-	trackedDetachedChildPids.clear();
+	if (process.platform === "win32") {
+		untrackDetachedChildPid(pid);
+		return "cleared";
+	}
+	if (!tracked.unixDetachedSession || !tracked.processStartId) {
+		return "retained";
+	}
+	const inspection = inspectUnixProcessSessionByIdentity(pid, tracked.processStartId, getProcessStartId);
+	if (inspection.status === "not-found" || inspection.status === "identity-mismatch") {
+		untrackDetachedChildPid(pid);
+		return "cleared";
+	}
+	if (inspection.status !== "active") {
+		return "retained";
+	}
+	const descendants = new Map(
+		inspection.members
+			.filter((member) => member.pid !== pid)
+			.map((member) => [member.pid, member.processStartId] as const),
+	);
+	for (const descendantPid of tracked.unixDescendants.keys()) {
+		if (!descendants.has(descendantPid)) {
+			recordOrphanProcessState(descendantPid, false);
+		}
+	}
+	for (const [descendantPid, processStartId] of descendants) {
+		recordOrphanProcessState(descendantPid, true, processStartId);
+	}
+	tracked.unixDescendants = descendants;
+	return "retained";
+}
+
+export async function killTrackedDetachedChildren(): Promise<boolean> {
+	let complete = true;
+	for (const [pid, tracked] of [...trackedDetachedChildren]) {
+		let terminated: boolean;
+		if (process.platform === "win32") {
+			if (tracked.processStartId === undefined) {
+				terminated = false;
+			} else {
+				const result = await terminateWindowsProcessTreeByIdentity(pid, tracked.processStartId);
+				terminated = result === "terminated" || result === "not-found";
+			}
+		} else {
+			if (!tracked.unixDetachedSession) {
+				terminated = killProcessTree(pid);
+			} else if (tracked.processStartId === undefined) {
+				terminated = false;
+			} else {
+				const result = await terminateUnixProcessGroupByIdentity(pid, tracked.processStartId, getProcessStartId);
+				terminated = result === "terminated" || result === "not-found";
+			}
+		}
+		if (terminated) {
+			untrackDetachedChildPid(pid);
+		} else {
+			complete = false;
+		}
+	}
+	return complete;
 }
 
 /**
  * Kill a process and all its children (cross-platform)
  */
-export function killProcessTree(pid: number): void {
-	signalProcessGroupOrProcess(pid, "SIGKILL");
+export function killProcessTree(pid: number): boolean {
+	return signalProcessGroupOrProcess(pid, "SIGKILL");
+}
+
+export async function killProcessTreeByIdentity(pid: number, processStartId: string | undefined): Promise<boolean> {
+	if (!processStartId) {
+		return false;
+	}
+	const result =
+		process.platform === "win32"
+			? await terminateWindowsProcessTreeByIdentity(pid, processStartId)
+			: await terminateUnixProcessGroupByIdentity(pid, processStartId, getProcessStartId);
+	return result === "terminated" || result === "not-found";
 }

@@ -1,7 +1,14 @@
 import OpenAI from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { resolveSimpleThinkingLevel, resolveThinkingLevel, resolveThinkingOffValue } from "../models.js";
+import {
+	assertValidReasoningCapabilities,
+	assertValidReasoningEffortValue,
+	getReasoningCapabilities,
+	resolveSimpleThinkingLevel,
+	resolveThinkingLevel,
+	resolveThinkingOffValue,
+} from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -60,6 +67,7 @@ function getPromptCacheRetention(
 export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningEffortValue?: string;
+	/** false overrides reasoningEffort and reasoningSummary; undefined preserves the provider/model default. */
 	reasoningEnabled?: boolean;
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
@@ -159,6 +167,9 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
+	if (getReasoningCapabilities(model)?.control === "fixed") {
+		return streamOpenAIResponses(model, context, base satisfies OpenAIResponsesOptions);
+	}
 	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
 
 	return streamOpenAIResponses(model, context, {
@@ -231,6 +242,10 @@ function createClient(
 }
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
+	const capabilities = assertValidReasoningCapabilities(model);
+	if (capabilities?.control === "effort" && options?.reasoningEffortValue !== undefined) {
+		assertValidReasoningEffortValue(model, "request", options.reasoningEffortValue);
+	}
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
@@ -260,8 +275,15 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.tools = convertResponsesTools(context.tools);
 	}
 
-	if (model.reasoning) {
-		if (options?.reasoningEffort || options?.reasoningSummary) {
+	if (model.reasoning && getReasoningCapabilities(model)?.control !== "fixed") {
+		if (options?.reasoningEnabled === false) {
+			if (model.provider === "github-copilot") return params;
+			const offValue = resolveThinkingOffValue(model, "none");
+			if (typeof offValue !== "string") return params;
+			params.reasoning = {
+				effort: offValue as NonNullable<typeof params.reasoning>["effort"],
+			};
+		} else if (options?.reasoningEffort || options?.reasoningSummary) {
 			const effort = options?.reasoningEffort
 				? (options.reasoningEffortValue ??
 					resolveThinkingLevel(model, options.reasoningEffort)?.providerValue ??
@@ -272,12 +294,6 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 				summary: options?.reasoningSummary || "auto",
 			};
 			params.include = ["reasoning.encrypted_content"];
-		} else if (model.provider !== "github-copilot") {
-			const offValue = resolveThinkingOffValue(model, "none");
-			if (typeof offValue !== "string") return params;
-			params.reasoning = {
-				effort: offValue as NonNullable<typeof params.reasoning>["effort"],
-			};
 		}
 	}
 

@@ -21,7 +21,14 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 }
 
 import { getEnvApiKey } from "../env-api-keys.js";
-import { resolveSimpleThinkingLevel, resolveThinkingLevel } from "../models.js";
+import {
+	assertValidReasoningCapabilities,
+	assertValidReasoningEffortValue,
+	getReasoningCapabilities,
+	resolveSimpleThinkingLevel,
+	resolveThinkingLevel,
+	resolveThinkingOffValue,
+} from "../models.js";
 import { registerSessionResourceCleanup } from "../session-resources.js";
 import type {
 	Api,
@@ -70,6 +77,8 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningEffortValue?: string;
+	/** false overrides reasoningEffort and reasoningSummary; undefined preserves the provider/model default. */
+	reasoningEnabled?: boolean;
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
@@ -327,6 +336,9 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
+	if (getReasoningCapabilities(model)?.control === "fixed") {
+		return streamOpenAICodexResponses(model, context, base satisfies OpenAICodexResponsesOptions);
+	}
 	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
 
 	return streamOpenAICodexResponses(model, context, {
@@ -337,9 +349,12 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 				? "none"
 				: undefined,
 		reasoningEffortValue:
-			resolvedReasoning && typeof resolvedReasoning.providerValue === "string"
+			resolvedReasoning &&
+			(resolvedReasoning.enabled || model.reasoningCapabilities || model.thinkingLevelMap?.off !== undefined) &&
+			typeof resolvedReasoning.providerValue === "string"
 				? resolvedReasoning.providerValue
 				: undefined,
+		reasoningEnabled: resolvedReasoning?.enabled,
 	} satisfies OpenAICodexResponsesOptions);
 };
 
@@ -352,6 +367,10 @@ function buildRequestBody(
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ): RequestBody {
+	const capabilities = assertValidReasoningCapabilities(model);
+	if (capabilities?.control === "effort" && options?.reasoningEffortValue !== undefined) {
+		assertValidReasoningEffortValue(model, "request", options.reasoningEffortValue);
+	}
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
 	});
@@ -381,16 +400,20 @@ function buildRequestBody(
 		body.tools = convertResponsesTools(context.tools, { strict: null });
 	}
 
-	if (options?.reasoningEffort !== undefined) {
+	if (model.reasoning && getReasoningCapabilities(model)?.control !== "fixed") {
 		const effort =
-			options.reasoningEffortValue ??
-			(options.reasoningEffort === "none"
-				? resolveSimpleThinkingLevel(model, undefined)?.providerValue
-				: resolveThinkingLevel(model, options.reasoningEffort)?.providerValue);
+			options?.reasoningEnabled === false
+				? resolveThinkingOffValue(model, "none")
+				: options?.reasoningEffort !== undefined
+					? (options.reasoningEffortValue ??
+						(options.reasoningEffort === "none"
+							? resolveThinkingOffValue(model, "none")
+							: resolveThinkingLevel(model, options.reasoningEffort)?.providerValue))
+					: undefined;
 		if (typeof effort === "string") {
 			body.reasoning = {
 				effort,
-				summary: options.reasoningSummary ?? "auto",
+				...(options?.reasoningEnabled === false ? {} : { summary: options?.reasoningSummary ?? "auto" }),
 			};
 		}
 	}

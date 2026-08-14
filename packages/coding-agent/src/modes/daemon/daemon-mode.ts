@@ -107,7 +107,12 @@ import {
 	type SessionPassivationSnapshot,
 } from "../../core/session-action-store.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
-import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
+import {
+	acquireSessionLease,
+	canonicalSessionPath,
+	getProcessStartId,
+	type SessionLease,
+} from "../../core/session-lease.js";
 import {
 	readSessionInfo,
 	resolveSessionRlmDepth,
@@ -187,7 +192,13 @@ import {
 	prepareDaemonSocketPath,
 	restrictDaemonSocketPath,
 } from "./daemon-socket.js";
-import { assertDaemonSupervisorOwnerCurrent, isDaemonShutdownAdmissionActive } from "./daemon-supervisor-ownership.js";
+import {
+	assertDaemonSupervisorOwnerCurrent,
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
+	daemonSupervisorSuccessorRegistryDir,
+	isDaemonShutdownAdmissionActive,
+} from "./daemon-supervisor-ownership.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
@@ -764,6 +775,10 @@ export class AgentDaemon {
 		const lockDirectory = join(lockRoot, `.supervisor-launch-${key}.lock`);
 		let ownsLock = false;
 		try {
+			const processStartId = getProcessStartId(process.pid);
+			if (!processStartId) {
+				throw new Error("Could not verify replacement-supervisor launcher process identity");
+			}
 			if (process.platform === "win32") {
 				mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
 			}
@@ -771,9 +786,11 @@ export class AgentDaemon {
 				const token = randomUUID();
 				const candidateDirectory = `${lockDirectory}.candidate-${process.pid}-${token}`;
 				mkdirSync(candidateDirectory, { mode: 0o700 });
-				writeFileSync(join(candidateDirectory, "pid"), `${process.pid}\n`, {
-					mode: 0o600,
-				});
+				writeFileSync(
+					join(candidateDirectory, "owner.json"),
+					`${JSON.stringify({ pid: process.pid, processStartId })}\n`,
+					{ mode: 0o600 },
+				);
 				try {
 					renameSync(candidateDirectory, lockDirectory);
 					ownsLock = true;
@@ -784,13 +801,23 @@ export class AgentDaemon {
 					if (code !== "EEXIST" && code !== "ENOTEMPTY") {
 						throw error;
 					}
-					let ownerPid: number | undefined;
+					let owner: { pid: number; processStartId: string } | undefined;
 					try {
-						ownerPid = Number(readFileSync(join(lockDirectory, "pid"), "utf8").trim());
+						const parsed = JSON.parse(readFileSync(join(lockDirectory, "owner.json"), "utf8")) as {
+							pid?: unknown;
+							processStartId?: unknown;
+						};
+						if (
+							Number.isInteger(parsed.pid) &&
+							(parsed.pid as number) > 0 &&
+							typeof parsed.processStartId === "string"
+						) {
+							owner = { pid: parsed.pid as number, processStartId: parsed.processStartId };
+						}
 					} catch {
 						// An invalid owner is reclaimed atomically below.
 					}
-					if (ownerPid && this.isProcessAlive(ownerPid)) {
+					if (owner && getProcessStartId(owner.pid) === owner.processStartId) {
 						return;
 					}
 					const staleDirectory = `${lockDirectory}.stale-${process.pid}-${token}`;
@@ -815,11 +842,24 @@ export class AgentDaemon {
 			}
 			const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", supervisorSocketPath]);
 			const environment = createCliSubprocessEnv();
+			const selectedSupervisorRegistryDir = process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV];
+			const inheritedSupervisorRegistryDir = process.env[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+			const supervisorRegistryDir =
+				selectedSupervisorRegistryDir ??
+				(inheritedSupervisorRegistryDir
+					? daemonSupervisorSuccessorRegistryDir(inheritedSupervisorRegistryDir)
+					: undefined);
 			delete environment[DAEMON_WORKER_ROLE_ENV];
 			delete environment[DAEMON_WORKER_TOKEN_ENV];
 			delete environment[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV];
 			delete environment[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
 			delete environment[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			delete environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+			if (supervisorRegistryDir) {
+				environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] = supervisorRegistryDir;
+			} else {
+				delete environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV];
+			}
 			delete environment[ORPHAN_PROCESS_JOURNAL_ENV];
 			delete environment[SESSION_LEASES_ENABLED_ENV];
 			delete environment[SESSION_LEASE_OWNER_ID_ENV];
@@ -846,15 +886,6 @@ export class AgentDaemon {
 				rmSync(lockDirectory, { recursive: true, force: true });
 			}
 			this.supervisorLaunchInProgress = false;
-		}
-	}
-
-	private isProcessAlive(pid: number): boolean {
-		try {
-			process.kill(pid, 0);
-			return true;
-		} catch (error) {
-			return (error as NodeJS.ErrnoException).code === "EPERM";
 		}
 	}
 
@@ -6592,7 +6623,6 @@ export class AgentDaemon {
 		for (const signal of signals) {
 			const handler = () => {
 				this.log(`received ${signal}; shutting down`);
-				killTrackedDetachedChildren();
 				void this.shutdown(signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143);
 			};
 			process.on(signal, handler);
@@ -6612,6 +6642,7 @@ export class AgentDaemon {
 			process.exit(exitCode);
 		}
 		this.shuttingDown = true;
+		await killTrackedDetachedChildren();
 		if (this.supervisorMonitorTimer) {
 			clearTimeout(this.supervisorMonitorTimer);
 			this.supervisorMonitorTimer = undefined;

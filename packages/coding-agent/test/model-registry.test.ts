@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
-import { getApiProvider } from "@earendil-works/pi-ai";
+import { getApiProvider, streamSimple } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -362,6 +362,61 @@ describe("ModelRegistry", () => {
 			expect(compat?.maxTokensField).toBe("max_tokens");
 		});
 
+		test("moonshot thinking format loads and reaches the OpenAI-compatible adapter", async () => {
+			writeRawModelsJson({
+				moonshot: {
+					baseUrl: "http://127.0.0.1:9/v1",
+					apiKey: "test-key",
+					api: "openai-completions",
+					compat: {
+						supportsReasoningEffort: false,
+						thinkingFormat: "moonshot",
+					},
+					models: [
+						{
+							id: "kimi-compatible",
+							reasoning: true,
+							reasoningCapabilities: {
+								control: "toggle",
+								levels: { off: "disabled", high: "enabled" },
+							},
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("moonshot", "kimi-compatible") as Model<"openai-completions"> | undefined;
+			const compat = model?.compat as OpenAICompletionsCompat | undefined;
+
+			expect(registry.getError()).toBeUndefined();
+			expect(compat?.thinkingFormat).toBe("moonshot");
+			expect(compat?.supportsReasoningEffort).toBe(false);
+
+			let payload: { thinking?: unknown; reasoning_effort?: unknown } | undefined;
+			const stream = streamSimple(
+				model!,
+				{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
+				{
+					apiKey: "test-key",
+					reasoning: "off",
+					signal: AbortSignal.abort(),
+					onPayload: (params) => {
+						payload = params as { thinking?: unknown; reasoning_effort?: unknown };
+						return params;
+					},
+				},
+			);
+			await stream.result();
+
+			expect(payload?.thinking).toEqual({ type: "disabled" });
+			expect(payload?.reasoning_effort).toBeUndefined();
+		});
+
 		test("model-level compat overrides provider-level compat for custom models", () => {
 			writeRawModelsJson({
 				demo: {
@@ -438,7 +493,6 @@ describe("ModelRegistry", () => {
 							reasoningCapabilities: {
 								control: "budget",
 								levels: {
-									off: 0,
 									low: 1024,
 									high: 8192,
 									max: 32768,
@@ -460,11 +514,324 @@ describe("ModelRegistry", () => {
 			expect(registry.getError()).toBeUndefined();
 			expect(model?.reasoningCapabilities).toEqual({
 				control: "budget",
-				levels: { off: 0, low: 1024, high: 8192, max: 32768 },
+				levels: { low: 1024, high: 8192, max: 32768 },
 			});
 			expect(model?.thinkingLevelMap).toEqual({ minimal: null, high: "max" });
 			expect(compat?.supportsStrictMode).toBe(false);
 			expect(compat?.cacheControlFormat).toBe("anthropic");
+		});
+
+		test("rejects numeric OpenAI-compatible budgets for structural thinking formats", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					compat: { thinkingFormat: "qwen" },
+					models: [
+						{
+							id: "invalid-budget-model",
+							reasoning: true,
+							reasoningCapabilities: {
+								control: "budget",
+								levels: { high: 8192 },
+							},
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain('thinkingFormat "qwen" cannot serialize a numeric reasoning budget');
+			expect(registry.find("demo", "invalid-budget-model")).toBeUndefined();
+
+			expect(() =>
+				registry.registerProvider("dynamic-invalid-budget", {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "invalid-budget-model",
+							name: "Invalid budget model",
+							reasoning: true,
+							reasoningCapabilities: {
+								control: "budget",
+								levels: { high: 8192 },
+							},
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+							compat: { thinkingFormat: "deepseek" },
+						},
+					],
+				}),
+			).toThrow('thinkingFormat "deepseek" cannot serialize a numeric reasoning budget');
+		});
+
+		test.each([
+			"openai-responses",
+			"azure-openai-responses",
+			"openai-codex-responses",
+			"mistral-conversations",
+		] as const)("rejects numeric budgets for string-only %s reasoning fields", (api) => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api,
+					models: [
+						{
+							id: "invalid-budget-model",
+							reasoning: true,
+							reasoningCapabilities: {
+								control: "budget",
+								levels: { off: 0, high: 8192 },
+							},
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain(
+				`API "${api}" accepts only string reasoning effort values and cannot serialize a numeric reasoning budget`,
+			);
+			expect(registry.find("demo", "invalid-budget-model")).toBeUndefined();
+		});
+
+		test("rejects exact reasoning contracts without a selectable level", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "empty-reasoning-model",
+							reasoning: true,
+							reasoningCapabilities: {
+								control: "effort",
+								levels: { off: null, high: null },
+							},
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain(
+				"Model demo/empty-reasoning-model: reasoningCapabilities.levels must include at least one selectable value.",
+			);
+			expect(registry.find("demo", "empty-reasoning-model")).toBeUndefined();
+
+			expect(() =>
+				registry.registerProvider("dynamic-empty", {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "empty-reasoning-model",
+							name: "Empty reasoning model",
+							reasoning: true,
+							reasoningCapabilities: { control: "effort", levels: {} },
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+						},
+					],
+				}),
+			).toThrow(
+				"Model dynamic-empty/empty-reasoning-model: reasoningCapabilities.levels must include at least one selectable value.",
+			);
+		});
+
+		test.each([
+			["effort", { control: "effort", levels: { high: 8192 } }, 'effort level "high" must use a non-empty string'],
+			[
+				"string budget",
+				{ control: "budget", levels: { high: "8192" } },
+				'budget level "high" must use a numeric token value',
+			],
+			["fractional budget", { control: "budget", levels: { high: 1.5 } }, "finite integer token value"],
+			["zero OpenAI budget", { control: "budget", levels: { high: 0 } }, "at least 1 tokens"],
+			["negative OpenAI budget", { control: "budget", levels: { high: -1 } }, "at least 1 tokens"],
+			[
+				"positive OpenAI off budget",
+				{ control: "budget", levels: { off: 1024, high: 8192 } },
+				'budget level "off" must disable reasoning',
+			],
+		] as const)("rejects invalid %s contracts in models.json", (_name, reasoningCapabilities, message) => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [{ id: "invalid-contract", reasoning: true, reasoningCapabilities }],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain(message);
+			expect(registry.find("demo", "invalid-contract")).toBeUndefined();
+		});
+
+		test("rejects numeric values in the deprecated thinkingLevelMap schema", () => {
+			writeRawModelsJson({
+				openai: {
+					modelOverrides: {
+						"gpt-5.4": { thinkingLevelMap: { high: 8192 } },
+					},
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain("Invalid models.json schema");
+		});
+
+		test("rejects unknown reasoning control discriminators before loading or registering models", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "unknown-control",
+							reasoning: false,
+							reasoningCapabilities: { control: "mystery", levels: { high: "high" } },
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain(
+				'Model demo/unknown-control: unknown reasoningCapabilities.control "mystery".',
+			);
+			expect(registry.find("demo", "unknown-control")).toBeUndefined();
+
+			const dynamicRegistry = ModelRegistry.inMemory(authStorage);
+			expect(() =>
+				dynamicRegistry.registerProvider("dynamic-unknown-control", {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "unknown-control",
+							name: "Unknown control",
+							reasoning: false,
+							reasoningCapabilities: {
+								control: "mystery",
+								levels: { high: "high" },
+							} as never,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+						},
+					],
+				}),
+			).toThrow('unknown reasoningCapabilities.control "mystery"');
+			expect(dynamicRegistry.find("dynamic-unknown-control", "unknown-control")).toBeUndefined();
+		});
+
+		test("rejects legacy choices on fixed routes but accepts an explicit non-fixed replacement", () => {
+			writeRawModelsJson({
+				"github-copilot": {
+					modelOverrides: {
+						"gpt-5-mini": { thinkingLevelMap: { off: "none" } },
+					},
+				},
+			});
+			const invalidRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(invalidRegistry.getError()).toContain("fixed reasoning contract exposes 2 selectable levels");
+
+			writeRawModelsJson({
+				"github-copilot": {
+					modelOverrides: {
+						"gpt-5-mini": {
+							reasoningCapabilities: {
+								control: "effort",
+								levels: { off: "none", high: "high" },
+							},
+						},
+					},
+				},
+			});
+			const explicitRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(explicitRegistry.getError()).toBeUndefined();
+			expect(explicitRegistry.find("github-copilot", "gpt-5-mini")?.reasoningCapabilities).toEqual({
+				control: "effort",
+				levels: { off: "none", high: "high" },
+			});
+		});
+
+		test.each([
+			["gemini-2.5-pro", 0, "thinking cannot be disabled"],
+			["gemini-2.5-flash-lite", 511, "between 512 and 24576"],
+			["gemini-2.5-flash", 24577, "between 1 and 24576"],
+		] as const)("rejects invalid Google budget values for %s", (id, high, message) => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://generativelanguage.googleapis.com",
+					apiKey: "DEMO_KEY",
+					api: "google-generative-ai",
+					models: [{ id, reasoning: true, reasoningCapabilities: { control: "budget", levels: { high } } }],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain(message);
+		});
+
+		test.each([
+			[128, 'budget level "off" must disable reasoning'],
+			[-1, "the -1 sentinel enables dynamic thinking"],
+		] as const)("rejects invalid Google off budget %s", (off, message) => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://generativelanguage.googleapis.com",
+					apiKey: "DEMO_KEY",
+					api: "google-generative-ai",
+					models: [
+						{
+							id: "gemini-2.5-flash",
+							reasoning: true,
+							reasoningCapabilities: { control: "budget", levels: { off, high: 24576 } },
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toContain(message);
+		});
+
+		test("rejects an unidentifiable Bedrock effort contract during registration", () => {
+			expect(() =>
+				ModelRegistry.inMemory(authStorage).registerProvider("custom-bedrock", {
+					baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+					apiKey: "DEMO_KEY",
+					api: "bedrock-converse-stream",
+					models: [
+						{
+							id: "opaque-route",
+							name: "Opaque Route",
+							reasoning: true,
+							reasoningCapabilities: { control: "effort", levels: { high: "high" } },
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+						},
+					],
+				}),
+			).toThrow("Bedrock effort contracts require a Claude adaptive-thinking route");
 		});
 
 		test("legacy thinking level overrides update generated reasoning capabilities", () => {

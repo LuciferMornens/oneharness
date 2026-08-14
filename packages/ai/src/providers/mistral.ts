@@ -7,7 +7,13 @@ import type {
 	FunctionTool,
 } from "@mistralai/mistralai/models/components";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { calculateCost, getReasoningCapabilities, resolveSimpleThinkingLevel } from "../models.js";
+import {
+	assertValidReasoningCapabilities,
+	assertValidReasoningEffortValue,
+	calculateCost,
+	getReasoningCapabilities,
+	resolveSimpleThinkingLevel,
+} from "../models.js";
 import type {
 	AssistantMessage,
 	Context,
@@ -122,6 +128,9 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
+	if (getReasoningCapabilities(model)?.control === "fixed") {
+		return streamMistral(model, context, base satisfies MistralOptions);
+	}
 	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
 	const shouldUseReasoning = resolvedReasoning?.enabled === true;
 
@@ -248,6 +257,10 @@ function buildChatPayload(
 	messages: Message[],
 	options?: MistralOptions,
 ): ChatCompletionStreamRequest {
+	const capabilities = assertValidReasoningCapabilities(model);
+	if (capabilities?.control === "effort" && options?.reasoningEffortValue !== undefined) {
+		assertValidReasoningEffortValue(model, "request", options.reasoningEffortValue);
+	}
 	const payload: ChatCompletionStreamRequest = {
 		model: model.id,
 		stream: true,
@@ -258,8 +271,12 @@ function buildChatPayload(
 	if (options?.temperature !== undefined) payload.temperature = options.temperature;
 	if (options?.maxTokens !== undefined) payload.maxTokens = options.maxTokens;
 	if (options?.toolChoice) payload.toolChoice = mapToolChoice(options.toolChoice);
-	if (options?.promptMode) payload.promptMode = options.promptMode;
-	if (options?.reasoningEffort) payload.reasoningEffort = options.reasoningEffort;
+	if (model.reasoning && getReasoningCapabilities(model)?.control !== "fixed") {
+		if (options?.promptMode) payload.promptMode = options.promptMode;
+		if (options?.reasoningEffort) {
+			payload.reasoningEffort = options.reasoningEffortValue ?? options.reasoningEffort;
+		}
+	}
 
 	if (context.systemPrompt) {
 		payload.messages.unshift({

@@ -12,7 +12,12 @@ import {
 	shutdownDaemonAndWait,
 } from "../src/cli/daemon-launch.js";
 import { ENV_AGENT_DIR, getDaemonLogPath, VERSION } from "../src/config.js";
+import { getProcessStartId } from "../src/core/session-lease.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
+import {
+	acquireDaemonSupervisorOwnership,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
+} from "../src/modes/daemon/daemon-supervisor-ownership.js";
 
 interface FakeDaemonOptions {
 	/** Sessions returned for a `list` command. */
@@ -26,6 +31,10 @@ interface FakeDaemonOptions {
 	appVersion?: string;
 	schemaId?: string;
 	serverCapabilities?: string[];
+	supervisorOwnerToken?: string;
+	supervisorProcessStartId?: string;
+	omitSupervisorIdentity?: boolean;
+	omitSupervisorProcessStartId?: boolean;
 	onCommand?: (command: { type: string }) => void;
 }
 
@@ -34,13 +43,27 @@ interface FakeDaemon {
 	close: () => Promise<void>;
 }
 
+let socketSequence = 0;
+
+function testSocketPath(directory: string): string {
+	if (process.platform !== "win32") {
+		return join(directory, "d.sock");
+	}
+	socketSequence++;
+	return `\\\\.\\pipe\\prime-agent-launch-${process.pid}-${Date.now()}-${socketSequence}`;
+}
+
 function send(socket: Socket, message: unknown): void {
 	socket.write(`${JSON.stringify(message)}\n`);
 }
 
 async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDaemon> {
 	const dir = mkdtempSync(join(tmpdir(), "pa-launch-"));
-	const socketPath = join(dir, "d.sock");
+	const socketPath = testSocketPath(dir);
+	const processStartId = getProcessStartId(process.pid);
+	if (!processStartId) {
+		throw new Error("Could not capture the fake daemon process identity");
+	}
 	const server: Server = createServer((socket) => {
 		socket.on("error", () => undefined);
 		send(socket, {
@@ -49,6 +72,17 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 			protocol: { name: "prime-agent.daemon", version: options.protocolVersion ?? DAEMON_PROTOCOL_VERSION },
 			appVersion: options.appVersion,
 			schemaId: options.schemaId ?? DAEMON_SCHEMA_ID,
+			...(options.omitSupervisorIdentity
+				? {}
+				: {
+						supervisorGeneration: "fake-generation",
+						supervisorOwnerToken: options.supervisorOwnerToken ?? "fake-owner-token",
+						supervisorPid: process.pid,
+						...(options.omitSupervisorProcessStartId
+							? {}
+							: { supervisorProcessStartId: options.supervisorProcessStartId ?? processStartId }),
+						supervisorSocketPath: socketPath,
+					}),
 			clientId: "fake-client",
 			serverCapabilities: options.serverCapabilities ?? [],
 		});
@@ -109,7 +143,7 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 
 async function startCrashingDaemon(): Promise<FakeDaemon> {
 	const dir = mkdtempSync(join(tmpdir(), "pa-launch-crash-"));
-	const socketPath = join(dir, "d.sock");
+	const socketPath = testSocketPath(dir);
 	const child = spawn(
 		process.execPath,
 		[
@@ -273,10 +307,111 @@ describe("ensureInteractiveDaemonRunning", () => {
 		await expect(probe).resolves.toMatchObject({ status: "current" });
 	});
 
+	async function expectLegacyProcessIdentityAdopted(): Promise<void> {
+		const options: FakeDaemonOptions = {
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			omitSupervisorProcessStartId: true,
+			sessions: [{ id: "busy", activeSessionId: "busy", isStreaming: true }],
+		};
+		const daemon = await startFakeDaemon(options);
+		const agentDir = mkdtempSync(join(tmpdir(), "pa-launch-legacy-owner-"));
+		const descriptorDir = join(agentDir, "daemon-workers", "fake-generation");
+		const registryDir = join(agentDir, "supervisor-registry");
+		mkdirSync(descriptorDir, { recursive: true });
+		const previousRegistryDir = process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV];
+		const previousLocalAppData = process.env.LOCALAPPDATA;
+		process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] = registryDir;
+		process.env.LOCALAPPDATA = join(agentDir, "local-app-data");
+		let owner: Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>> | undefined;
+		try {
+			owner = await acquireDaemonSupervisorOwnership({
+				agentDir,
+				appVersion: VERSION,
+				descriptorDir,
+				generation: "fake-generation",
+				registryDir,
+				socketPath: daemon.socketPath,
+			});
+			options.supervisorOwnerToken = owner.record.token;
+
+			await expect(probeDaemonVersion(daemon.socketPath)).resolves.toMatchObject({
+				status: "current",
+				hello: { supervisorProcessStartId: owner.record.processStartId },
+			});
+			await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).resolves.toBeUndefined();
+		} finally {
+			await owner?.release();
+			await daemon.close();
+			if (previousRegistryDir === undefined) delete process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV];
+			else process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] = previousRegistryDir;
+			if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+			else process.env.LOCALAPPDATA = previousLocalAppData;
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}
+
+	it("adopts a current legacy Unix hello before attaching a busy session", async () => {
+		if (process.platform === "win32") return;
+		await expectLegacyProcessIdentityAdopted();
+	});
+
+	it("adopts a current legacy Windows hello before attaching a busy session", async () => {
+		if (process.platform !== "win32") return;
+		await expectLegacyProcessIdentityAdopted();
+	});
+
+	it("accepts a busy current Unix daemon that omits optional supervisor identity metadata", async () => {
+		if (process.platform === "win32") return;
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			omitSupervisorIdentity: true,
+			sessions: [{ id: "busy", activeSessionId: "busy", isStreaming: true }],
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).resolves.toBeUndefined();
+		expect(commands).toEqual([]);
+	});
+
+	it("accepts a busy current Windows daemon that omits optional supervisor identity metadata", async () => {
+		if (process.platform !== "win32") return;
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			omitSupervisorIdentity: true,
+			sessions: [{ id: "busy", activeSessionId: "busy", isStreaming: true }],
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).resolves.toBeUndefined();
+		expect(commands).toEqual([]);
+	});
+
+	it("keeps a current hello with an inconsistent process identity stale", async () => {
+		const daemon = await startFakeDaemon({
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			appVersion: VERSION,
+			schemaId: DAEMON_SCHEMA_ID,
+			supervisorProcessStartId: "recycled-process",
+		});
+		cleanups.push(daemon.close);
+
+		await expect(probeDaemonVersion(daemon.socketPath)).resolves.toMatchObject({ status: "stale" });
+	});
+
 	it("fails fast with the daemon log tail when the spawned daemon exits during startup", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pa-launch-startup-crash-"));
 		const entrypoint = join(dir, "crash.mjs");
-		const socketPath = join(dir, "d.sock");
+		const socketPath = testSocketPath(dir);
 		const originalAgentDir = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = join(dir, "agent");
 		const logPath = getDaemonLogPath(socketPath);
@@ -342,7 +477,7 @@ describe("ensureInteractiveDaemonRunning", () => {
 	it("succeeds when the spawned child loses the race to an already-serving daemon", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pa-launch-startup-race-"));
 		const entrypoint = join(dir, "loser.mjs");
-		const socketPath = join(dir, "d.sock");
+		const socketPath = testSocketPath(dir);
 		const originalAgentDir = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = join(dir, "agent");
 		writeFileSync(entrypoint, "process.exit(7);");
@@ -414,7 +549,10 @@ describe("shutdownDaemonAndWait", () => {
 	});
 
 	it("stops a running daemon and returns true", async () => {
-		const daemon = await startFakeDaemon({ sessions: [{ id: "a", activeSessionId: "a", isStreaming: false }] });
+		const daemon = await startFakeDaemon({
+			omitSupervisorIdentity: true,
+			sessions: [{ id: "a", activeSessionId: "a", isStreaming: false }],
+		});
 		cleanups.push(daemon.close);
 		expect(await shutdownDaemonAndWait(daemon.socketPath)).toBe(true);
 	});

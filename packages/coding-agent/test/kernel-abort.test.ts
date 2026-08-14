@@ -89,7 +89,11 @@ describe("KernelManager abort handling", () => {
 				};
 				shell: { send: (frames: Buffer[]) => Promise<void>; close: () => void };
 				control: { send: (frames: Buffer[]) => Promise<void>; close: () => void };
-				kernel: { kill: (signal?: NodeJS.Signals | number) => boolean };
+				kernel: {
+					exitCode: null;
+					signalCode: null;
+					kill: (signal?: NodeJS.Signals | number) => boolean;
+				};
 				start: () => Promise<void>;
 			},
 			{
@@ -108,7 +112,7 @@ describe("KernelManager abort handling", () => {
 				},
 				shell: { send: shellSend, close: vi.fn() },
 				control: { send: controlSend, close: vi.fn() },
-				kernel: { kill: kernelKill },
+				kernel: { exitCode: null, signalCode: null, kill: kernelKill },
 				start: async () => {},
 			},
 		);

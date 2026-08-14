@@ -1,5 +1,5 @@
 // TODO: reconsider persistent kernel vs stateless `python -c` once RLM-1 weights land.
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +8,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
 import { Dealer, Subscriber } from "zeromq";
+import { signalProcessGroupOrProcess } from "../../utils/child-process.js";
+import { getProcessStartId } from "../session-lease.js";
 import { ensureKernelPython, type KernelBootstrapProgressHandler, type KernelPythonSkill } from "./bootstrap.js";
 import { ForkServerUnavailable, forkKernel, isForkServerEnabled } from "./fork-server.js";
 import {
@@ -598,6 +600,7 @@ export class KernelManager {
 	// Set instead of `kernel` when the kernel was forked from the forkserver: it is
 	// not a direct child, so it has no ChildProcess handle and is killed by pid.
 	private kernelPid?: number;
+	private kernelProcessStartId?: string;
 	/** Polls a forked kernel's pid for death (no "exit" event on a non-child). */
 	private forkedLivenessTimer?: ReturnType<typeof globalThis.setInterval>;
 	private shell?: Dealer;
@@ -697,7 +700,7 @@ export class KernelManager {
 		let forked = false;
 		if (isForkServerEnabled()) {
 			try {
-				this.kernelPid = await forkKernel(python, {
+				const kernelIdentity = await forkKernel(python, {
 					connectionPath: connection.path,
 					cwd: this.options.cwd,
 					// Match the direct-spawn env exactly: merge the current host env with
@@ -705,11 +708,14 @@ export class KernelManager {
 					// inherited env snapshot may be stale by fork time).
 					env: this.options.env ? { ...process.env, ...this.options.env } : { ...process.env },
 				});
+				this.kernelPid = kernelIdentity.pid;
+				this.kernelProcessStartId = kernelIdentity.processStartId;
 				forked = true;
 			} catch (err) {
 				if (!(err instanceof ForkServerUnavailable)) throw err;
 				this.appendKernelDiagnostic(`forkserver unavailable, spawning directly: ${err.message}`);
 				this.kernelPid = undefined;
+				this.kernelProcessStartId = undefined;
 				// A fork request that times out or loses its pid reply may still have
 				// forked a child that binds the ports in this connection file. Mint a
 				// fresh connection for the direct spawn so a possible orphan can never
@@ -727,11 +733,13 @@ export class KernelManager {
 		if (!forked) {
 			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
 				cwd: this.options.cwd,
+				detached: process.platform !== "win32",
 				env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
 			});
 			this.kernel = kernel;
+			this.kernelProcessStartId = kernel.pid === undefined ? undefined : getProcessStartId(kernel.pid);
 
 			kernel.stderr?.on("data", (buf: Buffer) => {
 				this.appendKernelStderr(buf.toString());
@@ -813,6 +821,12 @@ export class KernelManager {
 	// pid so a dead child fails fast instead of burning the full resolve timeout.
 	private forkedKernelDied(): boolean {
 		if (this.kernelPid === undefined) return false;
+		if (this.kernelProcessStartId !== undefined) {
+			const observedProcessStartId = getProcessStartId(this.kernelPid);
+			if (observedProcessStartId !== undefined) {
+				return observedProcessStartId !== this.kernelProcessStartId;
+			}
+		}
 		try {
 			process.kill(this.kernelPid, 0);
 			return false;
@@ -1384,32 +1398,33 @@ export class KernelManager {
 		try {
 			if (this.kernel) {
 				if (
-					process.platform === "win32" &&
 					this.kernel.pid !== undefined &&
+					this.kernelProcessStartId !== undefined &&
+					getProcessStartId(this.kernel.pid) === this.kernelProcessStartId &&
 					this.kernel.exitCode === null &&
 					this.kernel.signalCode === null
 				) {
-					const result = spawnSync("taskkill.exe", ["/PID", String(this.kernel.pid), "/T", "/F"], {
-						stdio: "ignore",
-						timeout: 5000,
-						windowsHide: true,
-					});
-					if (result.error || result.status !== 0) {
-						this.kernel.kill(killSignal);
-					}
-				} else if (process.platform !== "win32") {
+					signalProcessGroupOrProcess(this.kernel.pid, killSignal);
+				} else if (
+					this.kernelProcessStartId === undefined &&
+					this.kernel.exitCode === null &&
+					this.kernel.signalCode === null
+				) {
 					this.kernel.kill(killSignal);
 				}
-			} else if (this.kernelPid !== undefined && !this.forkedKernelDied()) {
-				// Only signal a forked kernel confirmed still alive: a dead pid may have
-				// been recycled by the OS, and a kill would then hit an unrelated process.
-				process.kill(this.kernelPid, killSignal);
+			} else if (
+				this.kernelPid !== undefined &&
+				this.kernelProcessStartId !== undefined &&
+				getProcessStartId(this.kernelPid) === this.kernelProcessStartId
+			) {
+				signalProcessGroupOrProcess(this.kernelPid, killSignal);
 			}
 		} catch {
 			// Kernel already exited.
 		}
 		this.kernel = undefined;
 		this.kernelPid = undefined;
+		this.kernelProcessStartId = undefined;
 		this.connection = undefined;
 		if (this.tempDir) {
 			try {

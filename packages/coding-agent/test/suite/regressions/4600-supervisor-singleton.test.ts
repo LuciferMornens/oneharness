@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
@@ -17,13 +18,17 @@ import { APP_NAME, ENV_AGENT_DIR, getCronJobsPath } from "../../../src/config.js
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { canonicalizeDaemonFilesystemPath } from "../../../src/modes/daemon/daemon-paths.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import {
 	acquireDaemonSupervisorOwnership,
+	adoptLegacyDaemonSupervisorOwnershipFromHello,
+	listDaemonSupervisorAgentDirs,
 	listDaemonSupervisorProcesses,
 	persistDaemonStartupFenceFromOwner,
 	waitForDaemonStartupFence,
 } from "../../../src/modes/daemon/daemon-supervisor-ownership.js";
+import { terminateWindowsProcessTreeByIdentity } from "../../../src/utils/child-process.js";
 import { createHarness, type Harness } from "../harness.js";
 
 type FixtureMessage =
@@ -508,7 +513,11 @@ async function cleanupRegisteredProcesses(existingClient?: DaemonClient): Promis
 	for (const identity of [...cleanupProcesses.values()]) {
 		try {
 			if (cleanupProcessState(identity) === "matching") {
-				process.kill(identity.pid, "SIGKILL");
+				if (process.platform === "win32") {
+					await terminateWindowsProcessTreeByIdentity(identity.pid, identity.processStartId);
+				} else {
+					process.kill(identity.pid, "SIGKILL");
+				}
 			}
 			await waitForCleanupProcessExit(identity);
 		} catch (error) {
@@ -887,11 +896,15 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		if (!owner?.processStartId) {
 			throw new Error("Legacy predecessor did not publish a process start identity");
 		}
-		expect(await listDaemonSupervisorProcesses(durableRegistryDir, legacyRegistryDir)).toContainEqual({
-			pid: owner.pid,
-			processStartId: owner.processStartId,
-			socketPath: owner.socketPath,
-		});
+		expect(await listDaemonSupervisorProcesses(durableRegistryDir, legacyRegistryDir)).toContainEqual(
+			expect.objectContaining({
+				pid: owner.pid,
+				processStartId: owner.processStartId,
+				socketPath: owner.socketPath,
+				descriptorDir: owner.descriptorDir,
+				agentDir: owner.agentDir,
+			}),
+		);
 		await persistDaemonStartupFenceFromOwner(
 			paths.socketPath,
 			{
@@ -1064,6 +1077,235 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		expect(existsSync(abandonedDirectory)).toBe(false);
 		expect(owner.record.generation).toBe("healthy-owner");
 		await owner.release();
+	});
+
+	it("reclaims legacy owners without exact identity and retains durable agent-directory discovery", async () => {
+		const paths = await createPaths();
+		const descriptorDir = join(paths.agentDir, "daemon-workers", "legacy-v1");
+		mkdirSync(descriptorDir, { recursive: true });
+		const generation = "legacy-schema-v1";
+		const ownerDirectory = join(paths.registryDir, `${generation}.owner`);
+		mkdirSync(ownerDirectory, { recursive: true });
+		const legacyScope = {
+			version: 1,
+			role: "supervisor",
+			token: "legacy-token",
+			generation,
+			socketPath: paths.socketPath,
+			descriptorDir,
+		};
+		writeFileSync(join(ownerDirectory, "scope.json"), JSON.stringify(legacyScope));
+		writeFileSync(
+			join(ownerDirectory, "owner.json"),
+			JSON.stringify({
+				...legacyScope,
+				pid: process.pid,
+				appVersion: "legacy",
+				phase: "starting",
+				createdAt: new Date(0).toISOString(),
+				updatedAt: new Date(0).toISOString(),
+			}),
+		);
+
+		const ownership = await acquireDaemonSupervisorOwnership({
+			agentDir: paths.agentDir,
+			appVersion: "test",
+			descriptorDir,
+			generation: "replacement-owner",
+			registryDir: paths.registryDir,
+			socketPath: paths.socketPath,
+		});
+		expect(ownership.record.generation).toBe("replacement-owner");
+		await ownership.release();
+
+		expect(await listDaemonSupervisorAgentDirs(paths.registryDir)).toEqual([
+			canonicalizeDaemonFilesystemPath(paths.agentDir),
+		]);
+		expect(listOwnerRecords(paths.registryDir)).toEqual([]);
+	});
+
+	it("rejects forged owners in insecure or symlinked Unix registries", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const paths = await createPaths();
+		const descriptorDir = join(paths.agentDir, "daemon-workers", "forged-owner");
+		const generation = "forged-owner";
+		const ownerDirectory = join(paths.registryDir, `${generation}.owner`);
+		mkdirSync(ownerDirectory, { recursive: true, mode: 0o700 });
+		mkdirSync(descriptorDir, { recursive: true, mode: 0o700 });
+		const processStartId = getProcessStartId(process.pid);
+		if (!processStartId) {
+			throw new Error("Could not identify the permission probe process");
+		}
+		writeFileSync(
+			join(ownerDirectory, "owner.json"),
+			JSON.stringify({
+				version: 1,
+				role: "supervisor",
+				token: "forged-token",
+				generation,
+				pid: process.pid,
+				processStartId,
+				socketPath: paths.socketPath,
+				descriptorDir,
+				agentDir: paths.agentDir,
+				appVersion: "forged",
+				phase: "owner",
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			}),
+			{ mode: 0o600 },
+		);
+		chmodSync(paths.registryDir, 0o755);
+		await expect(listDaemonSupervisorProcesses(paths.registryDir)).rejects.toThrow(
+			/Insecure daemon supervisor registry/,
+		);
+		expect(getProcessStartId(process.pid)).toBe(processStartId);
+
+		chmodSync(paths.registryDir, 0o700);
+		rmSync(paths.registryDir, { recursive: true, force: true });
+		const targetRegistryDir = join(paths.agentDir, "private-registry-target");
+		mkdirSync(targetRegistryDir, { mode: 0o700 });
+		symlinkSync(targetRegistryDir, paths.registryDir, "dir");
+		await expect(listDaemonSupervisorProcesses(paths.registryDir)).rejects.toThrow(
+			/Insecure daemon supervisor registry/,
+		);
+		expect(getProcessStartId(process.pid)).toBe(processStartId);
+		rmSync(paths.registryDir, { force: true });
+
+		const insecureAncestor = join(paths.agentDir, "insecure-ancestor");
+		mkdirSync(insecureAncestor, { mode: 0o777 });
+		await expect(listDaemonSupervisorProcesses(join(insecureAncestor, "registry"))).rejects.toThrow(
+			/Insecure daemon supervisor registry/,
+		);
+		expect(getProcessStartId(process.pid)).toBe(processStartId);
+		chmodSync(insecureAncestor, 0o700);
+
+		const physicalAncestor = join(paths.agentDir, "physical-ancestor");
+		const symlinkedAncestor = join(paths.agentDir, "symlinked-ancestor");
+		mkdirSync(physicalAncestor, { mode: 0o700 });
+		symlinkSync(physicalAncestor, symlinkedAncestor, "dir");
+		await expect(listDaemonSupervisorProcesses(join(symlinkedAncestor, "registry"))).rejects.toThrow(
+			/Insecure daemon supervisor registry/,
+		);
+		expect(getProcessStartId(process.pid)).toBe(processStartId);
+		rmSync(symlinkedAncestor, { force: true });
+	});
+
+	it("keeps the newest durable agent-directory record before pruning", async () => {
+		const paths = await createPaths();
+		const descriptorRoot = join(paths.agentDir, "daemon-workers");
+		mkdirSync(paths.registryDir, { recursive: true, mode: 0o700 });
+		mkdirSync(join(descriptorRoot, "dedupe"), { recursive: true, mode: 0o700 });
+		const canonicalAgentDir = canonicalizeDaemonFilesystemPath(paths.agentDir);
+		const canonicalDescriptorRoot = canonicalizeDaemonFilesystemPath(descriptorRoot);
+		const older = "2026-01-01T00:00:00.000Z";
+		const newer = "2026-02-01T00:00:00.000Z";
+		const knownAgentDirsPath = join(paths.registryDir, "known-agent-dirs.json");
+		writeFileSync(
+			knownAgentDirsPath,
+			JSON.stringify({
+				version: 1,
+				entries: [
+					{ agentDir: canonicalAgentDir, descriptorRoot: canonicalDescriptorRoot, updatedAt: older },
+					{ agentDir: canonicalAgentDir, descriptorRoot: canonicalDescriptorRoot, updatedAt: newer },
+				],
+			}),
+			{ mode: 0o600 },
+		);
+
+		expect(await listDaemonSupervisorAgentDirs(paths.registryDir)).toEqual([canonicalAgentDir]);
+		const rewritten = JSON.parse(readFileSync(knownAgentDirsPath, "utf8")) as {
+			entries: Array<{ updatedAt: string }>;
+		};
+		expect(rewritten.entries).toEqual([
+			{ agentDir: canonicalAgentDir, descriptorRoot: canonicalDescriptorRoot, updatedAt: newer },
+		]);
+	});
+
+	it("terminates an exact Windows process tree through held handles", async () => {
+		if (process.platform !== "win32") {
+			return;
+		}
+		const parent = spawn(
+			process.execPath,
+			[
+				"-e",
+				'const { spawn } = require("node:child_process"); const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); process.stdout.write(String(child.pid) + "\\n"); setInterval(() => {}, 1000);',
+			],
+			{ stdio: ["ignore", "pipe", "ignore"] },
+		);
+		if (!parent.pid || !parent.stdout) {
+			throw new Error("Could not start the Windows process-tree fixture");
+		}
+		const parentIdentity = await captureCleanupProcess(parent.pid, "held-handle parent");
+		const descendantPid = await new Promise<number>((resolvePid, rejectPid) => {
+			const timeout = setTimeout(() => rejectPid(new Error("Timed out reading descendant pid")), 5000);
+			parent.stdout!.once("data", (chunk: Buffer) => {
+				clearTimeout(timeout);
+				resolvePid(Number.parseInt(chunk.toString("utf8").trim(), 10));
+			});
+		});
+		const descendantIdentity = await captureCleanupProcess(descendantPid, "held-handle descendant");
+
+		expect(await terminateWindowsProcessTreeByIdentity(parentIdentity.pid, parentIdentity.processStartId)).toBe(
+			"terminated",
+		);
+		await waitForCleanupProcessExit(parentIdentity);
+		await waitForCleanupProcessExit(descendantIdentity);
+	});
+
+	it("adopts a live legacy Windows owner on its noncanonical pipe", async () => {
+		if (process.platform !== "win32") {
+			return;
+		}
+		const basePaths = await createPaths();
+		const paths = {
+			...basePaths,
+			descriptorDir: join(basePaths.agentDir, "daemon-workers", "legacy-live-owner"),
+		};
+		mkdirSync(paths.descriptorDir, { recursive: true });
+		const supervisor = spawnFixture("supervisor", paths, { generation: "legacy-live-owner" });
+		await waitForType(supervisor, "booted");
+		send(supervisor, "go");
+		await waitForType(supervisor, "ready");
+		const [owner] = listOwnerRecords(paths.registryDir);
+		if (!owner) {
+			throw new Error("Live legacy fixture did not publish an owner");
+		}
+		const { processStartId: _processStartId, agentDir: _agentDir, ...legacyOwner } = owner;
+		writeFileSync(ownerRecordPath(paths.registryDir, owner.generation), JSON.stringify(legacyOwner));
+		const scope = JSON.parse(readFileSync(ownerScopePath(paths.registryDir, owner.generation), "utf8")) as Record<
+			string,
+			unknown
+		>;
+		delete scope.agentDir;
+		writeFileSync(ownerScopePath(paths.registryDir, owner.generation), JSON.stringify(scope));
+
+		const client = await connectEventually(paths.socketPath);
+		try {
+			const hello = await client.waitForHello(2000);
+			const { supervisorProcessStartId: _helloProcessStartId, ...legacyHello } = hello;
+			const adoptedRegistry = await adoptLegacyDaemonSupervisorOwnershipFromHello(
+				paths.socketPath,
+				legacyHello,
+				paths.registryDir,
+			);
+			expect(adoptedRegistry).toBe(paths.registryDir);
+			const adopted = readOwnerRecord(paths.registryDir, owner.generation);
+			expect(adopted).toMatchObject({
+				agentDir: canonicalizeDaemonFilesystemPath(paths.agentDir),
+				pid: owner.pid,
+				processStartId: getProcessStartId(owner.pid),
+				socketPath: paths.socketPath.toLowerCase(),
+			});
+			await assertConnectable(paths.socketPath);
+		} finally {
+			client.close();
+			supervisor.child.kill("SIGKILL");
+			await waitForExit(supervisor);
+		}
 	});
 
 	it("persists a fence when immutable scope proves a corrupt owner is unrelated", async () => {

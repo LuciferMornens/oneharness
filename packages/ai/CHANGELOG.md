@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-- Fixed reasoning effort choices and request payloads to match each model's provider capabilities.
+- Fixed model-aware reasoning controls to preserve provider defaults and native payload schemas, including authoritative custom Anthropic/Bedrock effort routes, synchronous control-discriminator validation, strict off-budget and fixed-contract validation, non-reasoning payload guards, explicit disable precedence, exact custom contracts, string-only legacy maps, Anthropic gateway passthroughs, Fireworks and Kimi compatible controls, native Moonshot K2 toggles and K3 effort, Bedrock Claude sampling compatibility and Nova 2 Lite effort, Gemini Flash aliases, per-alias OpenRouter and Prime effort routes, documented Copilot controls, native Magistral behavior, and GPT-5 Mini/Nano minimal effort.
+- Fixed legacy Google and Vertex thinkingLevelMap overlays to fill missing levels with native named thinking levels or token budgets.
+- Updated the generated model catalog with current reasoning-capable provider routes.
 
 ## [0.7.2] - 2026-08-11
 

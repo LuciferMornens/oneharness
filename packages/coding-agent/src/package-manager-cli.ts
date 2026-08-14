@@ -2,7 +2,7 @@ import type { ImageContent, TextContent, UserMessage } from "@earendil-works/pi-
 import chalk from "chalk";
 import { spawn } from "child_process";
 import { readFileSync, rmSync, statSync } from "fs";
-import { resolve, sep } from "path";
+import { isAbsolute, resolve, sep } from "path";
 import { selectConfig } from "./cli/config-selector.js";
 import {
 	ensureInteractiveDaemonRunning,
@@ -60,14 +60,18 @@ import {
 import { defaultDaemonSocketPath } from "./modes/daemon/daemon-socket.js";
 import {
 	acquireDaemonShutdownAdmission,
+	adoptLegacyDaemonSupervisorOwnershipFromHello,
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
 	persistDaemonStartupFenceFromOwner,
 	waitForDaemonStartupFence,
 } from "./modes/daemon/daemon-supervisor-ownership.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	DAEMON_WORKER_ROLE_ENV,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
-import { shouldUseWindowsShell } from "./utils/child-process.js";
+import { prepareWindowsShellCommand } from "./utils/child-process.js";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
@@ -462,10 +466,10 @@ async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 	console.log(chalk.dim(`Updating ${APP_NAME} with ${command.display}...`));
 	for (const step of command.steps ?? [command]) {
 		await new Promise<void>((resolve, reject) => {
-			// Windows package managers are commonly .cmd shims. Use the shell so Node can execute them.
-			const child = spawn(step.command, step.args, {
+			const launch = prepareWindowsShellCommand(step.command, step.args);
+			const child = spawn(launch.command, launch.args, {
 				stdio: "inherit",
-				shell: shouldUseWindowsShell(step.command),
+				windowsVerbatimArguments: launch.windowsVerbatimArguments,
 				windowsHide: true,
 			});
 			child.on("error", (error) => {
@@ -745,7 +749,9 @@ function parseDaemonUpdateRestartSession(value: unknown): DaemonUpdateRestartSes
 	};
 }
 
-function parseDaemonUpdateRestartManifest(value: unknown): DaemonUpdateRestartManifest {
+type ParsedDaemonUpdateRestartManifest = DaemonUpdateRestartManifest & { supervisorRegistryDir?: string };
+
+function parseDaemonUpdateRestartManifest(value: unknown): ParsedDaemonUpdateRestartManifest {
 	if (!isRecord(value)) {
 		throw new Error("Daemon update restart response is invalid");
 	}
@@ -756,10 +762,18 @@ function parseDaemonUpdateRestartManifest(value: unknown): DaemonUpdateRestartMa
 	if (!Array.isArray(sessions)) {
 		throw new Error("Daemon update restart response is missing sessions");
 	}
+	const supervisorRegistryDir = value.supervisorRegistryDir;
+	if (
+		supervisorRegistryDir !== undefined &&
+		(typeof supervisorRegistryDir !== "string" || !isAbsolute(supervisorRegistryDir))
+	) {
+		throw new Error("Daemon update restart response contains an invalid supervisor registry");
+	}
 	return {
 		formatVersion: DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 		createdAt: readString(value.createdAt, "createdAt"),
 		sessions: sessions.map(parseDaemonUpdateRestartSession),
+		...(typeof supervisorRegistryDir === "string" ? { supervisorRegistryDir: resolve(supervisorRegistryDir) } : {}),
 	};
 }
 
@@ -780,7 +794,7 @@ function readPreparedDaemonUpdateRestartManifest(
 	socketPath: string,
 	agentDir: string,
 	notBeforeMs?: number,
-): DaemonUpdateRestartManifest | undefined {
+): ParsedDaemonUpdateRestartManifest | undefined {
 	for (const manifestPath of [
 		getDaemonUpdateRestartManifestPath(socketPath, agentDir),
 		getLegacyDaemonUpdateRestartManifestPath(agentDir),
@@ -803,7 +817,7 @@ function readPreparedDaemonUpdateRestartManifest(
 function tryReadPreparedDaemonUpdateRestartManifest(
 	socketPath: string,
 	agentDir: string,
-): DaemonUpdateRestartManifest | undefined {
+): ParsedDaemonUpdateRestartManifest | undefined {
 	try {
 		return readPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
 	} catch {
@@ -827,7 +841,7 @@ interface FixedDaemonSupervisorOwnerIdentity {
 	supervisorGeneration: string;
 	supervisorOwnerToken: string;
 	supervisorPid: number;
-	supervisorProcessStartId: string;
+	supervisorProcessStartId?: string;
 	supervisorSocketPath: string;
 }
 
@@ -840,9 +854,14 @@ function hasFixedDaemonSupervisorOwnerIdentity(value: unknown): value is FixedDa
 		typeof value.supervisorOwnerToken === "string" &&
 		Number.isInteger(value.supervisorPid) &&
 		(value.supervisorPid as number) > 0 &&
-		typeof value.supervisorProcessStartId === "string" &&
+		(value.supervisorProcessStartId === undefined || typeof value.supervisorProcessStartId === "string") &&
 		typeof value.supervisorSocketPath === "string"
 	);
+}
+
+interface PreparedDaemonUpdateRestart {
+	manifest: ParsedDaemonUpdateRestartManifest;
+	supervisorRegistryDir?: string;
 }
 
 async function prepareConnectedDaemonUpdateRestart(
@@ -850,10 +869,12 @@ async function prepareConnectedDaemonUpdateRestart(
 	socketPath: string,
 	agentDir: string,
 	hello: DaemonHello | undefined,
-): Promise<DaemonUpdateRestartManifest> {
+	knownSupervisorRegistryDir?: string,
+): Promise<PreparedDaemonUpdateRestart> {
 	const pendingManifest = tryReadPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
 	let startedAt: number | undefined;
 	let fixedOwnerIdentity: FixedDaemonSupervisorOwnerIdentity | undefined;
+	let supervisorRegistryDir = knownSupervisorRegistryDir;
 	let fencePersistenceStarted = false;
 	const persistPreparedRestartFence = async () => {
 		const currentHello = client.hello;
@@ -864,17 +885,24 @@ async function prepareConnectedDaemonUpdateRestart(
 			return;
 		}
 		fencePersistenceStarted = true;
-		await persistDaemonStartupFenceFromOwner(socketPath, fixedOwnerIdentity);
+		supervisorRegistryDir = await persistDaemonStartupFenceFromOwner(
+			socketPath,
+			fixedOwnerIdentity,
+			supervisorRegistryDir,
+		);
 	};
 	try {
 		if (hasFixedDaemonSupervisorOwnerIdentity(hello)) {
 			fixedOwnerIdentity = hello;
+			supervisorRegistryDir =
+				(await adoptLegacyDaemonSupervisorOwnershipFromHello(socketPath, hello)) ?? supervisorRegistryDir;
 		}
 		if (pendingManifest && pendingManifest.sessions.length > 0) {
 			const listResponse = await client.request({ type: "list" }, 30000);
 			if (listResponse.success && !responseHasActiveDaemonSessions(listResponse.data)) {
 				await persistPreparedRestartFence();
-				return pendingManifest;
+				supervisorRegistryDir ??= pendingManifest.supervisorRegistryDir;
+				return { manifest: pendingManifest, ...(supervisorRegistryDir ? { supervisorRegistryDir } : {}) };
 			}
 		}
 		clearPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
@@ -884,8 +912,9 @@ async function prepareConnectedDaemonUpdateRestart(
 			throw new Error(response.error);
 		}
 		const manifest = parseDaemonUpdateRestartManifest(response.data);
+		supervisorRegistryDir = manifest.supervisorRegistryDir ?? supervisorRegistryDir;
 		await persistPreparedRestartFence();
-		return manifest;
+		return { manifest, ...(supervisorRegistryDir ? { supervisorRegistryDir } : {}) };
 	} catch (error) {
 		if (fencePersistenceStarted) {
 			throw error;
@@ -894,7 +923,8 @@ async function prepareConnectedDaemonUpdateRestart(
 			const fallback = readPreparedDaemonUpdateRestartManifest(socketPath, agentDir, startedAt);
 			if (fallback) {
 				await persistPreparedRestartFence();
-				return fallback;
+				supervisorRegistryDir ??= fallback.supervisorRegistryDir;
+				return { manifest: fallback, ...(supervisorRegistryDir ? { supervisorRegistryDir } : {}) };
 			}
 		}
 		throw error;
@@ -912,7 +942,7 @@ export async function prepareDaemonUpdateRestart(
 		await client.connect(1000);
 		connected = true;
 		const hello = await client.waitForHello(2000).catch(() => undefined);
-		return await prepareConnectedDaemonUpdateRestart(client, socketPath, agentDir, hello);
+		return (await prepareConnectedDaemonUpdateRestart(client, socketPath, agentDir, hello)).manifest;
 	} catch (error) {
 		if (!connected && pendingManifest && pendingManifest.sessions.length > 0) {
 			return pendingManifest;
@@ -1236,7 +1266,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 	let lease: Awaited<ReturnType<typeof acquireDaemonUpdateRestartCoordinator>> | undefined;
 	let shutdownAdmission: Awaited<ReturnType<typeof acquireDaemonShutdownAdmission>> | undefined;
 	let connectedClient: DaemonClient | undefined;
-	let manifest: DaemonUpdateRestartManifest | undefined;
+	let manifest: ParsedDaemonUpdateRestartManifest | undefined;
 	try {
 		try {
 			lease = await acquireDaemonUpdateRestartCoordinator({
@@ -1266,6 +1296,9 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 			statusWriter.update({ counts, failures });
 		};
 		let predecessor: DaemonUpdateRestartProcessIdentity | undefined;
+		let supervisorRegistryDir = process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV]
+			? resolve(process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV])
+			: undefined;
 		if (daemonProbe.reachable) {
 			connectedClient = new DaemonClient(options.socketPath);
 			await connectedClient.connect(1000);
@@ -1273,12 +1306,25 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 			predecessor = processIdentityFromDaemonHello(hello);
 			statusWriter.update({ phase: "preparing", ...(predecessor ? { predecessor } : {}) });
 			try {
-				manifest = await prepareConnectedDaemonUpdateRestart(
+				const probedSupervisorRegistryDir = hasFixedDaemonSupervisorOwnerIdentity(hello)
+					? await adoptLegacyDaemonSupervisorOwnershipFromHello(options.socketPath, hello)
+					: undefined;
+				if (probedSupervisorRegistryDir) {
+					await shutdownAdmission.extendRegistryDirs([probedSupervisorRegistryDir]);
+					supervisorRegistryDir = probedSupervisorRegistryDir;
+				}
+				const prepared = await prepareConnectedDaemonUpdateRestart(
 					connectedClient,
 					options.socketPath,
 					options.agentDir,
 					hello,
+					probedSupervisorRegistryDir,
 				);
+				manifest = prepared.manifest;
+				if (prepared.supervisorRegistryDir) {
+					await shutdownAdmission.extendRegistryDirs([prepared.supervisorRegistryDir]);
+					supervisorRegistryDir = prepared.supervisorRegistryDir;
+				}
 			} catch (error: unknown) {
 				const daemonLacksPrepareCommand = isUnknownDaemonCommandError(error, "prepare_update_restart");
 				if (daemonProbeMayHaveBusySessions(daemonProbe) || !daemonLacksPrepareCommand) {
@@ -1325,18 +1371,26 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 			}
 		} else {
 			manifest = tryReadPreparedDaemonUpdateRestartManifest(options.socketPath, options.agentDir);
+			supervisorRegistryDir = manifest?.supervisorRegistryDir ?? supervisorRegistryDir;
 			if (!hasRestorableDaemonUpdateRestart(manifest)) {
 				statusWriter.update({ phase: "skipped", message: "No running daemon needed to be restarted" });
 				return statusWriter.current();
 			}
+			if (supervisorRegistryDir) {
+				await shutdownAdmission.extendRegistryDirs([supervisorRegistryDir]);
+			}
 		}
 
 		statusWriter.update({ phase: "starting_daemon" });
-		await waitForDaemonStartupFence(options.socketPath, UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS);
+		await waitForDaemonStartupFence(
+			options.socketPath,
+			UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS,
+			supervisorRegistryDir,
+		);
 		await shutdownAdmission.assertOrRenew();
 		await shutdownAdmission.release();
 		shutdownAdmission = undefined;
-		await ensureInteractiveDaemonRunning(options.socketPath);
+		await ensureInteractiveDaemonRunning(options.socketPath, undefined, supervisorRegistryDir);
 		const successorClient = new DaemonClient(options.socketPath);
 		let successor: DaemonUpdateRestartProcessIdentity;
 		try {
@@ -1620,6 +1674,11 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 							agentDir,
 							cwd,
 							originActiveSessionId: process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV],
+							supervisorRegistryDir:
+								process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] ??
+								(process.env[DAEMON_WORKER_ROLE_ENV] === "1"
+									? process.env[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]
+									: undefined),
 						});
 						reportDaemonUpdateRestartStatus(status);
 					} catch (error: unknown) {

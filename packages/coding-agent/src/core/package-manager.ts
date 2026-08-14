@@ -28,9 +28,14 @@ import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
-import { shouldUseWindowsShell, signalProcessGroupOrProcess } from "../utils/child-process.js";
+import { prepareWindowsShellCommand, waitForChildProcess } from "../utils/child-process.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
 import { canonicalizePath, isLocalPath } from "../utils/paths.js";
+import {
+	killProcessTreeByIdentity,
+	reconcileTrackedDetachedChildAfterExit,
+	trackChildProcess,
+} from "../utils/shell.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
 import { isStdoutTakenOver } from "./output-guard.js";
 import type { PackageSource, SettingsManager } from "./settings-manager.js";
@@ -2378,11 +2383,12 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private spawnCommand(command: string, args: string[], options?: { cwd?: string }): ChildProcess {
-		return spawn(command, args, {
+		const launch = prepareWindowsShellCommand(command, args);
+		return spawn(launch.command, launch.args, {
 			cwd: options?.cwd,
 			stdio: isStdoutTakenOver() ? ["ignore", 2, 2] : "inherit",
-			shell: shouldUseWindowsShell(command),
 			env: getEnv(),
+			windowsVerbatimArguments: launch.windowsVerbatimArguments,
 			windowsHide: true,
 		});
 	}
@@ -2393,11 +2399,13 @@ export class DefaultPackageManager implements PackageManager {
 		options?: { cwd?: string; env?: Record<string, string> },
 	): ChildProcessByStdio<null, Readable, Readable> {
 		const baseEnv = getEnv();
-		return spawn(command, args, {
+		const launch = prepareWindowsShellCommand(command, args);
+		return spawn(launch.command, launch.args, {
 			cwd: options?.cwd,
+			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
-			shell: shouldUseWindowsShell(command),
 			env: options?.env ? { ...baseEnv, ...options.env } : baseEnv,
+			windowsVerbatimArguments: launch.windowsVerbatimArguments,
 			windowsHide: true,
 		});
 	}
@@ -2409,18 +2417,21 @@ export class DefaultPackageManager implements PackageManager {
 	): Promise<string> {
 		return new Promise((resolvePromise, reject) => {
 			const child = this.spawnCaptureCommand(command, args, options);
+			const processStartId = trackChildProcess(child, {
+				unixDetachedSession: process.platform !== "win32",
+			});
 			let stdout = "";
 			let stderr = "";
 			let timedOut = false;
+			let terminationPromise: Promise<boolean> | undefined;
 			const timeout =
 				typeof options?.timeoutMs === "number"
 					? setTimeout(() => {
 							timedOut = true;
-							if (process.platform === "win32" && child.pid !== undefined) {
-								signalProcessGroupOrProcess(child.pid, "SIGTERM");
-							} else {
-								child.kill();
-							}
+							terminationPromise =
+								child.pid === undefined
+									? Promise.resolve(child.kill("SIGKILL"))
+									: killProcessTreeByIdentity(child.pid, processStartId);
 						}, options.timeoutMs)
 					: undefined;
 
@@ -2430,23 +2441,35 @@ export class DefaultPackageManager implements PackageManager {
 			child.stderr?.on("data", (data) => {
 				stderr += data.toString();
 			});
-			child.once("error", (error) => {
-				if (timeout) clearTimeout(timeout);
-				reject(error);
-			});
-			child.once("close", (code, signal) => {
-				if (timeout) clearTimeout(timeout);
-				if (timedOut) {
-					reject(new Error(`${command} ${args.join(" ")} timed out after ${options?.timeoutMs}ms`));
-					return;
-				}
-				if (code === 0) {
-					resolvePromise(stdout.trim());
-					return;
-				}
-				const exitStatus = code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`;
-				reject(new Error(`${command} ${args.join(" ")} failed with ${exitStatus}: ${stderr || stdout}`));
-			});
+			void waitForChildProcess(child)
+				.then(async (code) => {
+					if (timeout) clearTimeout(timeout);
+					const cleanupComplete = terminationPromise === undefined || (await terminationPromise);
+					if (child.pid !== undefined && cleanupComplete) {
+						reconcileTrackedDetachedChildAfterExit(child.pid);
+					}
+					if (timedOut) {
+						const cleanupSuffix = cleanupComplete ? "" : "; process-tree cleanup is incomplete";
+						reject(
+							new Error(`${command} ${args.join(" ")} timed out after ${options?.timeoutMs}ms${cleanupSuffix}`),
+						);
+						return;
+					}
+					if (code === 0) {
+						resolvePromise(stdout.trim());
+						return;
+					}
+					const exitStatus = code === null ? "an unknown signal" : `code ${code}`;
+					reject(new Error(`${command} ${args.join(" ")} failed with ${exitStatus}: ${stderr || stdout}`));
+				})
+				.catch(async (error) => {
+					if (timeout) clearTimeout(timeout);
+					if (child.pid !== undefined) {
+						const cleanupComplete = await killProcessTreeByIdentity(child.pid, processStartId);
+						if (cleanupComplete) reconcileTrackedDetachedChildAfterExit(child.pid);
+					}
+					reject(error);
+				});
 		});
 	}
 
@@ -2465,11 +2488,12 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private runCommandSync(command: string, args: string[]): string {
-		const result = spawnSync(command, args, {
+		const launch = prepareWindowsShellCommand(command, args);
+		const result = spawnSync(launch.command, launch.args, {
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf-8",
-			shell: shouldUseWindowsShell(command),
 			env: getEnv(),
+			windowsVerbatimArguments: launch.windowsVerbatimArguments,
 			windowsHide: true,
 		});
 		if (result.error || result.status !== 0) {

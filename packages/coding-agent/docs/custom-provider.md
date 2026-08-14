@@ -201,33 +201,56 @@ The `api` field determines which streaming implementation is used:
 | `google-vertex` | Google Vertex AI API |
 | `bedrock-converse-stream` | Amazon Bedrock Converse API |
 
-Most OpenAI-compatible providers work with `openai-completions`. Use model-level `thinkingLevelMap` for model-specific thinking levels, and `compat` for provider quirks:
+Most OpenAI-compatible providers work with `openai-completions`. Use model-level `reasoningCapabilities` for exact model-specific thinking levels, and `compat` for provider quirks:
 
 ```typescript
 models: [{
   id: "custom-model",
   // ...
   reasoning: true,
-  thinkingLevelMap: {              // map Prime Agent levels to provider values; null hides unsupported levels
-    minimal: null,
-    low: null,
-    medium: null,
-    high: "default",
-    xhigh: "max"
+  reasoningCapabilities: {
+    control: "effort",
+    levels: {                      // native effort values; null or omission is unsupported
+      off: "none",
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: null
+    }
   },
   compat: {
     supportsDeveloperRole: false,   // use "system" instead of "developer"
     supportsReasoningEffort: true,
     maxTokensField: "max_tokens",   // instead of "max_completion_tokens"
     requiresToolResultName: true,   // tool results need name field
-    thinkingFormat: "qwen",        // top-level enable_thinking: true
+    thinkingFormat: "openai",      // named tiers use reasoning_effort
     cacheControlFormat: "anthropic" // Anthropic-style cache_control markers
   }
 }]
 ```
 
 Use `qwen-chat-template` instead for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
+Use `openrouter` for compatible endpoints that expect `reasoning: { effort }` instead of `reasoning_effort`.
 Use `cacheControlFormat: "anthropic"` for OpenAI-compatible providers that expose Anthropic-style prompt caching via `cache_control` on the system prompt, last tool definition, and last user/assistant text content.
+
+For `control: "effort"`, each selectable level must be a non-empty native provider string. For `control: "budget"`, each selectable level must be a finite native integer token count: positive for active OpenAI-compatible/OpenRouter levels and at least 1,024 for active Anthropic/Bedrock Claude levels. A numeric `off` mapping must be the route's actual disable value, normally `0`; positive budgets and Google's `-1` dynamic-thinking sentinel are invalid at `off`. Anthropic/Bedrock structural disable support uses `supportsOff: true` and omits `levels.off`. For an OpenAI-compatible numeric budget, use `thinkingFormat: "openai"` to send top-level `reasoning_budget`, or `thinkingFormat: "openrouter"` to send `reasoning: { max_tokens }`. Structural formats reject numeric budget contracts. The `openai-responses`, `azure-openai-responses`, `openai-codex-responses`, and `mistral-conversations` APIs have string-only effort fields and reject numeric budget contracts. Fixed contracts expose exactly one selectable level; replace `reasoningCapabilities` explicitly when changing a built-in fixed route to a selectable control. Anthropic exact effort contracts use adaptive thinking plus `output_config.effort`; Bedrock exact effort contracts must identify a Claude adaptive-thinking or Nova 2 Lite route through the model ID or name. For a structural `control: "toggle"` route, use truthful support/mapping markers instead:
+
+```typescript
+reasoningCapabilities: {
+  control: "toggle",
+  levels: {
+    off: "disabled",
+    high: "enabled",
+  },
+},
+compat: {
+  supportsReasoningEffort: false,
+  thinkingFormat: "qwen",
+},
+```
+
+Here the Qwen adapter sends `enable_thinking: false` or `enable_thinking: true`; it does not send the marker strings. The same rule applies to the documented enabled/disabled structures selected by `zai`, `moonshot`, `qwen-chat-template`, and toggle-only `deepseek` formats.
 
 > Migration note: Mistral moved from `openai-completions` to `mistral-conversations`.
 > Use `mistral-conversations` for native Mistral models.
@@ -602,7 +625,23 @@ interface ProviderModelConfig {
   /** Whether the model supports extended thinking. */
   reasoning: boolean;
 
-  /** Maps Prime Agent thinking levels to provider/model-specific values; null marks a level unsupported. */
+  /** Exact control type, selectable levels, and provider mappings. */
+  reasoningCapabilities?:
+    | {
+        control: "fixed" | "toggle";
+        levels: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
+      }
+    | {
+        control: "effort";
+        levels: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
+      }
+    | {
+        control: "budget";
+        levels: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", number | null>>;
+        supportsOff?: boolean;
+      };
+
+  /** Deprecated compatibility map for legacy custom models. */
   thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
 
   /** Supported input types. */
@@ -636,11 +675,17 @@ interface ProviderModelConfig {
     requiresAssistantAfterToolResult?: boolean;
     requiresThinkingAsText?: boolean;
     requiresReasoningContentOnAssistantMessages?: boolean;
-    thinkingFormat?: "openai" | "deepseek" | "zai" | "qwen" | "qwen-chat-template";
+    thinkingFormat?: "openai" | "openrouter" | "deepseek" | "zai" | "moonshot" | "qwen" | "qwen-chat-template";
     cacheControlFormat?: "anthropic";
   };
 }
 ```
 
-`deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
+`reasoningCapabilities.levels` is exact: omitted and `null` levels are unsupported. `effort` values are non-empty native provider strings. `budget` values are finite native integer token counts: positive for OpenAI-compatible/OpenRouter routes and at least 1,024 for Anthropic/Bedrock Claude. Anthropic/Bedrock structural disable support uses `supportsOff: true`. Google budget models may use `0`/`-1` only when that model documents those sentinels. On OpenAI-compatible routes, numeric budgets require `thinkingFormat: "openai"` (`reasoning_budget`) or `thinkingFormat: "openrouter"` (`reasoning.max_tokens`). Responses-family and Mistral APIs expose string-only effort fields and reject numeric budgets. For `toggle`, strings are support/mapping markers. Structural `thinkingFormat` adapters emit their documented enabled/disabled object or boolean instead of copying the marker literally. `fixed` means reasoning is intrinsic and adapters send no reasoning control field. Omitting the request-level reasoning selection preserves the provider default.
+
+For migration, new providers should set `reasoningCapabilities` and omit `thinkingLevelMap`. The deprecated map remains `string | null`; numeric budgets must be declared under `reasoningCapabilities` with `control: "budget"`. Legacy models without either field retain `off`, `minimal`, `low`, `medium`, and `high`. A `thinkingLevelMap` override on a built-in model overlays its generated levels and the effective contract is revalidated against its API and `thinkingFormat`; an explicitly supplied `reasoningCapabilities` object is authoritative.
+
+Do not copy a partial legacy map directly into exact `reasoningCapabilities.levels`. On a legacy OpenAI-compatible effort route, `{ high: "high" }` also inherits `off: "off"`, `minimal: "minimal"`, `low: "low"`, and `medium: "medium"`; expand all five values in the exact contract and set `xhigh`/`max` to `null`, or use explicit `null` values for any inherited level the new contract should not support.
+
+`openrouter` sends `reasoning: { effort }`. `deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `zai` and `moonshot` send `thinking: { type: "enabled" | "disabled" }`. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking`.
 `cacheControlFormat: "anthropic"` applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content.

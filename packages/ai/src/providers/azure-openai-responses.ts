@@ -1,7 +1,14 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { resolveSimpleThinkingLevel, resolveThinkingLevel, resolveThinkingOffValue } from "../models.js";
+import {
+	assertValidReasoningCapabilities,
+	assertValidReasoningEffortValue,
+	getReasoningCapabilities,
+	resolveSimpleThinkingLevel,
+	resolveThinkingLevel,
+	resolveThinkingOffValue,
+} from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -49,6 +56,8 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 export interface AzureOpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningEffortValue?: string;
+	/** false overrides reasoningEffort and reasoningSummary; undefined preserves the provider/model default. */
+	reasoningEnabled?: boolean;
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	azureApiVersion?: string;
 	azureResourceName?: string;
@@ -147,6 +156,9 @@ export const streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-resp
 	}
 
 	const base = buildBaseOptions(model, options, apiKey);
+	if (getReasoningCapabilities(model)?.control === "fixed") {
+		return streamAzureOpenAIResponses(model, context, base satisfies AzureOpenAIResponsesOptions);
+	}
 	const resolvedReasoning = resolveSimpleThinkingLevel(model, options?.reasoning);
 
 	return streamAzureOpenAIResponses(model, context, {
@@ -158,6 +170,7 @@ export const streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-resp
 			resolvedReasoning?.enabled && typeof resolvedReasoning.providerValue === "string"
 				? resolvedReasoning.providerValue
 				: undefined,
+		reasoningEnabled: resolvedReasoning?.enabled,
 	} satisfies AzureOpenAIResponsesOptions);
 };
 
@@ -252,6 +265,10 @@ function buildParams(
 	options: AzureOpenAIResponsesOptions | undefined,
 	deploymentName: string,
 ) {
+	const capabilities = assertValidReasoningCapabilities(model);
+	if (capabilities?.control === "effort" && options?.reasoningEffortValue !== undefined) {
+		assertValidReasoningEffortValue(model, "request", options.reasoningEffortValue);
+	}
 	const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS);
 
 	const params: ResponseCreateParamsStreaming = {
@@ -273,8 +290,15 @@ function buildParams(
 		params.tools = convertResponsesTools(context.tools);
 	}
 
-	if (model.reasoning) {
-		if (options?.reasoningEffort || options?.reasoningSummary) {
+	if (model.reasoning && getReasoningCapabilities(model)?.control !== "fixed") {
+		if (options?.reasoningEnabled === false) {
+			const offValue = resolveThinkingOffValue(model, "none");
+			if (typeof offValue === "string") {
+				params.reasoning = {
+					effort: offValue as NonNullable<typeof params.reasoning>["effort"],
+				};
+			}
+		} else if (options?.reasoningEffort || options?.reasoningSummary) {
 			const effort = options?.reasoningEffort
 				? (options.reasoningEffortValue ??
 					resolveThinkingLevel(model, options.reasoningEffort)?.providerValue ??
@@ -285,13 +309,6 @@ function buildParams(
 				summary: options?.reasoningSummary || "auto",
 			};
 			params.include = ["reasoning.encrypted_content"];
-		} else {
-			const offValue = resolveThinkingOffValue(model, "none");
-			if (typeof offValue === "string") {
-				params.reasoning = {
-					effort: offValue as NonNullable<typeof params.reasoning>["effort"],
-				};
-			}
 		}
 	}
 

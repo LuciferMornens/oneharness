@@ -5,7 +5,11 @@ import { lstat, readlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { AssistantMessage, Usage, UserMessage } from "@earendil-works/pi-ai";
 import { waitForChildProcess } from "../utils/child-process.js";
-import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../utils/shell.js";
+import {
+	killProcessTreeByIdentity,
+	reconcileTrackedDetachedChildAfterExit,
+	trackChildProcess,
+} from "../utils/shell.js";
 
 export interface AgentAutonomousConfig {
 	enabled?: boolean;
@@ -498,47 +502,58 @@ function runChildProcess(
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		if (child.pid) {
-			trackDetachedChildPid(child.pid);
-		}
+		const childProcessStartId = trackChildProcess(child, {
+			unixDetachedSession: process.platform !== "win32",
+		});
 		let stdout = "";
 		let stderr = "";
 		let error: Error | undefined;
 		let timedOut = false;
 		let outputTruncated = false;
 		let settled = false;
+		let finalizing = false;
+		let cleanupComplete = true;
+		let terminationPromise: Promise<boolean> | undefined;
 		const maxOutputChars = options.maxOutputChars ?? MAX_CHILD_PROCESS_OUTPUT_CHARS;
-		const finish = (result: Pick<ChildProcessResult, "status" | "signal">) => {
-			if (settled) {
+		const requestTermination = () => {
+			if (terminationPromise) return;
+			if (child.pid) {
+				terminationPromise = killProcessTreeByIdentity(child.pid, childProcessStartId);
+			} else {
+				terminationPromise = Promise.resolve(child.kill("SIGKILL"));
+			}
+		};
+		const finish = async (result: Pick<ChildProcessResult, "status" | "signal">) => {
+			if (settled || finalizing) {
 				return;
+			}
+			finalizing = true;
+			if (terminationPromise) {
+				try {
+					if (!(await terminationPromise)) {
+						cleanupComplete = false;
+						error ??= new Error("Could not completely terminate child process tree");
+					}
+				} catch (terminationError) {
+					cleanupComplete = false;
+					error ??= terminationError instanceof Error ? terminationError : new Error(String(terminationError));
+				}
 			}
 			settled = true;
 			if (timer) {
 				clearTimeout(timer);
 			}
 			options.signal?.removeEventListener("abort", abort);
-			if (child.pid) {
-				untrackDetachedChildPid(child.pid);
-			}
+			if (child.pid && cleanupComplete) reconcileTrackedDetachedChildAfterExit(child.pid);
 			resolve({ ...result, stdout, stderr, error, timedOut, outputTruncated });
 		};
 		const timer = options.timeoutMs
 			? setTimeout(() => {
 					timedOut = true;
-					if (child.pid) {
-						killProcessTree(child.pid);
-					} else {
-						child.kill("SIGKILL");
-					}
+					requestTermination();
 				}, options.timeoutMs)
 			: undefined;
-		const abort = () => {
-			if (child.pid) {
-				killProcessTree(child.pid);
-			} else {
-				child.kill("SIGKILL");
-			}
-		};
+		const abort = () => requestTermination();
 		options.signal?.addEventListener("abort", abort, { once: true });
 		if (options.signal?.aborted) {
 			abort();
@@ -560,10 +575,10 @@ function runChildProcess(
 			outputTruncated ||= chunk.length > remaining;
 		});
 		void waitForChildProcess(child).then(
-			(status) => finish({ status, signal: child.signalCode }),
+			(status) => void finish({ status, signal: child.signalCode }),
 			(err: Error) => {
 				error = err;
-				finish({ status: child.exitCode, signal: child.signalCode });
+				void finish({ status: child.exitCode, signal: child.signalCode });
 			},
 		);
 	});

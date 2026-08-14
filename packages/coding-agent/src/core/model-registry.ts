@@ -8,6 +8,7 @@ import {
 	type AnthropicMessagesCompat,
 	type Api,
 	type AssistantMessageEventStream,
+	assertValidReasoningCapabilities,
 	type Context,
 	getModels,
 	getProviders,
@@ -90,7 +91,7 @@ const VercelGatewayRoutingSchema = Type.Object({
 });
 
 // Schema for thinking level support and provider-specific values
-const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Number(), Type.Null()]);
+const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Null()]);
 const ThinkingLevelMapSchema = Type.Object({
 	off: Type.Optional(ThinkingLevelMapValueSchema),
 	minimal: Type.Optional(ThinkingLevelMapValueSchema),
@@ -101,10 +102,105 @@ const ThinkingLevelMapSchema = Type.Object({
 	max: Type.Optional(ThinkingLevelMapValueSchema),
 });
 
-const ReasoningCapabilitiesSchema = Type.Object({
-	control: Type.Union([Type.Literal("fixed"), Type.Literal("toggle"), Type.Literal("effort"), Type.Literal("budget")]),
-	levels: ThinkingLevelMapSchema,
+const EffortThinkingLevelMapValueSchema = Type.Union([Type.String({ minLength: 1 }), Type.Null()]);
+const EffortThinkingLevelMapSchema = Type.Object({
+	off: Type.Optional(EffortThinkingLevelMapValueSchema),
+	minimal: Type.Optional(EffortThinkingLevelMapValueSchema),
+	low: Type.Optional(EffortThinkingLevelMapValueSchema),
+	medium: Type.Optional(EffortThinkingLevelMapValueSchema),
+	high: Type.Optional(EffortThinkingLevelMapValueSchema),
+	xhigh: Type.Optional(EffortThinkingLevelMapValueSchema),
+	max: Type.Optional(EffortThinkingLevelMapValueSchema),
 });
+const BudgetThinkingLevelMapValueSchema = Type.Union([Type.Integer(), Type.Null()]);
+const BudgetThinkingLevelMapSchema = Type.Object({
+	off: Type.Optional(BudgetThinkingLevelMapValueSchema),
+	minimal: Type.Optional(BudgetThinkingLevelMapValueSchema),
+	low: Type.Optional(BudgetThinkingLevelMapValueSchema),
+	medium: Type.Optional(BudgetThinkingLevelMapValueSchema),
+	high: Type.Optional(BudgetThinkingLevelMapValueSchema),
+	xhigh: Type.Optional(BudgetThinkingLevelMapValueSchema),
+	max: Type.Optional(BudgetThinkingLevelMapValueSchema),
+});
+
+const ReasoningCapabilitiesSchema = Type.Union([
+	Type.Object({ control: Type.Literal("fixed"), levels: ThinkingLevelMapSchema }),
+	Type.Object({ control: Type.Literal("toggle"), levels: ThinkingLevelMapSchema }),
+	Type.Object({ control: Type.Literal("effort"), levels: EffortThinkingLevelMapSchema }),
+	Type.Object({
+		control: Type.Literal("budget"),
+		levels: BudgetThinkingLevelMapSchema,
+		supportsOff: Type.Optional(Type.Boolean()),
+	}),
+]);
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function assertRawReasoningCapabilityValueTypes(parsed: unknown): void {
+	const providers = asRecord(asRecord(parsed)?.providers);
+	if (!providers) return;
+
+	const inspectCapabilities = (provider: string, modelId: string, value: unknown): void => {
+		const capabilities = asRecord(value);
+		if (!capabilities) return;
+		const control = capabilities.control;
+		if (control !== "fixed" && control !== "toggle" && control !== "effort" && control !== "budget") {
+			throw new Error(
+				`Model ${provider}/${modelId}: unknown reasoningCapabilities.control ${JSON.stringify(control)}.`,
+			);
+		}
+		const levels = asRecord(capabilities.levels);
+		if (!levels) return;
+		for (const [level, nativeValue] of Object.entries(levels)) {
+			if (nativeValue === null) continue;
+			if (control === "effort" && (typeof nativeValue !== "string" || nativeValue.length === 0)) {
+				throw new Error(
+					`Model ${provider}/${modelId}: effort level "${level}" must use a non-empty string; received ${String(nativeValue)}.`,
+				);
+			}
+			if (control !== "budget") continue;
+			if (typeof nativeValue !== "number") {
+				throw new Error(
+					`Model ${provider}/${modelId}: budget level "${level}" must use a numeric token value; received ${String(nativeValue)}.`,
+				);
+			}
+			if (!Number.isFinite(nativeValue) || !Number.isInteger(nativeValue)) {
+				throw new Error(
+					`Model ${provider}/${modelId}: budget level "${level}" must use a finite integer token value; received ${nativeValue}.`,
+				);
+			}
+		}
+	};
+
+	for (const [provider, rawProviderConfig] of Object.entries(providers)) {
+		const providerConfig = asRecord(rawProviderConfig);
+		if (!providerConfig) continue;
+		if (Array.isArray(providerConfig.models)) {
+			for (const rawModel of providerConfig.models) {
+				const model = asRecord(rawModel);
+				if (!model) continue;
+				inspectCapabilities(
+					provider,
+					typeof model.id === "string" ? model.id : "<unknown>",
+					model.reasoningCapabilities,
+				);
+			}
+		}
+		const modelOverrides = asRecord(providerConfig.modelOverrides);
+		if (!modelOverrides) continue;
+		for (const [modelId, rawOverride] of Object.entries(modelOverrides)) {
+			inspectCapabilities(provider, modelId, asRecord(rawOverride)?.reasoningCapabilities);
+		}
+	}
+}
+
+function assertReasoningContractCompatibility(model: Model<Api>): void {
+	assertValidReasoningCapabilities(model);
+}
 
 const OpenAICompletionsCompatSchema = Type.Object({
 	supportsStore: Type.Optional(Type.Boolean()),
@@ -122,6 +218,7 @@ const OpenAICompletionsCompatSchema = Type.Object({
 			Type.Literal("openrouter"),
 			Type.Literal("deepseek"),
 			Type.Literal("zai"),
+			Type.Literal("moonshot"),
 			Type.Literal("qwen"),
 			Type.Literal("qwen-chat-template"),
 		]),
@@ -343,14 +440,15 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.reasoning !== undefined) result.reasoning = override.reasoning;
 	if (override.reasoningCapabilities !== undefined) {
 		result.reasoningCapabilities = override.reasoningCapabilities;
-		result.thinkingLevelMap = { ...override.reasoningCapabilities.levels };
+		result.thinkingLevelMap =
+			override.reasoningCapabilities.control === "budget" ? undefined : { ...override.reasoningCapabilities.levels };
 	} else if (override.thinkingLevelMap !== undefined) {
 		result.thinkingLevelMap = { ...model.thinkingLevelMap, ...override.thinkingLevelMap };
 		if (result.reasoningCapabilities) {
 			result.reasoningCapabilities = {
 				...result.reasoningCapabilities,
 				levels: { ...result.reasoningCapabilities.levels, ...override.thinkingLevelMap },
-			};
+			} as Model<Api>["reasoningCapabilities"];
 		}
 	}
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
@@ -605,6 +703,7 @@ export class ModelRegistry {
 		try {
 			const content = readFileSync(modelsJsonPath, "utf-8");
 			const parsed = JSON.parse(stripJsonComments(content)) as unknown;
+			assertRawReasoningCapabilityValueTypes(parsed);
 
 			if (!validateModelsConfig) {
 				// Validator not loaded yet (first refresh during startup): proceed on
@@ -671,10 +770,23 @@ export class ModelRegistry {
 
 		for (const [providerName, providerConfig] of Object.entries(config.providers)) {
 			const isBuiltIn = builtInProviders.has(providerName);
+			const builtInModels = isBuiltIn ? (getModels(providerName as KnownProvider) as Model<Api>[]) : [];
+			const builtInDefault = builtInModels[0];
 			const hasProviderApi = !!providerConfig.api;
 			const models = providerConfig.models ?? [];
 			const hasModelOverrides =
 				providerConfig.modelOverrides && Object.keys(providerConfig.modelOverrides).length > 0;
+			for (const [modelId, override] of Object.entries(providerConfig.modelOverrides ?? {})) {
+				const builtInModel = builtInModels.find((model) => model.id === modelId);
+				if (builtInModel) {
+					const providerModel: Model<Api> = {
+						...builtInModel,
+						baseUrl: providerConfig.baseUrl ?? builtInModel.baseUrl,
+						compat: mergeCompat(builtInModel.compat, providerConfig.compat),
+					};
+					assertReasoningContractCompatibility(applyModelOverride(providerModel, override));
+				}
+			}
 
 			if (models.length === 0) {
 				// Override-only config: needs baseUrl, headers, compat, modelOverrides, or some combination.
@@ -696,6 +808,9 @@ export class ModelRegistry {
 			// inherited from built-in models. Auth comes from env vars / auth storage.
 
 			for (const modelDef of models) {
+				const inheritedModel = builtInModels.find((model) => model.id === modelDef.id) ?? builtInDefault;
+				const api = modelDef.api ?? providerConfig.api ?? inheritedModel?.api;
+				const baseUrl = modelDef.baseUrl ?? providerConfig.baseUrl ?? inheritedModel?.baseUrl;
 				const hasModelApi = !!modelDef.api;
 
 				if (!hasProviderApi && !hasModelApi && !isBuiltIn) {
@@ -706,6 +821,23 @@ export class ModelRegistry {
 				// For built-in providers, api is optional — inherited from built-in models.
 
 				if (!modelDef.id) throw new Error(`Provider ${providerName}: model missing "id"`);
+				if (api && baseUrl) {
+					assertReasoningContractCompatibility({
+						id: modelDef.id,
+						name: modelDef.name ?? modelDef.id,
+						api: api as Api,
+						provider: providerName,
+						baseUrl,
+						reasoning: modelDef.reasoning ?? false,
+						reasoningCapabilities: modelDef.reasoningCapabilities,
+						thinkingLevelMap: modelDef.thinkingLevelMap,
+						input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
+						cost: modelDef.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: modelDef.contextWindow ?? 128000,
+						maxTokens: modelDef.maxTokens ?? 16384,
+						compat: mergeCompat(providerConfig.compat, modelDef.compat),
+					});
+				}
 				// Validate contextWindow/maxTokens only if provided (they have defaults)
 				if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0)
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
@@ -1518,6 +1650,21 @@ export class ModelRegistry {
 			if (!api) {
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
 			}
+			assertReasoningContractCompatibility({
+				id: modelDef.id,
+				name: modelDef.name,
+				api,
+				provider: providerName,
+				baseUrl: modelDef.baseUrl ?? config.baseUrl,
+				reasoning: modelDef.reasoning,
+				reasoningCapabilities: modelDef.reasoningCapabilities,
+				thinkingLevelMap: modelDef.thinkingLevelMap,
+				input: modelDef.input,
+				cost: modelDef.cost,
+				contextWindow: modelDef.contextWindow,
+				maxTokens: modelDef.maxTokens,
+				compat: modelDef.compat,
+			});
 		}
 	}
 

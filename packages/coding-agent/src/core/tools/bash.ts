@@ -11,9 +11,10 @@ import {
 	getShellConfig,
 	getShellEnv,
 	isPowerShellShell,
-	killProcessTree,
-	trackDetachedChildPid,
-	untrackDetachedChildPid,
+	killProcessTreeByIdentity,
+	reconcileTrackedDetachedChildAfterExit,
+	type ShellConfig,
+	trackChildProcess,
 } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { previewBashCommand } from "./code-preview.js";
@@ -64,11 +65,13 @@ export interface BashOperations {
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
-export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+export function createLocalBashOperations(options?: { shellPath?: string; shellConfig?: ShellConfig }): BashOperations {
+	let resolvedShellConfig = options?.shellConfig;
 	return {
 		exec: (command, cwd, { onData, signal, timeout, env }) => {
 			return new Promise((resolve, reject) => {
-				const { shell, args } = getShellConfig(options?.shellPath);
+				resolvedShellConfig ??= getShellConfig(options?.shellPath);
+				const { shell, args } = resolvedShellConfig;
 				if (!existsSync(cwd)) {
 					const shellLabel = isPowerShellShell(shell) ? "PowerShell" : "Bash";
 					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute ${shellLabel} commands.`));
@@ -81,48 +84,90 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					stdio: ["ignore", "pipe", "pipe"],
 					windowsHide: true,
 				});
-				if (child.pid) trackDetachedChildPid(child.pid);
-				let timedOut = false;
+				const childProcessStartId = trackChildProcess(child, {
+					unixDetachedSession: process.platform !== "win32",
+				});
+				let cancellation: "aborted" | `timeout:${number}` | undefined;
+				let settled = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
-				// Set timeout if provided.
-				if (timeout !== undefined && timeout > 0) {
-					timeoutHandle = setTimeout(() => {
-						timedOut = true;
-						if (child.pid) killProcessTree(child.pid);
-					}, timeout * 1000);
-				}
+				let terminationSettleHandle: NodeJS.Timeout | undefined;
+				let terminationPromise: Promise<boolean> | undefined;
 				// Stream stdout and stderr.
 				child.stdout?.on("data", onData);
 				child.stderr?.on("data", onData);
-				// Handle abort signal by killing the entire process tree.
-				const onAbort = () => {
-					if (child.pid) killProcessTree(child.pid);
+
+				const cleanup = () => {
+					if (timeoutHandle) clearTimeout(timeoutHandle);
+					if (terminationSettleHandle) clearTimeout(terminationSettleHandle);
+					if (signal) signal.removeEventListener("abort", onAbort);
 				};
+				const rejectCancellation = () => {
+					if (settled || !cancellation) return;
+					settled = true;
+					cleanup();
+					child.stdout?.removeListener("data", onData);
+					child.stderr?.removeListener("data", onData);
+					child.stdout?.destroy();
+					child.stderr?.destroy();
+					child.unref();
+					reject(new Error(cancellation));
+				};
+				const requestTermination = (reason: "aborted" | `timeout:${number}`) => {
+					if (cancellation) return;
+					cancellation = reason;
+					if (!child.pid) {
+						rejectCancellation();
+						return;
+					}
+					if (process.platform === "win32") {
+						terminationSettleHandle = setTimeout(rejectCancellation, WINDOWS_COMMAND_TERMINATION_SETTLE_MS);
+					}
+					terminationPromise = killProcessTreeByIdentity(child.pid, childProcessStartId);
+					void terminationPromise.then(
+						(complete) => {
+							if (!complete) rejectCancellation();
+						},
+						() => rejectCancellation(),
+					);
+				};
+				const onAbort = () => requestTermination("aborted");
 				if (signal) {
 					if (signal.aborted) onAbort();
 					else signal.addEventListener("abort", onAbort, { once: true });
 				}
+				// Set timeout if provided.
+				if (timeout !== undefined && timeout > 0) {
+					timeoutHandle = setTimeout(() => requestTermination(`timeout:${timeout}`), timeout * 1000);
+				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
 				waitForChildProcess(child)
-					.then((code) => {
-						if (child.pid) untrackDetachedChildPid(child.pid);
-						if (timeoutHandle) clearTimeout(timeoutHandle);
-						if (signal) signal.removeEventListener("abort", onAbort);
-						if (signal?.aborted) {
-							reject(new Error("aborted"));
-							return;
+					.then(async (code) => {
+						if (settled) return;
+						if (terminationPromise) {
+							const complete = await terminationPromise;
+							if (settled) return;
+							if (!complete) {
+								rejectCancellation();
+								return;
+							}
 						}
-						if (timedOut) {
-							reject(new Error(`timeout:${timeout}`));
+						settled = true;
+						if (child.pid) reconcileTrackedDetachedChildAfterExit(child.pid);
+						cleanup();
+						if (cancellation) {
+							reject(new Error(cancellation));
 							return;
 						}
 						resolve({ exitCode: code });
 					})
 					.catch((err) => {
-						if (child.pid) untrackDetachedChildPid(child.pid);
-						if (timeoutHandle) clearTimeout(timeoutHandle);
-						if (signal) signal.removeEventListener("abort", onAbort);
+						if (settled) return;
+						settled = true;
+						if (child.pid && (child.exitCode !== null || child.signalCode !== null)) {
+							reconcileTrackedDetachedChildAfterExit(child.pid);
+						}
+						cleanup();
 						reject(err);
 					});
 			});
@@ -156,6 +201,7 @@ export interface BashToolOptions {
 
 const BASH_PREVIEW_LINES = 5;
 const BASH_UPDATE_THROTTLE_MS = 100;
+const WINDOWS_COMMAND_TERMINATION_SETTLE_MS = 31_000;
 
 type BashRenderState = {
 	startedAt: number | undefined;
@@ -281,7 +327,7 @@ export function createBashToolDefinition(
 	options?: BashToolOptions,
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
 	const localShell = options?.operations ? undefined : getShellConfig(options?.shellPath);
-	const ops = options?.operations ?? createLocalBashOperations({ shellPath: localShell?.shell });
+	const ops = options?.operations ?? createLocalBashOperations(localShell ? { shellConfig: localShell } : undefined);
 	const shellKind = localShell ? (isPowerShellShell(localShell.shell) ? "PowerShell" : "Bash") : "configured shell";
 	const shellCommandDescription =
 		shellKind === "configured shell" ? "a configured shell command" : `a ${shellKind} command`;

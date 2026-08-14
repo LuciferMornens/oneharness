@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
+import { WINDOWS_POWERSHELL_EXECUTABLES } from "../utils/child-process.js";
 
 export const SESSION_LEASES_ENABLED_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
 export const SESSION_LEASE_OWNER_ID_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
@@ -124,18 +125,22 @@ export function getWindowsProcessStartId(pid: number, query: ProcessQuery = runP
 	if (!Number.isInteger(pid) || pid <= 0) {
 		return undefined;
 	}
-	try {
-		const startTicks = query("powershell.exe", [
-			"-NoLogo",
-			"-NoProfile",
-			"-NonInteractive",
-			"-Command",
-			`([System.Diagnostics.Process]::GetProcessById(${pid})).StartTime.ToUniversalTime().Ticks`,
-		]).trim();
-		return /^\d+$/.test(startTicks) ? `win:${startTicks}` : undefined;
-	} catch {
-		return undefined;
+	const executables = query === runProcessQuery ? WINDOWS_POWERSHELL_EXECUTABLES : (["powershell.exe"] as const);
+	for (const executable of executables) {
+		try {
+			const startTicks = query(executable, [
+				"-NoLogo",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				`([System.Diagnostics.Process]::GetProcessById(${pid})).StartTime.ToUniversalTime().Ticks`,
+			]).trim();
+			return /^\d+$/.test(startTicks) ? `win:${startTicks}` : undefined;
+		} catch {
+			// Try the Windows PowerShell host when PowerShell 7 is unavailable.
+		}
 	}
+	return undefined;
 }
 
 export function getProcessStartId(pid: number): string | undefined {

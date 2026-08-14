@@ -22,19 +22,36 @@ afterAll(() => {
 });
 
 function writeFakePython(opts: { sleepSeconds?: number } = {}): { python: string; countRuns: () => number } {
-	const python = join(tempDir, "python");
 	const countFile = join(tempDir, "runs");
-	writeFileSync(
-		python,
-		[
-			"#!/bin/sh",
-			`echo run >> "${countFile}"`,
-			...(opts.sleepSeconds ? [`sleep ${opts.sleepSeconds}`] : []),
-			"exit 42",
-			"",
-		].join("\n"),
-	);
-	chmodSync(python, 0o755);
+	let python: string;
+	if (process.platform === "win32") {
+		python = "python.exe";
+		writeFileSync(
+			join(tempDir, "ipykernel_launcher.py"),
+			[
+				"from pathlib import Path",
+				...(opts.sleepSeconds ? ["import time"] : []),
+				`with Path(${JSON.stringify(countFile)}).open("a", encoding="utf-8") as handle:`,
+				'    handle.write("run\\n")',
+				...(opts.sleepSeconds ? [`time.sleep(${opts.sleepSeconds})`] : []),
+				"raise SystemExit(42)",
+				"",
+			].join("\n"),
+		);
+	} else {
+		python = join(tempDir, "python");
+		writeFileSync(
+			python,
+			[
+				"#!/bin/sh",
+				`echo run >> "${countFile}"`,
+				...(opts.sleepSeconds ? [`sleep ${opts.sleepSeconds}`] : []),
+				"exit 42",
+				"",
+			].join("\n"),
+		);
+		chmodSync(python, 0o755);
+	}
 	const countRuns = () => {
 		try {
 			return readFileSync(countFile, "utf8").split("\n").filter(Boolean).length;
@@ -243,10 +260,14 @@ describe("IpythonKernelProvisioner", () => {
 		const ensure = vi.fn(async () => manager);
 		const kill = vi.fn(async () => {});
 		const provisioner = { ensure, kill } as unknown as IpythonKernelProvisioner;
+		const shellPath = process.platform === "win32" ? join(tempDir, "custom shell.exe") : "/custom/bash";
+		if (process.platform === "win32") {
+			writeFileSync(shellPath, "");
+		}
 		const tool = createIpythonToolDefinition(tempDir, {
 			provisioner,
 			commandPrefix: "export TEST_PREFIX=1",
-			shellPath: "/custom/bash",
+			shellPath,
 		});
 
 		await tool.execute(
@@ -257,8 +278,18 @@ describe("IpythonKernelProvisioner", () => {
 			{} as ExtensionContext,
 		);
 
+		const executedCode = execute.mock.calls[0]?.[0];
+		if (process.platform === "win32") {
+			expect(executedCode).toMatch(/^\n \r\n\t%%script __prime_agent_exec__/);
+			expect(executedCode?.endsWith("\r\nexport TEST_PREFIX=1\necho body")).toBe(true);
+			const encodedArgv = /%%script __prime_agent_exec__([A-Za-z0-9_-]+)/.exec(executedCode ?? "")?.[1];
+			expect(encodedArgv).toBeDefined();
+			expect(JSON.parse(Buffer.from(encodedArgv ?? "", "base64url").toString("utf8"))).toEqual([shellPath]);
+		} else {
+			expect(executedCode).toBe("\n \r\n\t%%script /custom/bash\r\nexport TEST_PREFIX=1\necho body");
+		}
 		expect(execute).toHaveBeenCalledWith(
-			"\n \r\n\t%%script /custom/bash\r\nexport TEST_PREFIX=1\necho body",
+			expect.any(String),
 			expect.objectContaining({ signal: undefined, onStream: expect.any(Function) }),
 		);
 	});
@@ -354,10 +385,8 @@ describe("KernelManager session cleanup during startup", () => {
 	});
 
 	it("disposes a kernel that is still booting when its session is cleaned up", async () => {
-		const python = join(tempDir, "python");
 		// Never writes connection ports - stays in the booting phase until killed.
-		writeFileSync(python, ["#!/bin/sh", "sleep 30", ""].join("\n"));
-		chmodSync(python, 0o755);
+		const { python } = writeFakePython({ sleepSeconds: 30 });
 		const sessionId = `provisioner-test-${Date.now()}`;
 		const manager = new KernelManager({ python, cwd: tempDir, sessionId });
 

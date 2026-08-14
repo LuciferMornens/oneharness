@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -44,7 +44,7 @@ describe("WorkerRecoveryJournal", () => {
 		);
 	});
 
-	it("compacts stable checkpoints and ignores a truncated final record", () => {
+	it("repairs truncated tails before appending and compacting stable checkpoints", () => {
 		const path = createPath();
 		const journal = new WorkerRecoveryJournal(path);
 		journal.record({
@@ -61,8 +61,29 @@ describe("WorkerRecoveryJournal", () => {
 		});
 		appendFileSync(path, "{truncated");
 
+		const restored = new WorkerRecoveryJournal(path);
+		restored.record({
+			activeSessionId: "active-2",
+			sessionId: "session-2",
+			busy: true,
+			operation: "print_start",
+		});
+		appendFileSync(path, '{"version":1,"activeSessionId":"active-2"');
+		restored.record({
+			activeSessionId: "active-2",
+			sessionId: "session-2",
+			busy: false,
+			operation: "print_end",
+		});
+
+		const records = readFileSync(path, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as unknown);
+		expect(records).toHaveLength(2);
 		expect(WorkerRecoveryJournal.readLatest(path)).toEqual([
 			expect.objectContaining({ activeSessionId: "active-1", busy: false, operation: "bash_end" }),
+			expect.objectContaining({ activeSessionId: "active-2", busy: false, operation: "print_end" }),
 		]);
 	});
 });

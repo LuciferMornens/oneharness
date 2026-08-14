@@ -12,6 +12,8 @@ const syncEnd = "\x1b[?2026l";
 const failures = [];
 const shellPath = resolveShellPath();
 
+checkNoEnvCredentialLists();
+
 for (const channel of ["stable", "beta"]) {
 	const rendered = powerShellInstallerSource
 		.replaceAll("__PRIME_AGENT_DOWNLOAD_BASE_URL__", "https://downloads.example.invalid")
@@ -331,6 +333,49 @@ function check(condition, message) {
 	if (!condition) {
 		failures.push(message);
 	}
+}
+
+function checkNoEnvCredentialLists() {
+	const envApiKeysSource = readFileSync("packages/ai/src/env-api-keys.ts", "utf-8");
+	const powerShellLauncher = readFileSync("prime-agent.ps1", "utf-8");
+	const bashLauncher = readFileSync("prime-agent.sh", "utf-8");
+	const required = extractEnvApiKeyCredentialVars(envApiKeysSource);
+	required.add("CLOUDFLARE_ACCOUNT_ID");
+	required.add("CLOUDFLARE_GATEWAY_ID");
+
+	for (const name of [...required].sort()) {
+		check(
+			powerShellLauncher.includes(`"${name}"`),
+			`prime-agent.ps1 --no-env is missing credential ${name} from env-api-keys.ts`,
+		);
+		check(
+			bashLauncher.includes(`unset ${name}`),
+			`prime-agent.sh --no-env is missing credential ${name} from env-api-keys.ts`,
+		);
+	}
+}
+
+function extractEnvApiKeyCredentialVars(source) {
+	const names = new Set();
+	const apiKeyFn = source.match(/function getApiKeyEnvVars[\s\S]*?export function findEnvKeys/);
+	check(Boolean(apiKeyFn), "expected getApiKeyEnvVars in env-api-keys.ts");
+	if (apiKeyFn) {
+		for (const match of apiKeyFn[0].matchAll(/"([A-Z][A-Z0-9_]*)"/g)) {
+			names.add(match[1]);
+		}
+	}
+
+	const envKeyFn = source.match(/export function getEnvApiKey[\s\S]*?export function getPrimeTeamId/);
+	check(Boolean(envKeyFn), "expected getEnvApiKey in env-api-keys.ts");
+	if (envKeyFn) {
+		for (const match of envKeyFn[0].matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)) {
+			names.add(match[1]);
+		}
+		for (const match of envKeyFn[0].matchAll(/getProcEnv\("([A-Z][A-Z0-9_]*)"\)/g)) {
+			names.add(match[1]);
+		}
+	}
+	return names;
 }
 
 function emptyParsedCase() {

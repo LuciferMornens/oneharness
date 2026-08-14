@@ -3,7 +3,14 @@
  */
 
 import { spawn } from "node:child_process";
-import { signalProcessGroupOrProcess, waitForChildProcess } from "../utils/child-process.js";
+import { waitForChildProcess } from "../utils/child-process.js";
+import {
+	killProcessTreeByIdentity,
+	reconcileTrackedDetachedChildAfterExit,
+	trackChildProcess,
+} from "../utils/shell.js";
+
+const WINDOWS_COMMAND_TERMINATION_SETTLE_MS = 31_000;
 
 /**
  * Options for executing shell commands.
@@ -60,6 +67,7 @@ export async function execCommand(
 	return new Promise((resolve) => {
 		const proc = spawn(command, args, {
 			cwd,
+			detached: process.platform !== "win32",
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
@@ -67,28 +75,60 @@ export async function execCommand(
 			// (e.g. herdr pane identity) without mutating the shared process.env.
 			env: mergeExecEnv(options?.env),
 		});
+		const processStartId = trackChildProcess(proc, {
+			unixDetachedSession: process.platform !== "win32",
+		});
 
 		let stdout = "";
 		let stderr = "";
 		let killed = false;
+		let killRequested = false;
+		let settled = false;
 		let timeoutId: NodeJS.Timeout | undefined;
 		let forceKillTimeoutId: NodeJS.Timeout | undefined;
+		let terminationSettleTimeoutId: NodeJS.Timeout | undefined;
+		let terminationPromise: Promise<boolean> | undefined;
+
+		const cleanup = () => {
+			if (timeoutId) clearTimeout(timeoutId);
+			if (forceKillTimeoutId) clearTimeout(forceKillTimeoutId);
+			if (terminationSettleTimeoutId) clearTimeout(terminationSettleTimeoutId);
+			if (options?.signal) {
+				options.signal.removeEventListener("abort", killProcess);
+			}
+		};
+
+		const settleFailedTermination = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			proc.stdout?.destroy();
+			proc.stderr?.destroy();
+			proc.unref();
+			resolve({ stdout, stderr, code: 1, killed: false });
+		};
 
 		const killProcess = () => {
-			if (!killed) {
-				killed = true;
-				if (process.platform === "win32" && proc.pid !== undefined) {
-					signalProcessGroupOrProcess(proc.pid, "SIGTERM");
-				} else {
-					proc.kill("SIGTERM");
-				}
-				// Force kill after 5 seconds if SIGTERM doesn't work
-				forceKillTimeoutId = setTimeout(() => {
-					forceKillTimeoutId = undefined;
-					if (proc.exitCode === null && proc.signalCode === null) {
-						proc.kill("SIGKILL");
+			if (!killRequested) {
+				killRequested = true;
+				if (proc.pid !== undefined) {
+					if (process.platform === "win32") {
+						terminationSettleTimeoutId = setTimeout(
+							settleFailedTermination,
+							WINDOWS_COMMAND_TERMINATION_SETTLE_MS,
+						);
 					}
-				}, 5000);
+					terminationPromise = killProcessTreeByIdentity(proc.pid, processStartId);
+					void terminationPromise.then(
+						(complete) => {
+							killed = complete;
+							if (!complete) settleFailedTermination();
+						},
+						() => settleFailedTermination(),
+					);
+					return;
+				}
+				killed = proc.kill("SIGKILL");
 			}
 		};
 
@@ -116,22 +156,30 @@ export async function execCommand(
 			stderr += data.toString();
 		});
 
-		const cleanup = () => {
-			if (timeoutId) clearTimeout(timeoutId);
-			if (forceKillTimeoutId) clearTimeout(forceKillTimeoutId);
-			if (options?.signal) {
-				options.signal.removeEventListener("abort", killProcess);
-			}
-		};
-
 		// Wait for process termination without hanging on inherited stdio handles
 		// held open by detached descendants.
 		waitForChildProcess(proc)
-			.then((code) => {
+			.then(async (code) => {
+				if (settled) return;
+				if (terminationPromise) {
+					killed = await terminationPromise;
+					if (settled) return;
+					if (!killed) {
+						settleFailedTermination();
+						return;
+					}
+				}
+				settled = true;
+				if (proc.pid) reconcileTrackedDetachedChildAfterExit(proc.pid);
 				cleanup();
 				resolve({ stdout, stderr, code: code ?? 0, killed });
 			})
 			.catch((_err) => {
+				if (settled) return;
+				settled = true;
+				if (proc.pid && (proc.exitCode !== null || proc.signalCode !== null)) {
+					reconcileTrackedDetachedChildAfterExit(proc.pid);
+				}
 				cleanup();
 				resolve({ stdout, stderr, code: 1, killed });
 			});

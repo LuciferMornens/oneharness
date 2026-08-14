@@ -10,7 +10,7 @@
 // Protocol (newline-delimited JSON over the unix socket, forkserver is the client):
 //   -> { "id": <n>, "connectionPath": "<abs path>" }   spawn request from Node
 //   <- { "type": "ready" }                             once, after imports finish
-//   <- { "id": <n>, "pid": <pid> }                     fork succeeded
+//   <- { "id": <n>, "pid": <pid>, "processStartId": "proc:<ticks>" } fork succeeded
 //   <- { "id": <n>, "error": "<message>" }             fork failed
 export const FORK_SERVER_SCRIPT = String.raw`
 import gc
@@ -123,6 +123,10 @@ def _serve(control_path):
         if pid == 0:
             # Child: shed every inherited fd tied to the control channel, then run.
             try:
+                os.setsid()
+            except OSError:
+                os._exit(1)
+            try:
                 sock.close()
                 f.close()
             except Exception:
@@ -139,7 +143,19 @@ def _serve(control_path):
             os._exit(0)
 
         # Parent: stay pristine (no loop/threads/ZMQ ever) so the next fork is clean.
-        f.write(json.dumps({"id": req_id, "pid": pid}).encode() + b"\n")
+        try:
+            with open("/proc/%d/stat" % pid, "r", encoding="utf-8") as stat_file:
+                stat_fields = stat_file.read().rsplit(")", 1)[1].strip().split()
+                process_start_id = "proc:" + stat_fields[19]
+        except (OSError, IndexError):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            f.write(json.dumps({"id": req_id, "error": "could not capture forked kernel identity"}).encode() + b"\n")
+            f.flush()
+            continue
+        f.write(json.dumps({"id": req_id, "pid": pid, "processStartId": process_start_id}).encode() + b"\n")
         f.flush()
 
 

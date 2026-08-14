@@ -12,7 +12,15 @@ import type {
 } from "openai/resources/chat/completions.js";
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
 import { getEnvApiKey, getPrimeTeamId } from "../env-api-keys.js";
-import { calculateCost, resolveSimpleThinkingLevel, resolveThinkingLevel, resolveThinkingOffValue } from "../models.js";
+import {
+	assertValidReasoningBudgetValue,
+	assertValidReasoningCapabilities,
+	calculateCost,
+	getReasoningCapabilities,
+	resolveSimpleThinkingLevel,
+	resolveThinkingLevel,
+	resolveThinkingOffValue,
+} from "../models.js";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -27,6 +35,7 @@ import type {
 	StreamOptions,
 	TextContent,
 	ThinkingContent,
+	ThinkingLevelValue,
 	Tool,
 	ToolCall,
 	ToolResultMessage,
@@ -79,8 +88,8 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	/** Exact provider value resolved from the model capability contract. */
-	reasoningEffortValue?: string;
-	/** Explicit reasoning toggle. undefined preserves the provider/model default. */
+	reasoningEffortValue?: ThinkingLevelValue;
+	/** Explicit reasoning toggle. false overrides reasoningEffort; undefined preserves the provider/model default. */
 	reasoningEnabled?: boolean;
 }
 
@@ -436,18 +445,18 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	const base = buildBaseOptions(model, options, apiKey);
 	const requestedReasoning = options?.reasoning;
 	const resolvedReasoning = resolveSimpleThinkingLevel(model, requestedReasoning);
+	const reasoningControl = getReasoningCapabilities(model)?.control;
 	const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
 
 	return streamOpenAICompletions(model, context, {
 		...base,
-		reasoningEffort: resolvedReasoning?.enabled
-			? (resolvedReasoning.level as Exclude<typeof resolvedReasoning.level, "off">)
-			: undefined,
-		reasoningEffortValue:
-			resolvedReasoning?.enabled && typeof resolvedReasoning.providerValue === "string"
-				? resolvedReasoning.providerValue
+		reasoningEffort:
+			resolvedReasoning?.enabled && reasoningControl !== "fixed"
+				? (resolvedReasoning.level as Exclude<typeof resolvedReasoning.level, "off">)
 				: undefined,
-		reasoningEnabled: resolvedReasoning?.enabled,
+		reasoningEffortValue:
+			resolvedReasoning?.enabled && reasoningControl !== "fixed" ? resolvedReasoning.providerValue : undefined,
+		reasoningEnabled: reasoningControl === "fixed" ? undefined : resolvedReasoning?.enabled,
 		toolChoice,
 	} satisfies OpenAICompletionsOptions);
 };
@@ -520,6 +529,7 @@ function buildParams(
 	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention),
 	cacheControl: OpenAICompatCacheControl | undefined = getCompatCacheControl(compat, cacheRetention),
 ) {
+	const validatedCapabilities = assertValidReasoningCapabilities(model);
 	const messages = convertMessages(model, context, compat);
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
@@ -572,59 +582,96 @@ function buildParams(
 		params.tool_choice = options.toolChoice;
 	}
 
-	const resolvedEffort = resolveThinkingLevel(model, options?.reasoningEffort);
-	const resolvedEffortValue =
-		options?.reasoningEffortValue ??
-		(typeof resolvedEffort?.providerValue === "string" ? resolvedEffort.providerValue : undefined);
+	const reasoningCapabilities = validatedCapabilities ?? getReasoningCapabilities(model);
+	const reasoningControl = reasoningCapabilities?.control;
+	const resolvedEffort =
+		reasoningControl === "fixed" ? undefined : resolveThinkingLevel(model, options?.reasoningEffort);
+	const resolvedEffortValue = options?.reasoningEffortValue ?? resolvedEffort?.providerValue;
+	if (reasoningControl === "effort" && resolvedEffortValue !== undefined && typeof resolvedEffortValue !== "string") {
+		throw new Error(
+			`Model ${model.provider}/${model.id}: effort requests require a string provider value; received ${resolvedEffortValue}.`,
+		);
+	}
 	const resolvedOff = resolveThinkingOffValue(model, "none");
+	const explicitReasoningEnabled =
+		options?.reasoningEnabled ?? (options?.reasoningEffort !== undefined ? true : undefined);
+	const canSerializeReasoningToggle =
+		explicitReasoningEnabled === true || (explicitReasoningEnabled === false && resolvedOff !== undefined);
+	const hasNumericReasoningBudget =
+		reasoningControl === "budget" &&
+		Object.values(reasoningCapabilities?.levels ?? {}).some((value) => typeof value === "number");
+	if (hasNumericReasoningBudget && compat.thinkingFormat !== "openai" && compat.thinkingFormat !== "openrouter") {
+		throw new Error(
+			`Model ${model.provider}/${model.id}: thinkingFormat "${compat.thinkingFormat}" cannot serialize a numeric reasoning budget; use "openai" for reasoning_budget or "openrouter" for reasoning.max_tokens.`,
+		);
+	}
 
-	if (compat.thinkingFormat === "zai" && model.reasoning) {
-		if (options?.reasoningEnabled !== undefined) {
+	if (reasoningControl === "fixed") {
+		// Fixed reasoning is intrinsic to the route and has no provider control field.
+	} else if (reasoningControl === "budget") {
+		const budgetValue = explicitReasoningEnabled === false ? resolvedOff : resolvedEffortValue;
+		if (budgetValue !== undefined && typeof budgetValue !== "number") {
+			throw new Error(
+				`Model ${model.provider}/${model.id}: OpenAI-compatible budget controls require numeric provider values.`,
+			);
+		}
+		if (typeof budgetValue === "number") {
+			assertValidReasoningBudgetValue(model, explicitReasoningEnabled === false ? "off" : "request", budgetValue);
+			if (compat.thinkingFormat === "openrouter") {
+				(params as any).reasoning = { max_tokens: budgetValue };
+			} else {
+				(params as any).reasoning_budget = budgetValue;
+			}
+		}
+	} else if ((compat.thinkingFormat === "zai" || compat.thinkingFormat === "moonshot") && model.reasoning) {
+		if (canSerializeReasoningToggle) {
 			(params as any).thinking = {
-				type: options.reasoningEnabled ? "enabled" : "disabled",
+				type: explicitReasoningEnabled ? "enabled" : "disabled",
 			};
-			if (options.reasoningEnabled && compat.supportsReasoningEffort && resolvedEffortValue) {
+			if (explicitReasoningEnabled && compat.supportsReasoningEffort && resolvedEffortValue) {
 				(params as any).reasoning_effort = resolvedEffortValue;
 			}
 		}
 	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
-		if (options?.reasoningEnabled !== undefined) (params as any).enable_thinking = options.reasoningEnabled;
+		if (canSerializeReasoningToggle) (params as any).enable_thinking = explicitReasoningEnabled;
 	} else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
-		if (options?.reasoningEnabled !== undefined) {
+		if (canSerializeReasoningToggle) {
 			(params as any).chat_template_kwargs = {
-				enable_thinking: options.reasoningEnabled,
+				enable_thinking: explicitReasoningEnabled,
 				preserve_thinking: true,
 			};
 		}
 	} else if (compat.thinkingFormat === "deepseek" && model.reasoning) {
-		if (options?.reasoningEnabled !== undefined) {
-			(params as any).thinking = { type: options.reasoningEnabled ? "enabled" : "disabled" };
+		if (canSerializeReasoningToggle) {
+			(params as any).thinking = { type: explicitReasoningEnabled ? "enabled" : "disabled" };
 		}
-		if (options?.reasoningEnabled === true && resolvedEffortValue) {
+		if (explicitReasoningEnabled === true && resolvedEffortValue) {
 			(params as any).reasoning_effort = resolvedEffortValue;
 		}
 	} else if (compat.thinkingFormat === "openrouter" && model.reasoning) {
 		// OpenRouter distinguishes an omitted reasoning preference (use the model
 		// default), an explicit toggle, and an explicit effort selection.
 		const openRouterParams = params as typeof params & { reasoning?: { enabled?: boolean; effort?: string } };
-		if (options?.reasoningEffort && compat.supportsReasoningEffort) {
+		if (options?.reasoningEnabled === false) {
+			if (resolvedOff !== undefined) {
+				openRouterParams.reasoning = compat.supportsReasoningEffort
+					? { effort: String(resolvedOff) }
+					: { enabled: false };
+			}
+		} else if (options?.reasoningEffort && compat.supportsReasoningEffort) {
 			openRouterParams.reasoning = {
-				effort: resolvedEffortValue ?? options.reasoningEffort,
+				effort: typeof resolvedEffortValue === "string" ? resolvedEffortValue : options.reasoningEffort,
 			};
 		} else if (options?.reasoningEnabled === true) {
 			openRouterParams.reasoning = { enabled: true };
-		} else if (options?.reasoningEnabled === false && resolvedOff !== undefined) {
-			openRouterParams.reasoning = compat.supportsReasoningEffort
-				? { effort: String(resolvedOff) }
-				: { enabled: false };
 		}
-	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
-		// OpenAI-style reasoning_effort
-		(params as any).reasoning_effort = resolvedEffortValue ?? options.reasoningEffort;
 	} else if (options?.reasoningEnabled === false && model.reasoning && compat.supportsReasoningEffort) {
 		if (typeof resolvedOff === "string") {
 			(params as any).reasoning_effort = resolvedOff;
 		}
+	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
+		// OpenAI-style reasoning_effort
+		(params as any).reasoning_effort = resolvedEffortValue ?? options.reasoningEffort;
 	}
 
 	// OpenRouter provider routing preferences

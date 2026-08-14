@@ -17,12 +17,16 @@ export interface ActiveOrphanProcess {
 	processStartId: string;
 }
 
-export function recordOrphanProcessState(pid: number, active: boolean): void {
+export function recordOrphanProcessState(pid: number, active: boolean, knownProcessStartId?: string | null): void {
 	const path = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
 	if (!path || !Number.isInteger(pid) || pid <= 0) {
 		return;
 	}
-	const processStartId = active ? getProcessStartId(pid) : undefined;
+	const processStartId = active
+		? knownProcessStartId === null
+			? undefined
+			: (knownProcessStartId ?? getProcessStartId(pid))
+		: undefined;
 	const record: OrphanProcessRecord = {
 		version: 1,
 		pid,
