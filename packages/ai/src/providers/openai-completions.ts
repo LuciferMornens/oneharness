@@ -513,9 +513,22 @@ function createClient(
 				}
 			: headers;
 
+	function resolveOpenAICompletionsBaseUrl(model: Model<"openai-completions">): string {
+		if (isCloudflareProvider(model.provider)) {
+			return resolveCloudflareBaseUrl(model);
+		}
+		if (model.provider === "cursor") {
+			const override = typeof process !== "undefined" ? process.env.CURSOR_BASE_URL?.trim() : undefined;
+			if (override) {
+				return override.replace(/\/+$/, "");
+			}
+		}
+		return model.baseUrl;
+	}
+
 	return new OpenAI({
 		apiKey,
-		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
+		baseURL: resolveOpenAICompletionsBaseUrl(model),
 		dangerouslyAllowBrowser: true,
 		defaultHeaders,
 	});

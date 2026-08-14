@@ -359,6 +359,8 @@ prime-agent --tools ipython -p "Review the code"
 | `PI_SKIP_VERSION_CHECK` | Skip the Prime Agent version update check at startup. This prevents the release manifest request |
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
+| `CURSOR_API_KEY` | Cursor user API key for the built-in Cursor provider |
+| `CURSOR_BASE_URL` | Optional OpenAI-compatible Cursor endpoint (default `https://api.cursor.com/v1`) |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing when it has `agent_traces` scope |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |

@@ -369,6 +369,18 @@ describe("Tool Results with Images", () => {
 		},
 	);
 
+	describe.skipIf(!process.env.CURSOR_API_KEY)("Cursor Provider (composer-2.5)", () => {
+		const llm = getModel("cursor", "composer-2.5");
+
+		it("should handle tool result with only image", { retry: 3, timeout: 30000 }, async () => {
+			await handleToolWithImageResult(llm);
+		});
+
+		it("should handle tool result with text and image", { retry: 3, timeout: 30000 }, async () => {
+			await handleToolWithTextAndImageResult(llm);
+		});
+	});
+
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider (image-capable model)", () => {
 		const llm = getKimiCodingTestModel({ image: true });
 
