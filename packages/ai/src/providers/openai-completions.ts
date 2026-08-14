@@ -518,7 +518,7 @@ function createClient(
 			return resolveCloudflareBaseUrl(model);
 		}
 		if (model.provider === "cursor") {
-			const override = process.env.CURSOR_BASE_URL?.trim();
+			const override = typeof process !== "undefined" ? process.env.CURSOR_BASE_URL?.trim() : undefined;
 			if (override) {
 				return override.replace(/\/+$/, "");
 			}
