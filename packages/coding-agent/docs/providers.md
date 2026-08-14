@@ -61,6 +61,7 @@ prime-agent
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
+| Cursor | `CURSOR_API_KEY` | `cursor` |
 | Prime Inference | `PRIME_API_KEY` | `prime-inference` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | Google Gemini | `GEMINI_API_KEY` | `google` |
@@ -97,6 +98,7 @@ Store credentials in `~/.prime/agent/auth.json`:
 {
   "anthropic": { "type": "api_key", "key": "sk-ant-..." },
   "openai": { "type": "api_key", "key": "sk-..." },
+  "cursor": { "type": "api_key", "key": "..." },
   "prime-inference": { "type": "api_key", "key": "..." },
   "deepseek": { "type": "api_key", "key": "sk-..." },
   "google": { "type": "api_key", "key": "..." },
@@ -130,6 +132,12 @@ The `key` field supports three formats:
   ```
 
 OAuth credentials are also stored here after `/login` and managed automatically.
+
+### Cursor
+
+Cursor models use the OpenAI-compatible API at `https://api.cursor.com/v1`. Create a user API key at [cursor.com/dashboard/api](https://cursor.com/dashboard/api), then set `CURSOR_API_KEY` or store it for `cursor` via `/login`.
+
+The built-in catalog matches `cursor-agent models` (Composer, Claude, GPT, Grok, Gemini, and other subscription models). Override the endpoint with `CURSOR_BASE_URL` if you use a local OpenAI-compatible Cursor proxy.
 
 ### Prime Inference
 

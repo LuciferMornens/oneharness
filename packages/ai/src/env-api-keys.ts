@@ -105,6 +105,7 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 	const envMap: Record<string, string> = {
 		openai: "OPENAI_API_KEY",
 		"azure-openai-responses": "AZURE_OPENAI_API_KEY",
+		cursor: "CURSOR_API_KEY",
 		"prime-inference": "PRIME_API_KEY",
 		deepseek: "DEEPSEEK_API_KEY",
 		google: "GEMINI_API_KEY",

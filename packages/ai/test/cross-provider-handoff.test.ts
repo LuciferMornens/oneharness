@@ -69,6 +69,8 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "azure-openai-responses", model: "gpt-4o-mini", label: "azure-openai-responses-gpt-4o-mini" },
 	// OpenAI Codex
 	{ provider: "openai-codex", model: "gpt-5.2-codex", label: "openai-codex-gpt-5.2-codex" },
+	// Cursor
+	{ provider: "cursor", model: "composer-2.5", label: "cursor-composer-2.5" },
 	// Prime Inference
 	{ provider: "prime-inference", model: "openai/gpt-5.5", label: "prime-inference-gpt-5.5" },
 	// GitHub Copilot

@@ -518,6 +518,26 @@ describe("AI Providers Empty Message Tests", () => {
 		},
 	);
 
+	describe.skipIf(!process.env.CURSOR_API_KEY)("Cursor Provider Empty Messages", () => {
+		const llm = getModel("cursor", "composer-2.5");
+
+		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
+			await testEmptyMessage(llm);
+		});
+
+		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
+			await testEmptyStringMessage(llm);
+		});
+
+		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
+			await testWhitespaceOnlyMessage(llm);
+		});
+
+		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
+			await testEmptyAssistantMessage(llm);
+		});
+	});
+
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider Empty Messages", () => {
 		const llm = getKimiCodingTestModel();
 

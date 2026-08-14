@@ -450,6 +450,17 @@ describe("Context overflow error handling", () => {
 	// Kimi For Coding
 	// =============================================================================
 
+	describe.skipIf(!process.env.CURSOR_API_KEY)("Cursor", () => {
+		it("should detect overflow via isContextOverflow", async () => {
+			const model = getModel("cursor", "composer-2.5");
+			const result = await testContextOverflow(model, process.env.CURSOR_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding", () => {
 		it("should detect overflow via isContextOverflow", async () => {
 			const model = getKimiCodingTestModel();
