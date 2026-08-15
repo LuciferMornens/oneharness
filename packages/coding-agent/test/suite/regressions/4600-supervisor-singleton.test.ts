@@ -693,7 +693,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		} finally {
 			client?.close();
 		}
-	});
+	}, 90_000);
 
 	it("keeps a live Windows supervisor commandable after its OS temp root is deleted", async () => {
 		if (process.platform !== "win32") {

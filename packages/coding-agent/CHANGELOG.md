@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Fixed daemon startup fencing inspecting the ambient default registry instead of the selected supervisor registry.
+- Fixed the IPython kernel startup timing out on slow or loaded runners before it could answer the readiness probe.
 - Fixed daemon session workers being left running when launch failed before a process identity was captured.
 - Fixed daemon supervisor registry setup treating a non-directory path as a registry instead of rejecting it.
 - Fixed daemon supervisor registries created under a shared temp directory inheriting umask `0755` and failing the private-directory check.

@@ -27,7 +27,8 @@ import {
 const DELIM = Buffer.from("<IDS|MSG>");
 const PROTOCOL_VERSION = "5.3";
 const PORTS_RESOLVE_TIMEOUT_MS = 5000;
-const READY_TIMEOUT_MS = 5000;
+// CI runners can take >5s to cold-start an ipykernel over TCP.
+const READY_TIMEOUT_MS = 30_000;
 // Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
