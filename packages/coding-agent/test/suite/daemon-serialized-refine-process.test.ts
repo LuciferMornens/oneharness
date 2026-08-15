@@ -31,16 +31,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
-import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../src/core/orphan-process-journal.js";
-import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../src/core/session-lease.js";
 import { DaemonClient } from "../../src/modes/daemon/daemon-client.js";
-import {
-	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
-	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
-	DAEMON_WORKER_ROLE_ENV,
-	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
-	DAEMON_WORKER_TOKEN_ENV,
-} from "../../src/modes/daemon/daemon-worker-protocol.js";
+import { DAEMON_WORKER_ROLE_ENV } from "../../src/modes/daemon/daemon-worker-protocol.js";
+import { isolatedDaemonProcessEnv } from "../isolated-daemon-env.js";
 
 const cliPath = resolve(__dirname, "../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../node_modules/tsx/dist/cli.mjs");
@@ -84,28 +77,15 @@ async function runCli(
 	options: { agentDir: string; stdin?: string; environment?: NodeJS.ProcessEnv },
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
 	const child = spawn(process.execPath, [tsxPath, cliPath, ...args], {
-		env: {
-			...process.env,
+		env: isolatedDaemonProcessEnv({
 			TSX_TSCONFIG_PATH: repoTsconfigPath,
 			[ENV_AGENT_DIR]: options.agentDir,
 			PI_SKIP_VERSION_CHECK: "1",
 			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
 			PRIME_AGENT_KERNEL_FORKSERVER: "0",
 			RLM_DEPTH: "0",
-			// The test deliberately RE-INJECTS the worker role env var
-			// (via options.environment, applied last) to prove the
-			// production daemon-launch.ts env scrub removes it before
-			// spawning the daemon supervisor.
-			[DAEMON_WORKER_ROLE_ENV]: undefined,
-			[DAEMON_WORKER_TOKEN_ENV]: undefined,
-			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: undefined,
-			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: undefined,
-			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: undefined,
-			[ORPHAN_PROCESS_JOURNAL_ENV]: undefined,
-			[SESSION_LEASES_ENABLED_ENV]: undefined,
-			[SESSION_LEASE_OWNER_ID_ENV]: undefined,
 			...options.environment,
-		},
+		}),
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	children.add(child);

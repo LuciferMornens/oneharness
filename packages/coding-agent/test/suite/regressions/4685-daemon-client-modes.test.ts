@@ -13,6 +13,7 @@ import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
 import { RpcClient } from "../../../src/modes/rpc/rpc-client.js";
 import { createRpcExtensionUiBridge } from "../../../src/modes/rpc/rpc-extension-ui-context.js";
+import { isolatedDaemonProcessEnv } from "../../isolated-daemon-env.js";
 import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "../harness.js";
 
 const fixturePath = resolve(__dirname, "../../fixtures/rpc-connection-mode-fixture.ts");
@@ -85,21 +86,15 @@ async function runCli(
 	options: { agentDir: string; stdin?: string; environment?: NodeJS.ProcessEnv },
 ): Promise<CliResult> {
 	const child = spawn(process.execPath, [tsxPath, cliPath, ...args], {
-		env: {
-			...process.env,
+		env: isolatedDaemonProcessEnv({
 			TSX_TSCONFIG_PATH: repoTsconfigPath,
 			[ENV_AGENT_DIR]: options.agentDir,
 			PI_SKIP_VERSION_CHECK: "1",
 			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL: undefined,
 			RLM_DEPTH: undefined,
 			RLM_MAX_DEPTH: undefined,
 			...options.environment,
-		},
+		}),
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	children.add(child);

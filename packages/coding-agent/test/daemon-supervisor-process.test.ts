@@ -17,6 +17,7 @@ import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agen
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { DaemonWorkerDescriptor } from "../src/modes/daemon/daemon-worker-protocol.js";
+import { isolatedDaemonProcessEnv } from "./isolated-daemon-env.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
@@ -87,12 +88,11 @@ function spawnSupervisor(
 		[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", socketPath, "--offline", ...extraArgs],
 		{
 			cwd,
-			env: {
-				...process.env,
+			env: isolatedDaemonProcessEnv({
 				[ENV_AGENT_DIR]: agentDir,
 				PI_OFFLINE: "1",
 				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
-			},
+			}),
 			stdio: ["ignore", "pipe", "pipe"],
 		},
 	);

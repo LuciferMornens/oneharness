@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
+import { isolatedDaemonProcessEnv } from "./isolated-daemon-env.js";
 
 /**
  * Cold real-CLI ACP coverage.
@@ -89,12 +90,11 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 		],
 		{
 			cwd: projectDir,
-			env: {
-				...process.env,
+			env: isolatedDaemonProcessEnv({
 				[ENV_AGENT_DIR]: agentDir,
 				HOME: agentDir,
 				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
-			},
+			}),
 			stdio: ["pipe", "pipe", "pipe"],
 		},
 	);
