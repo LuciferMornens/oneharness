@@ -37,7 +37,15 @@ function cacheAutomaticShellConfig(key: string, config: ShellConfig): ShellConfi
 /**
  * Find bash executable on PATH (cross-platform)
  */
-function findExecutableOnWindowsPath(executable: string): string | null {
+function isWindowsWslBashLauncher(shellPath: string): boolean {
+	const normalized = shellPath.replace(/\//g, "\\").toLowerCase();
+	return normalized.endsWith("\\system32\\bash.exe") || normalized.endsWith("\\syswow64\\bash.exe");
+}
+
+function findExecutableOnWindowsPath(
+	executable: string,
+	isUsable: (path: string) => boolean = () => true,
+): string | null {
 	try {
 		const result = spawnSync("where.exe", [executable], {
 			encoding: "utf-8",
@@ -45,9 +53,10 @@ function findExecutableOnWindowsPath(executable: string): string | null {
 			windowsHide: true,
 		});
 		if (result.status === 0 && result.stdout) {
-			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-			if (firstMatch && existsSync(firstMatch)) {
-				return firstMatch;
+			for (const match of result.stdout.trim().split(/\r?\n/)) {
+				if (match && existsSync(match) && isUsable(match)) {
+					return match;
+				}
 			}
 		}
 	} catch {
@@ -58,7 +67,7 @@ function findExecutableOnWindowsPath(executable: string): string | null {
 
 function findBashOnPath(): string | null {
 	if (process.platform === "win32") {
-		return findExecutableOnWindowsPath("bash.exe");
+		return findExecutableOnWindowsPath("bash.exe", (path) => !isWindowsWslBashLauncher(path));
 	}
 
 	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
@@ -136,7 +145,7 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 			}
 		}
 
-		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
+		// 3. Fallback: search bash.exe on PATH (Git Bash, Cygwin, MSYS2). Skip the WSL launcher.
 		const bashOnPath = findBashOnPath();
 		if (bashOnPath) {
 			return cacheAutomaticShellConfig(cacheKey, { shell: bashOnPath, args: ["-c"] });

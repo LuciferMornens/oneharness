@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ENV_AGENT_DIR } from "../src/config.js";
+import { ENV_AGENT_DIR, VERSION } from "../src/config.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
@@ -104,5 +104,16 @@ describe("stdout cleanliness in non-interactive modes", () => {
 		expect(result.stderr).toContain("Usage:");
 		expect(result.stderr).not.toContain("Examples:");
 		expect(result.stderr).not.toContain("Built-in Tool Names:");
+	});
+
+	it("prints --version to stdout without a help banner", async () => {
+		const result = await runCli(["--version"]);
+
+		expect(result.code).toBe(0);
+		expect(result.stdout.trim()).toBe(VERSION);
+		expect(result.stdout).not.toContain("Usage:");
+		expect(result.stderr).not.toContain("Usage:");
+		expect(result.stderr).not.toContain("changed 1 package in 471ms");
+		expect(result.stderr).not.toContain("found 0 vulnerabilities");
 	});
 });

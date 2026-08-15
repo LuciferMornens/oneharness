@@ -1435,6 +1435,7 @@ export class DaemonSupervisor {
 					this.commandJournal.recordResult(journalIdentity.clientId, journalIdentity.commandId, response);
 				}
 				this.write(client, response);
+				this.scheduleSupervisorCloseAfterResponse(command);
 			}
 		} catch (error) {
 			this.log(`Supervisor command ${command.type} failed: ${error instanceof Error ? error.stack : String(error)}`);
@@ -1660,10 +1661,8 @@ export class DaemonSupervisor {
 				return success(command.id, command.type, summary ? this.publicSummary(worker, summary) : undefined);
 			}
 			case "restart":
-				setImmediate(() => void this.shutdown(0, false, true, false, "update"));
 				return success(command.id, command.type);
 			case "shutdown":
-				setImmediate(() => void this.shutdown(0, true, false, command.force === true, "shutdown"));
 				return success(command.id, "shutdown");
 			case "prepare_update_restart": {
 				const manifest = await this.prepareUpdateRestart();
@@ -5261,6 +5260,16 @@ export class DaemonSupervisor {
 
 	private write(client: DaemonSocketClient, message: DaemonOutbound): boolean {
 		return this.writeSerialized(client, serializeJsonLine(message));
+	}
+
+	private scheduleSupervisorCloseAfterResponse(command: DaemonCommand): void {
+		if (command.type === "shutdown") {
+			setImmediate(() => void this.shutdown(0, true, false, command.force === true, "shutdown"));
+			return;
+		}
+		if (command.type === "restart") {
+			setImmediate(() => void this.shutdown(0, false, true, false, "update"));
+		}
 	}
 
 	private broadcastHeartbeatsChanged(): void {

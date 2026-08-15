@@ -3712,4 +3712,88 @@ describe("daemon worker supervisor monitoring", () => {
 		await expect(supervisor.prepareUpdateRestartFenced()).rejects.toThrow(/resident-1.*recovering.*disconnected/);
 		expect(requestWorker).not.toHaveBeenCalled();
 	});
+
+	it("writes shutdown success before scheduling daemon_closing", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-shutdown-order-"));
+		const commandJournal = new CommandRecoveryJournal(join(root, "commands.jsonl"));
+		const writes: string[] = [];
+		const shutdown = vi.fn(async () => undefined);
+		const client = {
+			id: "socket-client",
+			socket: {
+				destroyed: false,
+				write: vi.fn((chunk: string) => {
+					writes.push(chunk);
+					return true;
+				}),
+			},
+		} as unknown as DaemonSocketClient;
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			ready: Promise.resolve(),
+			workers: new Map(),
+			protocolClientIds: new WeakMap(),
+			commandJournal,
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			assertCurrentOwnership: vi.fn(async () => undefined),
+			cancelOwnedWorkerCleanup: vi.fn(),
+			shutdown,
+		}) as unknown as {
+			handleLine(client: DaemonSocketClient, line: string): Promise<void>;
+		};
+
+		try {
+			await supervisor.handleLine(
+				client,
+				JSON.stringify(createDaemonCommandEnvelope({ type: "shutdown" }, "command-shutdown", "client-1")),
+			);
+			expect(writes).toEqual([`${JSON.stringify(success("command-shutdown", "shutdown"))}\n`]);
+			expect(shutdown).not.toHaveBeenCalled();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(shutdown).toHaveBeenCalledWith(0, true, false, false, "shutdown");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("writes restart success before scheduling an update close", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-restart-order-"));
+		const commandJournal = new CommandRecoveryJournal(join(root, "commands.jsonl"));
+		const writes: string[] = [];
+		const shutdown = vi.fn(async () => undefined);
+		const client = {
+			id: "socket-client",
+			socket: {
+				destroyed: false,
+				write: vi.fn((chunk: string) => {
+					writes.push(chunk);
+					return true;
+				}),
+			},
+		} as unknown as DaemonSocketClient;
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			ready: Promise.resolve(),
+			workers: new Map(),
+			protocolClientIds: new WeakMap(),
+			commandJournal,
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			assertCurrentOwnership: vi.fn(async () => undefined),
+			cancelOwnedWorkerCleanup: vi.fn(),
+			shutdown,
+		}) as unknown as {
+			handleLine(client: DaemonSocketClient, line: string): Promise<void>;
+		};
+
+		try {
+			await supervisor.handleLine(
+				client,
+				JSON.stringify(createDaemonCommandEnvelope({ type: "restart" }, "command-restart", "client-1")),
+			);
+			expect(writes).toEqual([`${JSON.stringify(success("command-restart", "restart"))}\n`]);
+			expect(shutdown).not.toHaveBeenCalled();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(shutdown).toHaveBeenCalledWith(0, false, true, false, "update");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });

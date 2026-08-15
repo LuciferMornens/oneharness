@@ -2,7 +2,7 @@
  * Strip parent-daemon supervisor/worker env so real-process tests do not
  * attach to the agent that launched the test runner.
  */
-import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -43,4 +43,20 @@ export function isolatedDaemonProcessEnv(overrides: NodeJS.ProcessEnv = {}): Nod
 		}
 	}
 	return env;
+}
+
+export async function removeTempRoot(root: string): Promise<void> {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		try {
+			rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOTEMPTY" && code !== "EBUSY") {
+				throw error;
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+		}
+	}
+	rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }

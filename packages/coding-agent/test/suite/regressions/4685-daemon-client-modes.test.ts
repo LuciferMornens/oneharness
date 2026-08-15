@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +12,12 @@ import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
 import { RpcClient } from "../../../src/modes/rpc/rpc-client.js";
 import { createRpcExtensionUiBridge } from "../../../src/modes/rpc/rpc-extension-ui-context.js";
-import { createSecureTempDir, isolatedDaemonProcessEnv, isolatedDaemonRegistryDir } from "../../isolated-daemon-env.js";
+import {
+	createSecureTempDir,
+	isolatedDaemonProcessEnv,
+	isolatedDaemonRegistryDir,
+	removeTempRoot,
+} from "../../isolated-daemon-env.js";
 import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "../harness.js";
 
 const fixturePath = resolve(__dirname, "../../fixtures/rpc-connection-mode-fixture.ts");
@@ -25,22 +30,6 @@ const children = new Set<ChildProcess>();
 const harnesses: Harness[] = [];
 const daemonSockets = new Set<string>();
 const tempRoots = new Set<string>();
-
-async function removeTempRoot(root: string): Promise<void> {
-	for (let attempt = 0; attempt < 20; attempt++) {
-		try {
-			rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-			return;
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (code !== "ENOTEMPTY" && code !== "EBUSY") {
-				throw error;
-			}
-			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
-		}
-	}
-	rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
-}
 
 afterEach(async () => {
 	for (const child of children) {

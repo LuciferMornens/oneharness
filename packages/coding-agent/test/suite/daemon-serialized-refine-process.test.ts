@@ -26,14 +26,14 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
 import { DaemonClient } from "../../src/modes/daemon/daemon-client.js";
 import { DAEMON_WORKER_ROLE_ENV } from "../../src/modes/daemon/daemon-worker-protocol.js";
-import { isolatedDaemonProcessEnv, isolatedDaemonRegistryDir } from "../isolated-daemon-env.js";
+import { isolatedDaemonProcessEnv, isolatedDaemonRegistryDir, removeTempRoot } from "../isolated-daemon-env.js";
 
 const cliPath = resolve(__dirname, "../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../node_modules/tsx/dist/cli.mjs");
@@ -45,12 +45,29 @@ const daemonSockets = new Set<string>();
 const tempRoots = new Set<string>();
 
 afterEach(async () => {
-	for (const child of children) {
+	const liveChildren = [...children];
+	children.clear();
+	for (const child of liveChildren) {
 		if (child.exitCode === null && child.signalCode === null) {
 			child.kill("SIGKILL");
 		}
 	}
-	children.clear();
+	await Promise.all(
+		liveChildren.map(
+			(child) =>
+				new Promise<void>((resolveExit) => {
+					if (child.exitCode !== null || child.signalCode !== null) {
+						resolveExit();
+						return;
+					}
+					const timeout = setTimeout(() => resolveExit(), 10_000);
+					child.once("exit", () => {
+						clearTimeout(timeout);
+						resolveExit();
+					});
+				}),
+		),
+	);
 	for (const socketPath of daemonSockets) {
 		const client = new DaemonClient(socketPath);
 		try {
@@ -67,7 +84,7 @@ afterEach(async () => {
 	}
 	daemonSockets.clear();
 	for (const root of tempRoots) {
-		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+		await removeTempRoot(root);
 	}
 	tempRoots.clear();
 });
@@ -140,6 +157,7 @@ function writeAutoRefineSettings(agentDir: string): void {
 describe("Real-process serializedRefine — JSON mode", () => {
 	it("daemon supervisor scrubs inherited worker env, checkpoint applies refine_complete before agent_end", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-process-json-refine-"));
+		chmodSync(root, 0o700);
 		tempRoots.add(root);
 		const agentDir = join(root, "agent");
 		mkdirSync(agentDir, { recursive: true });
