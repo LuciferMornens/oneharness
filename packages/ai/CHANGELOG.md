@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed Grok OAuth tokens issued with `expires_in` of five minutes or less expiring at issuance by clamping the expiry skew to half the token lifetime.
 - Changed ChatGPT/Codex subscription GPT models that support fast mode to default to the `priority` service tier when no preference is saved.
 - Added xAI Grok subscription support: a `grok` OAuth provider with device-code login against accounts.x.ai and a `grok-responses` API that streams through xAI's Grok CLI proxy so SuperGrok / X Premium+ subscriptions cover inference.
 - Added fast mode for Grok 4.5 and Grok 4.6 subscription models, mapping the `priority` service tier to `low` reasoning effort on the same model id.

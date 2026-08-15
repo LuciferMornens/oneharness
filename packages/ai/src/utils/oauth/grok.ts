@@ -171,10 +171,15 @@ function credentialsFromTokenResponse(data: TokenResponse, previousRefreshToken?
 			? data.expires_in
 			: DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS;
 
+	// The skew must never consume the whole lifetime: a token issued with
+	// expires_in <= 300s would otherwise be born expired and refresh on first use.
+	const lifetimeMs = expiresIn * 1000;
+	const skewMs = Math.min(TOKEN_EXPIRY_SKEW_MS, lifetimeMs / 2);
+
 	return {
 		refresh,
 		access: data.access_token,
-		expires: Date.now() + expiresIn * 1000 - TOKEN_EXPIRY_SKEW_MS,
+		expires: Date.now() + lifetimeMs - skewMs,
 	};
 }
 
