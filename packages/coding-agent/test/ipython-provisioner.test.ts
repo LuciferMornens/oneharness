@@ -126,11 +126,9 @@ describe("IpythonKernelProvisioner", () => {
 		provisioner.prewarm();
 		expect(provisioner.manager).toBeUndefined();
 
-		// Once the prewarm startup settles, ensure() must launch a second attempt.
-		await vi.waitFor(async () => {
-			await expect(provisioner.ensure()).rejects.toThrow();
-			expect(countRuns()).toBeGreaterThanOrEqual(2);
-		});
+		await expect(provisioner.ensure()).rejects.toThrow();
+		await expect(provisioner.ensure()).rejects.toThrow();
+		expect(countRuns()).toBeGreaterThanOrEqual(2);
 	});
 
 	it("replays the current startup stage to listeners attaching mid-flight", async () => {

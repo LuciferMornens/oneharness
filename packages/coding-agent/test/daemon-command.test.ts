@@ -66,11 +66,6 @@ const daemonClientMock = vi.hoisted(() => {
 				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
 				schemaId: DAEMON_SCHEMA_ID,
 				appVersion: VERSION,
-				supervisorGeneration: "test-generation",
-				supervisorOwnerToken: "test-owner",
-				supervisorPid: 99999,
-				supervisorProcessStartId: "test-start",
-				supervisorSocketPath: this.socketPath,
 				clientId: "test-client",
 				serverCapabilities: [],
 			};
