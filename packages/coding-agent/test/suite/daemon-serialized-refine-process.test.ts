@@ -26,21 +26,14 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
-import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../src/core/orphan-process-journal.js";
-import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../src/core/session-lease.js";
 import { DaemonClient } from "../../src/modes/daemon/daemon-client.js";
-import {
-	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
-	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
-	DAEMON_WORKER_ROLE_ENV,
-	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
-	DAEMON_WORKER_TOKEN_ENV,
-} from "../../src/modes/daemon/daemon-worker-protocol.js";
+import { DAEMON_WORKER_ROLE_ENV } from "../../src/modes/daemon/daemon-worker-protocol.js";
+import { isolatedDaemonProcessEnv, isolatedDaemonRegistryDir, removeTempRoot } from "../isolated-daemon-env.js";
 
 const cliPath = resolve(__dirname, "../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../node_modules/tsx/dist/cli.mjs");
@@ -52,12 +45,29 @@ const daemonSockets = new Set<string>();
 const tempRoots = new Set<string>();
 
 afterEach(async () => {
-	for (const child of children) {
+	const liveChildren = [...children];
+	children.clear();
+	for (const child of liveChildren) {
 		if (child.exitCode === null && child.signalCode === null) {
 			child.kill("SIGKILL");
 		}
 	}
-	children.clear();
+	await Promise.all(
+		liveChildren.map(
+			(child) =>
+				new Promise<void>((resolveExit) => {
+					if (child.exitCode !== null || child.signalCode !== null) {
+						resolveExit();
+						return;
+					}
+					const timeout = setTimeout(() => resolveExit(), 10_000);
+					child.once("exit", () => {
+						clearTimeout(timeout);
+						resolveExit();
+					});
+				}),
+		),
+	);
 	for (const socketPath of daemonSockets) {
 		const client = new DaemonClient(socketPath);
 		try {
@@ -74,7 +84,7 @@ afterEach(async () => {
 	}
 	daemonSockets.clear();
 	for (const root of tempRoots) {
-		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+		await removeTempRoot(root);
 	}
 	tempRoots.clear();
 });
@@ -84,28 +94,17 @@ async function runCli(
 	options: { agentDir: string; stdin?: string; environment?: NodeJS.ProcessEnv },
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
 	const child = spawn(process.execPath, [tsxPath, cliPath, ...args], {
-		env: {
-			...process.env,
+		env: isolatedDaemonProcessEnv({
 			TSX_TSCONFIG_PATH: repoTsconfigPath,
 			[ENV_AGENT_DIR]: options.agentDir,
 			PI_SKIP_VERSION_CHECK: "1",
 			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
 			PRIME_AGENT_KERNEL_FORKSERVER: "0",
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: isolatedDaemonRegistryDir(options.agentDir),
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: isolatedDaemonRegistryDir(options.agentDir),
 			RLM_DEPTH: "0",
-			// The test deliberately RE-INJECTS the worker role env var
-			// (via options.environment, applied last) to prove the
-			// production daemon-launch.ts env scrub removes it before
-			// spawning the daemon supervisor.
-			[DAEMON_WORKER_ROLE_ENV]: undefined,
-			[DAEMON_WORKER_TOKEN_ENV]: undefined,
-			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: undefined,
-			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: undefined,
-			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: undefined,
-			[ORPHAN_PROCESS_JOURNAL_ENV]: undefined,
-			[SESSION_LEASES_ENABLED_ENV]: undefined,
-			[SESSION_LEASE_OWNER_ID_ENV]: undefined,
 			...options.environment,
-		},
+		}),
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	children.add(child);
@@ -158,6 +157,7 @@ function writeAutoRefineSettings(agentDir: string): void {
 describe("Real-process serializedRefine — JSON mode", () => {
 	it("daemon supervisor scrubs inherited worker env, checkpoint applies refine_complete before agent_end", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-process-json-refine-"));
+		chmodSync(root, 0o700);
 		tempRoots.add(root);
 		const agentDir = join(root, "agent");
 		mkdirSync(agentDir, { recursive: true });

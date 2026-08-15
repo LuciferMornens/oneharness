@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
+import { isolatedDaemonProcessEnv } from "./isolated-daemon-env.js";
 
 /**
  * Cold real-CLI ACP coverage.
@@ -51,11 +52,16 @@ interface AcpResult {
 
 async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 	const tempRoot = mkdtempSync(join(tmpdir(), "pi-acp-cold-"));
+	chmodSync(tempRoot, 0o700);
 	tempDirs.push(tempRoot);
 	const agentDir = join(tempRoot, "agent");
 	const projectDir = join(tempRoot, "project");
+	const registryDir = join(agentDir, "supervisor-owners");
 	mkdirSync(agentDir, { recursive: true });
 	mkdirSync(projectDir, { recursive: true });
+	mkdirSync(registryDir, { recursive: true });
+	chmodSync(agentDir, 0o700);
+	chmodSync(registryDir, 0o700);
 	writeFileSync(
 		join(agentDir, "models.json"),
 		JSON.stringify({
@@ -89,12 +95,13 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 		],
 		{
 			cwd: projectDir,
-			env: {
-				...process.env,
+			env: isolatedDaemonProcessEnv({
 				[ENV_AGENT_DIR]: agentDir,
 				HOME: agentDir,
+				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: registryDir,
+				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: registryDir,
 				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
-			},
+			}),
 			stdio: ["pipe", "pipe", "pipe"],
 		},
 	);

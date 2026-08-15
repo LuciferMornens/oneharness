@@ -12,6 +12,7 @@ import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemo
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import type { DaemonResponse } from "../../../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
+import { isolatedDaemonProcessEnv } from "../../isolated-daemon-env.js";
 import { createHarness, type Harness } from "../harness.js";
 
 interface SupervisorHandle {
@@ -52,9 +53,9 @@ function spawnSupervisor(paths: {
 		[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", paths.socketPath, "--offline"],
 		{
 			cwd: paths.agentDir,
-			env: {
-				...process.env,
+			env: isolatedDaemonProcessEnv({
 				[supervisorRegistryDirEnv]: paths.registryDir,
+				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
 				ENG_4606_AGENT_DIR: paths.agentDir,
 				ENG_4606_CLI_PATH: cliPath,
@@ -64,7 +65,7 @@ function spawnSupervisor(paths: {
 				ENG_4606_TSX_PATH: tsxPath,
 				PI_OFFLINE: "1",
 				TSX_TSCONFIG_PATH: tsconfigPath,
-			},
+			}),
 			stdio: ["ignore", "pipe", "pipe"],
 		},
 	);

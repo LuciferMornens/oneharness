@@ -59,7 +59,7 @@ Prime Agent resolves a project shell in this order:
 
 1. `shellPath` in `~/.prime/agent/settings.json`
 2. Git Bash in its standard installation locations
-3. `bash.exe` on `PATH` (MSYS2, Cygwin, or WSL)
+3. `bash.exe` on `PATH` (MSYS2, Cygwin, or Git Bash). The WSL launcher at `%SystemRoot%\System32\bash.exe` is skipped.
 4. PowerShell 7 (`pwsh`)
 5. Windows PowerShell (`powershell.exe`)
 

@@ -2231,6 +2231,7 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(order).toEqual(["connection", "settings"]);
 		expect(fakeThis.patchConnectionState).toHaveBeenCalledWith({
 			model,
+			thinkingLevel: "medium",
 			serviceTier: "default",
 			availableThinkingLevels: ["off"],
 		});
@@ -2303,6 +2304,7 @@ describe("InteractiveMode model selection persistence", () => {
 		expect(fakeThis.uiServices.settingsManager.setDefaultModelAndProvider).toHaveBeenCalledWith("openai", "gpt-5.5");
 		expect(fakeThis.patchConnectionState).toHaveBeenCalledWith({
 			model,
+			thinkingLevel: "medium",
 			serviceTier: "default",
 			availableThinkingLevels: ["off"],
 		});

@@ -41,6 +41,7 @@ import {
 	type PrivateFrame,
 	PrivateFrameDecoder,
 } from "../../../src/modes/session-worker/private-framing.js";
+import { isolatedDaemonProcessEnv } from "../../isolated-daemon-env.js";
 import { createHarness, type Harness } from "../harness.js";
 
 interface OwnerRecord {
@@ -156,9 +157,9 @@ function spawnSupervisor(paths: TestPaths): ProcessHandle {
 	return trackProcess(
 		spawn(paths.executablePath, [tsxPath, fixturePath], {
 			cwd: paths.agentDir,
-			env: {
-				...process.env,
+			env: isolatedDaemonProcessEnv({
 				[supervisorRegistryDirEnv]: paths.registryDir,
+				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
 				ENG_4600_AGENT_DIR: paths.agentDir,
 				ENG_4600_DESCRIPTOR_DIR: paths.descriptorDir,
@@ -168,7 +169,7 @@ function spawnSupervisor(paths: TestPaths): ProcessHandle {
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
 				TSX_TSCONFIG_PATH: tsconfigPath,
-			},
+			}),
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		}),
 		"supervisor",
@@ -187,10 +188,10 @@ function spawnStandaloneWorker(
 			[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", workerSocketPath, "--offline"],
 			{
 				cwd: paths.agentDir,
-				env: {
-					...process.env,
+				env: isolatedDaemonProcessEnv({
 					...extraEnv,
 					[supervisorRegistryDirEnv]: paths.registryDir,
+					PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: paths.registryDir,
 					[ENV_AGENT_DIR]: paths.agentDir,
 					[DAEMON_WORKER_ROLE_ENV]: "1",
 					[DAEMON_WORKER_TOKEN_ENV]: token,
@@ -198,7 +199,7 @@ function spawnStandaloneWorker(
 					[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: paths.socketPath,
 					PI_OFFLINE: "1",
 					TSX_TSCONFIG_PATH: tsconfigPath,
-				},
+				}),
 				stdio: ["ignore", "pipe", "pipe"],
 			},
 		),
@@ -686,15 +687,15 @@ async function runCli(
 	const handle = trackProcess(
 		spawn(process.execPath, [tsxPath, cliPath, ...args], {
 			cwd: paths.agentDir,
-			env: {
-				...process.env,
+			env: isolatedDaemonProcessEnv({
 				...extraEnv,
 				[supervisorRegistryDirEnv]: paths.registryDir,
+				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
 				PI_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
 				TSX_TSCONFIG_PATH: tsconfigPath,
-			},
+			}),
 			stdio: ["ignore", "pipe", "pipe"],
 		}),
 		"client",

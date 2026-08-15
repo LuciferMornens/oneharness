@@ -388,6 +388,23 @@ describe("xAI Grok OAuth token refresh", () => {
 		expect(credentials.refresh).toBe("old-refresh");
 	});
 
+	it.each([300, 301])("keeps a %is token usable past issuance instead of expiring immediately", async (expiresIn) => {
+		vi.useFakeTimers();
+		const startTime = new Date("2026-03-09T00:00:00Z");
+		vi.setSystemTime(startTime);
+
+		const fetchMock = vi.fn(async (): Promise<Response> => {
+			return jsonResponse({ access_token: "short-access", refresh_token: "new-refresh", expires_in: expiresIn });
+		});
+
+		vi.stubGlobal("fetch", fetchMock);
+
+		const credentials = await refreshGrokToken("old-refresh");
+		const lifetimeMs = expiresIn * 1000;
+		expect(credentials.expires).toBe(startTime.getTime() + lifetimeMs - lifetimeMs / 2);
+		expect(credentials.expires).toBeGreaterThan(startTime.getTime());
+	});
+
 	it("fails clearly when no refresh token is stored", async () => {
 		await expect(refreshGrokToken("")).rejects.toThrow(/refresh token/);
 	});

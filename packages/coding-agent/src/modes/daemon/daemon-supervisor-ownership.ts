@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+	chmodSync,
 	closeSync,
 	existsSync,
 	fsyncSync,
@@ -432,12 +433,16 @@ class DaemonShutdownAdmission {
 	}
 }
 
-function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
+export function resolveDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
 	return (
 		environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] ??
 		environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ??
 		platformDefaultDaemonSupervisorRegistryDir(environment)
 	);
+}
+
+function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
+	return resolveDaemonSupervisorRegistryDir(environment);
 }
 
 function platformDefaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
@@ -620,13 +625,24 @@ async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action:
 	}
 }
 
+function mkdirPrivateDaemonSupervisorDir(directory: string, recursive = false): void {
+	mkdirSync(directory, { recursive, mode: 0o700 });
+	chmodSync(directory, 0o700);
+}
+
 function ensureSecureDaemonSupervisorRegistryDir(
 	registryDir: string,
 	create: boolean,
 ): UnixRegistryPathIdentity[] | undefined {
+	if (existsSync(registryDir)) {
+		const existing = lstatSync(registryDir);
+		if (existing.isSymbolicLink() || !existing.isDirectory()) {
+			throw new Error(`Insecure daemon supervisor registry path: ${registryDir}`);
+		}
+	}
 	if (process.platform === "win32") {
 		if (create) {
-			mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+			mkdirPrivateDaemonSupervisorDir(registryDir, true);
 		}
 		return undefined;
 	}
@@ -653,7 +669,7 @@ function ensureSecureDaemonSupervisorRegistryDir(
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !create || directory === root) {
 				throw error;
 			}
-			mkdirSync(directory, { mode: 0o700 });
+			mkdirPrivateDaemonSupervisorDir(directory);
 		}
 		const metadata = lstatSync(directory);
 		if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -690,7 +706,9 @@ function resolveUnixRegistryPathForValidation(registryDir: string, uid: number):
 		relativeToTemp === "" ||
 		(!relativeToTemp.startsWith(`..${sep}`) && relativeToTemp !== ".." && !isAbsolute(relativeToTemp));
 	if (!isWithinTrustedTemp) {
-		return resolvedRegistryDir;
+		// Resolve symlinked ancestors (e.g. /var on macOS) so the security walk below
+		// validates the physical chain; the temp branch gets the same via realpath.
+		return canonicalizeDaemonFilesystemPath(resolvedRegistryDir);
 	}
 	const tempRoot = parse(trustedTempBoundary).root;
 	const tempSuffix = trustedTempBoundary.slice(tempRoot.length).split(/[\\/]/u).filter(Boolean);
@@ -818,7 +836,7 @@ export async function acquireDaemonSupervisorOwnership(
 	try {
 		await withDaemonSupervisorRegistryGuards([...admissionRegistryDirs, ...discoveryRegistryDirs], () => {
 			for (const registration of registrations) {
-				mkdirSync(registration.candidateDirectory, { mode: 0o700 });
+				mkdirPrivateDaemonSupervisorDir(registration.candidateDirectory);
 				writeOwnerScope(registration.candidateDirectory, record);
 				writeOwnerRecord(registration.candidateDirectory, record);
 			}
@@ -1185,7 +1203,7 @@ export async function persistDaemonStartupFenceFromOwner(
 	const fenceDirectory = resolve(authoritativeRegistryDir, "startup-fences");
 	const path = startupFencePath(fenceDirectory, socketPath);
 	await withDaemonSupervisorRegistryGuard(authoritativeRegistryDir, () => {
-		mkdirSync(fenceDirectory, { recursive: true, mode: 0o700 });
+		mkdirPrivateDaemonSupervisorDir(fenceDirectory, true);
 		const record: DaemonStartupFenceRecord = {
 			version: OWNER_VERSION,
 			token: randomUUID(),
@@ -1322,7 +1340,7 @@ export async function adoptLegacyDaemonSupervisorOwnershipFromHello(
 		}
 		if (!existingAuthoritative) {
 			const candidateDirectory = resolve(targetRegistryDir, `.candidate-${process.pid}-${randomUUID()}`);
-			mkdirSync(candidateDirectory, { mode: 0o700 });
+			mkdirPrivateDaemonSupervisorDir(candidateDirectory);
 			try {
 				writeOwnerScope(candidateDirectory, upgraded);
 				writeOwnerRecord(candidateDirectory, upgraded);

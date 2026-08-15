@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- Fixed daemon supervisor registry validation rejecting macOS temp paths outside the process temp boundary because `/var` is a symlink, which prevented startup with a selected registry under an insecure ambient temp.
+- Fixed daemon startup fencing inspecting the ambient default registry instead of the selected supervisor registry.
+- Fixed the IPython kernel startup timing out on slow or loaded runners before it could answer the readiness probe.
+- Fixed daemon session workers being left running when launch failed before a process identity was captured.
+- Fixed daemon supervisor registry setup treating a non-directory path as a registry instead of rejecting it.
+- Fixed daemon supervisor registries created under a shared temp directory inheriting umask `0755` and failing the private-directory check.
+- Fixed forced worker stop reporting a partial process-tree failure before detecting that the stop had been relaunched or rescinded.
+- Fixed `--version` printing to stdout before non-interactive stdout takeover, while keeping `--help` on stderr in json and print modes.
+- Fixed daemon shutdown and restart closing the client socket before the success response was written.
+- Fixed Windows shell resolution selecting the WSL System32 bash.exe launcher when Git Bash is not installed.
+- Fixed PowerShell shell detection treating Windows `pwsh.exe` paths as non-PowerShell on non-Windows hosts.
+- Fixed explicit daemon shutdown leaving resident session files active instead of archived.
 - Changed ChatGPT subscription GPT models that support `/fast` (GPT-5.4, GPT-5.5, GPT-5.6) to default to fast mode when no service-tier preference is saved.
 - Fixed the agents view failing to refresh heartbeats forever once any session worker entered the terminal failed state; failed workers are now skipped when aggregating heartbeats.
 - Added xAI Grok subscription login via `/login`, letting SuperGrok and X Premium+ subscribers use Grok models under the new `grok` provider without an xAI API key.

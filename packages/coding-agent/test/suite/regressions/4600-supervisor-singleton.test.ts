@@ -17,18 +17,22 @@ import { afterEach, describe, expect, it } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR, getCronJobsPath } from "../../../src/config.js";
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
-import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { DaemonClient, DaemonSocketClosedError } from "../../../src/modes/daemon/daemon-client.js";
 import { canonicalizeDaemonFilesystemPath } from "../../../src/modes/daemon/daemon-paths.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import {
 	acquireDaemonSupervisorOwnership,
 	adoptLegacyDaemonSupervisorOwnershipFromHello,
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
 	listDaemonSupervisorAgentDirs,
 	listDaemonSupervisorProcesses,
 	persistDaemonStartupFenceFromOwner,
+	resolveDaemonSupervisorRegistryDir,
 	waitForDaemonStartupFence,
 } from "../../../src/modes/daemon/daemon-supervisor-ownership.js";
 import { terminateWindowsProcessTreeByIdentity } from "../../../src/utils/child-process.js";
+import { isolatedDaemonProcessEnv } from "../../isolated-daemon-env.js";
 import { createHarness, type Harness } from "../harness.js";
 
 type FixtureMessage =
@@ -79,6 +83,7 @@ const cliPath = resolve(__dirname, "../../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
 const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorSelectedRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR";
 const handles = new Set<FixtureHandle>();
 const harnesses: Harness[] = [];
 const cleanupProcesses = new Map<string, CleanupProcessIdentity>();
@@ -134,8 +139,7 @@ function spawnFixture(
 	paths: { agentDir: string; descriptorDir: string; registryDir: string; socketPath: string },
 	options: { extraEnv?: NodeJS.ProcessEnv; generation?: string; useDefaultRegistry?: boolean } = {},
 ): FixtureHandle {
-	const environment: NodeJS.ProcessEnv = {
-		...process.env,
+	const environment: NodeJS.ProcessEnv = isolatedDaemonProcessEnv({
 		...options.extraEnv,
 		[ENV_AGENT_DIR]: paths.agentDir,
 		ENG_4600_AGENT_DIR: paths.agentDir,
@@ -145,12 +149,14 @@ function spawnFixture(
 		ENG_4600_SOCKET_PATH: paths.socketPath,
 		PI_OFFLINE: "1",
 		TSX_TSCONFIG_PATH: tsconfigPath,
-	};
+	});
 	if (options.useDefaultRegistry) {
 		delete environment[supervisorRegistryDirEnv];
+		delete environment[supervisorSelectedRegistryDirEnv];
 		environment.ENG_4600_PROBE_BEFORE_RELEASE = "1";
 	} else {
 		environment[supervisorRegistryDirEnv] = paths.registryDir;
+		environment[supervisorSelectedRegistryDirEnv] = paths.registryDir;
 		environment.ENG_4600_REGISTRY_DIR = paths.registryDir;
 	}
 	const child = spawn(process.execPath, [tsxPath, fixturePath], {
@@ -180,17 +186,18 @@ function spawnRealSupervisor(
 	extraEnv: NodeJS.ProcessEnv,
 	useDefaultRegistry = false,
 ): FixtureHandle {
-	const environment: NodeJS.ProcessEnv = {
-		...process.env,
+	const environment: NodeJS.ProcessEnv = isolatedDaemonProcessEnv({
 		...extraEnv,
 		[ENV_AGENT_DIR]: paths.agentDir,
 		PI_OFFLINE: "1",
 		TSX_TSCONFIG_PATH: tsconfigPath,
-	};
+	});
 	if (useDefaultRegistry) {
 		delete environment[supervisorRegistryDirEnv];
+		delete environment[supervisorSelectedRegistryDirEnv];
 	} else {
 		environment[supervisorRegistryDirEnv] = paths.registryDir;
+		environment[supervisorSelectedRegistryDirEnv] = paths.registryDir;
 	}
 	const child = spawn(
 		process.execPath,
@@ -280,10 +287,14 @@ async function createPaths(): Promise<{
 }> {
 	const harness = await createHarness();
 	harnesses.push(harness);
+	const registryDir = join(harness.tempDir, "registry");
+	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+	chmodSync(harness.tempDir, 0o700);
+	chmodSync(registryDir, 0o700);
 	return {
 		agentDir: harness.tempDir,
 		descriptorDir: join(harness.tempDir, "workers"),
-		registryDir: join(harness.tempDir, "registry"),
+		registryDir,
 		socketPath:
 			process.platform === "win32"
 				? `\\\\.\\pipe\\prime-agent-eng-4600-${process.pid}-${Date.now()}`
@@ -302,10 +313,16 @@ async function assertConnectable(socketPath: string): Promise<void> {
 	});
 }
 
-async function connectEventually(socketPath: string): Promise<DaemonClient> {
+async function connectEventually(socketPath: string, supervisor?: FixtureHandle): Promise<DaemonClient> {
 	const deadline = Date.now() + 30_000;
 	let lastError: unknown;
 	while (Date.now() < deadline) {
+		if (supervisor && (supervisor.child.exitCode !== null || supervisor.child.signalCode !== null)) {
+			throw new Error(
+				`Replacement supervisor exited before accepting connections ` +
+					`(exit=${supervisor.child.exitCode}/${supervisor.child.signalCode})\n${supervisor.diagnostics.stderr}`,
+			);
+		}
 		const client = new DaemonClient(socketPath);
 		try {
 			await client.connect(500);
@@ -317,7 +334,10 @@ async function connectEventually(socketPath: string): Promise<DaemonClient> {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
 		}
 	}
-	throw new Error(`Timed out connecting to replacement supervisor: ${String(lastError)}`);
+	throw new Error(
+		`Timed out connecting to replacement supervisor: ${String(lastError)}` +
+			(supervisor ? `\nSupervisor stderr:\n${supervisor.diagnostics.stderr}` : ""),
+	);
 }
 
 function waitForConnectionStatus(
@@ -577,6 +597,10 @@ async function stopSupervisor(handle: FixtureHandle, socketPath: string): Promis
 		await client.connect(1000);
 		await client.waitForHello(2000);
 		await client.request({ type: "shutdown" }, 5000);
+	} catch (error) {
+		if (!(error instanceof DaemonSocketClosedError) || error.daemonClosingReason !== "shutdown") {
+			throw error;
+		}
 	} finally {
 		client.close();
 	}
@@ -617,6 +641,69 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		await releaseOwnershipHolder(owner);
 	});
 
+	it("resolves the selected supervisor registry ahead of the ambient default", () => {
+		const selected = join("selected-registry");
+		const inherited = join("inherited-registry");
+		expect(
+			resolveDaemonSupervisorRegistryDir({
+				[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV]: selected,
+				[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]: inherited,
+			}),
+		).toBe(selected);
+		expect(
+			resolveDaemonSupervisorRegistryDir({
+				[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]: inherited,
+			}),
+		).toBe(inherited);
+	});
+
+	it("waits for startup fences in the selected registry without validating an insecure ambient default", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const paths = await createPaths();
+		const insecureAncestor = join(paths.agentDir, "insecure-ambient");
+		const ambientRegistry = join(insecureAncestor, "supervisor-owners");
+		mkdirSync(ambientRegistry, { recursive: true, mode: 0o777 });
+		chmodSync(insecureAncestor, 0o777);
+		await expect(waitForDaemonStartupFence(paths.socketPath, 50, ambientRegistry)).rejects.toThrow(
+			/Insecure daemon supervisor registry/,
+		);
+		await expect(waitForDaemonStartupFence(paths.socketPath, 50, paths.registryDir)).resolves.toBeUndefined();
+	});
+
+	it("starts a supervisor from a selected registry when the ambient temp default is insecure", async () => {
+		const paths = await createPaths();
+		const insecureTemp = join(paths.agentDir, "insecure-temp");
+		mkdirSync(insecureTemp, { recursive: true, mode: 0o755 });
+		chmodSync(insecureTemp, 0o755);
+		const stateHome = join(paths.agentDir, "xdg-state");
+		mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+		chmodSync(stateHome, 0o700);
+		cleanupRegistryDirs.add(paths.registryDir);
+		cleanupSupervisorSockets.add(paths.socketPath);
+		const supervisor = spawnRealSupervisor(
+			paths,
+			{
+				LOCALAPPDATA: join(paths.agentDir, "local-app-data-selected"),
+				TEMP: insecureTemp,
+				TMP: insecureTemp,
+				TMPDIR: insecureTemp,
+				XDG_STATE_HOME: stateHome,
+			},
+			false,
+		);
+		let client: DaemonClient | undefined;
+		try {
+			client = await connectEventually(paths.socketPath, supervisor);
+			expect(listOwnerRecords(paths.registryDir)).toHaveLength(1);
+			await client.request({ type: "shutdown", force: true }, 5000);
+			await waitForExit(supervisor);
+		} finally {
+			client?.close();
+		}
+	}, 90_000);
+
 	it("keeps a live Windows supervisor commandable after its OS temp root is deleted", async () => {
 		if (process.platform !== "win32") {
 			return;
@@ -640,7 +727,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		);
 		let client: DaemonClient | undefined;
 		try {
-			client = await connectEventually(paths.socketPath);
+			client = await connectEventually(paths.socketPath, supervisor);
 			expect(listOwnerRecords(durableRegistryDir)).toHaveLength(1);
 			rmSync(osTempRoot, { recursive: true, force: true });
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
@@ -703,7 +790,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		let client: DaemonClient | undefined;
 		let connection: DaemonAgentConnection | undefined;
 		try {
-			client = await connectEventually(paths.socketPath);
+			client = await connectEventually(paths.socketPath, predecessor);
 			let created: Awaited<ReturnType<DaemonClient["request"]>>;
 			try {
 				created = await client.request(
@@ -1176,6 +1263,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 
 		const insecureAncestor = join(paths.agentDir, "insecure-ancestor");
 		mkdirSync(insecureAncestor, { mode: 0o777 });
+		chmodSync(insecureAncestor, 0o777);
 		await expect(listDaemonSupervisorProcesses(join(insecureAncestor, "registry"))).rejects.toThrow(
 			/Insecure daemon supervisor registry/,
 		);
@@ -1283,7 +1371,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		delete scope.agentDir;
 		writeFileSync(ownerScopePath(paths.registryDir, owner.generation), JSON.stringify(scope));
 
-		const client = await connectEventually(paths.socketPath);
+		const client = await connectEventually(paths.socketPath, supervisor);
 		try {
 			const hello = await client.waitForHello(2000);
 			const { supervisorProcessStartId: _helloProcessStartId, ...legacyHello } = hello;

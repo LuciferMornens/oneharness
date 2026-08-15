@@ -115,6 +115,7 @@ import {
 	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
 	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
 	isDaemonShutdownAdmissionActive,
+	resolveDaemonSupervisorRegistryDir,
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
 import { DaemonWorkerClient } from "./daemon-worker-client.js";
@@ -666,7 +667,10 @@ export class DaemonSupervisor {
 				throw new Error("Daemon supervisor config is missing agentDir");
 			}
 			this.socketLease = await acquireDaemonSocketPathLease(this.socketPath);
-			await waitForDaemonStartupFence(this.socketPath);
+			const supervisorRegistryDir = resolveDaemonSupervisorRegistryDir();
+			const selectedRegistryDir =
+				process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] ?? process.env[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+			await waitForDaemonStartupFence(this.socketPath, 10_000, supervisorRegistryDir);
 			this.ownership = await acquireDaemonSupervisorOwnership({
 				socketPath: this.socketPath,
 				descriptorDir: this.descriptorDir,
@@ -674,6 +678,7 @@ export class DaemonSupervisor {
 				generation: this.generation,
 				appVersion: VERSION,
 				preserveLegacyWindowsWorkerOwnership: this.hasPersistedWorkerDescriptors(),
+				...(selectedRegistryDir ? { registryDir: supervisorRegistryDir } : {}),
 			});
 			await prepareDaemonSocketPath(this.socketPath, this.socketLease);
 
@@ -1435,6 +1440,7 @@ export class DaemonSupervisor {
 					this.commandJournal.recordResult(journalIdentity.clientId, journalIdentity.commandId, response);
 				}
 				this.write(client, response);
+				this.scheduleSupervisorCloseAfterResponse(command);
 			}
 		} catch (error) {
 			this.log(`Supervisor command ${command.type} failed: ${error instanceof Error ? error.stack : String(error)}`);
@@ -1660,10 +1666,8 @@ export class DaemonSupervisor {
 				return success(command.id, command.type, summary ? this.publicSummary(worker, summary) : undefined);
 			}
 			case "restart":
-				setImmediate(() => void this.shutdown(0, false, true, false, "update"));
 				return success(command.id, command.type);
 			case "shutdown":
-				setImmediate(() => void this.shutdown(0, true, false, command.force === true, "shutdown"));
 				return success(command.id, "shutdown");
 			case "prepare_update_restart": {
 				const manifest = await this.prepareUpdateRestart();
@@ -2378,6 +2382,9 @@ export class DaemonSupervisor {
 		} catch (error) {
 			if (startupGate instanceof Writable) {
 				startupGate.destroy();
+			}
+			if (child.exitCode === null && child.signalCode === null) {
+				child.kill("SIGKILL");
 			}
 			await childClosed;
 			child.unref();
@@ -4985,8 +4992,6 @@ export class DaemonSupervisor {
 				const result = await terminateUnixProcessGroupByIdentity(entryPid, entryStartId, getProcessStartId);
 				exactTreeTerminationFailed = result === "failed";
 				sigkillSent = result === "terminated";
-			} else {
-				exactTreeTerminationFailed = true;
 			}
 			const forceDeadline = Date.now() + 1000;
 			while (isWorkerProcessAlive() && Date.now() < forceDeadline) {
@@ -4994,6 +4999,7 @@ export class DaemonSupervisor {
 			}
 		}
 		if (exactTreeTerminationFailed) {
+			assertStopStillApplies();
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
 			if (removeDescriptor) {
 				this.scheduleWorkerStopFinalization(worker);
@@ -5003,6 +5009,7 @@ export class DaemonSupervisor {
 			);
 		}
 		if (isWorkerProcessAlive()) {
+			assertStopStillApplies();
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
 			if (removeDescriptor) {
 				this.scheduleWorkerStopFinalization(worker);
@@ -5260,6 +5267,16 @@ export class DaemonSupervisor {
 		return this.writeSerialized(client, serializeJsonLine(message));
 	}
 
+	private scheduleSupervisorCloseAfterResponse(command: DaemonCommand): void {
+		if (command.type === "shutdown") {
+			setImmediate(() => void this.shutdown(0, true, false, command.force === true, "shutdown"));
+			return;
+		}
+		if (command.type === "restart") {
+			setImmediate(() => void this.shutdown(0, false, true, false, "update"));
+		}
+	}
+
 	private broadcastHeartbeatsChanged(): void {
 		for (const client of this.clients) {
 			this.write(client, { type: "heartbeats_changed" });
@@ -5425,7 +5442,7 @@ export class DaemonSupervisor {
 			await Promise.all(
 				[...this.workers.values()].map(async (worker) => {
 					try {
-						await this.stopWorker(worker, true, forceWorkers);
+						await this.stopWorker(worker, true, forceWorkers, worker.descriptor.ownerClientId === undefined);
 					} catch (error) {
 						if (!(error instanceof WorkerStopTimeoutError)) {
 							throw error;

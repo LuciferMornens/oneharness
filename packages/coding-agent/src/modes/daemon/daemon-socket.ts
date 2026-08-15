@@ -147,7 +147,9 @@ function readWindowsDaemonSocketCandidates(
 				hasLiveResidentWorkers: hasLiveResidentWorker(descriptorDir, config.socketPath),
 				hasLiveListener: isWindowsNamedPipePresent(config.socketPath),
 			});
-		} catch {}
+		} catch {
+			// Skip unreadable or corrupt supervisor descriptors during discovery.
+		}
 	}
 	return candidates;
 }
@@ -213,7 +215,9 @@ function hasLiveResidentWorker(descriptorDir: string, supervisorSocketPath: stri
 			) {
 				return true;
 			}
-		} catch {}
+		} catch {
+			// Skip unreadable or corrupt worker descriptors when probing liveness.
+		}
 	}
 	return false;
 }

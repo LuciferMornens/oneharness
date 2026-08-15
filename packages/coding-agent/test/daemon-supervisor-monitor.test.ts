@@ -1,6 +1,15 @@
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,7 +124,9 @@ vi.mock("../src/core/session-lease.js", async (importOriginal) => {
 });
 
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorSelectedRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR";
 const previousSupervisorRegistryDir = process.env[supervisorRegistryDirEnv];
+const previousSupervisorSelectedRegistryDir = process.env[supervisorSelectedRegistryDirEnv];
 const supervisorRegistryDirs = new Set<string>();
 
 interface SupervisorMonitorHarness {
@@ -263,6 +274,7 @@ function createHarness(canConnect: () => Promise<boolean>): SupervisorMonitorHar
 	const registryDir = mkdtempSync(join(tmpdir(), "prime-supervisor-registry-test-"));
 	supervisorRegistryDirs.add(registryDir);
 	process.env[supervisorRegistryDirEnv] = registryDir;
+	process.env[supervisorSelectedRegistryDirEnv] = registryDir;
 	return Object.assign(Object.create(AgentDaemon.prototype), {
 		options: { worker: {} },
 		clients: new Set<{ authenticated: boolean }>(),
@@ -298,6 +310,11 @@ describe("daemon worker supervisor monitoring", () => {
 			delete process.env[supervisorRegistryDirEnv];
 		} else {
 			process.env[supervisorRegistryDirEnv] = previousSupervisorRegistryDir;
+		}
+		if (previousSupervisorSelectedRegistryDir === undefined) {
+			delete process.env[supervisorSelectedRegistryDirEnv];
+		} else {
+			process.env[supervisorSelectedRegistryDirEnv] = previousSupervisorSelectedRegistryDir;
 		}
 	});
 
@@ -534,6 +551,7 @@ describe("daemon worker supervisor monitoring", () => {
 		mkdirSync(registryDir, { recursive: true });
 		supervisorRegistryDirs.add(root);
 		process.env[supervisorRegistryDirEnv] = registryDir;
+		process.env[supervisorSelectedRegistryDirEnv] = registryDir;
 		let assertionCount = 0;
 		const workers = new Map<string, unknown>();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
@@ -771,7 +789,7 @@ describe("daemon worker supervisor monitoring", () => {
 		mkdirSync(descriptorDir, { recursive: true });
 		supervisorRegistryDirs.add(root);
 		workerLaunchTestState.capture = true;
-		workerLaunchTestState.forceMissingProcessStartId = process.platform !== "win32";
+		workerLaunchTestState.forceMissingProcessStartId = false;
 		workerLaunchTestState.fixtureMode = "successful-gate";
 		workerLaunchTestState.gateMarkerPath = markerPath;
 		const cancellation = recoveryDeniedError("supervisor_recovery_cancelled");
@@ -1097,6 +1115,7 @@ describe("daemon worker supervisor monitoring", () => {
 
 		rmSync(registryDir, { force: true });
 		mkdirSync(registryDir, { recursive: true });
+		chmodSync(registryDir, 0o700);
 		await vi.advanceTimersByTimeAsync(5000);
 		await probeCompleted;
 		expect(daemon.canConnectToSupervisor).toHaveBeenCalledOnce();
@@ -3426,6 +3445,9 @@ describe("daemon worker supervisor monitoring", () => {
 		};
 		const markInterrupted = vi.fn(async () => undefined);
 		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		const reapSpy = vi
+			.spyOn(childProcessModule, "terminateUnixProcessGroupByIdentity")
+			.mockResolvedValue("terminated");
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			catalog: { markInterrupted },
 			log: vi.fn(),
@@ -3452,6 +3474,7 @@ describe("daemon worker supervisor monitoring", () => {
 			);
 		} finally {
 			kill.mockRestore();
+			reapSpy.mockRestore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -3642,6 +3665,13 @@ describe("daemon worker supervisor monitoring", () => {
 
 	it("limits abort admission to mutation drain", async () => {
 		const root = mkdtempSync(join(tmpdir(), `prime-update-drain-${process.pid}-`));
+		chmodSync(root, 0o700);
+		const registryDir = join(root, "supervisor-owners");
+		mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+		chmodSync(registryDir, 0o700);
+		supervisorRegistryDirs.add(registryDir);
+		process.env[supervisorRegistryDirEnv] = registryDir;
+		process.env[supervisorSelectedRegistryDirEnv] = registryDir;
 		const socketPath =
 			process.platform === "win32"
 				? `\\\\.\\pipe\\prime-agent-update-drain-${process.pid}-${Date.now()}`
@@ -3688,5 +3718,89 @@ describe("daemon worker supervisor monitoring", () => {
 
 		await expect(supervisor.prepareUpdateRestartFenced()).rejects.toThrow(/resident-1.*recovering.*disconnected/);
 		expect(requestWorker).not.toHaveBeenCalled();
+	});
+
+	it("writes shutdown success before scheduling daemon_closing", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-shutdown-order-"));
+		const commandJournal = new CommandRecoveryJournal(join(root, "commands.jsonl"));
+		const writes: string[] = [];
+		const shutdown = vi.fn(async () => undefined);
+		const client = {
+			id: "socket-client",
+			socket: {
+				destroyed: false,
+				write: vi.fn((chunk: string) => {
+					writes.push(chunk);
+					return true;
+				}),
+			},
+		} as unknown as DaemonSocketClient;
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			ready: Promise.resolve(),
+			workers: new Map(),
+			protocolClientIds: new WeakMap(),
+			commandJournal,
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			assertCurrentOwnership: vi.fn(async () => undefined),
+			cancelOwnedWorkerCleanup: vi.fn(),
+			shutdown,
+		}) as unknown as {
+			handleLine(client: DaemonSocketClient, line: string): Promise<void>;
+		};
+
+		try {
+			await supervisor.handleLine(
+				client,
+				JSON.stringify(createDaemonCommandEnvelope({ type: "shutdown" }, "command-shutdown", "client-1")),
+			);
+			expect(writes).toEqual([`${JSON.stringify(success("command-shutdown", "shutdown"))}\n`]);
+			expect(shutdown).not.toHaveBeenCalled();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(shutdown).toHaveBeenCalledWith(0, true, false, false, "shutdown");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("writes restart success before scheduling an update close", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-restart-order-"));
+		const commandJournal = new CommandRecoveryJournal(join(root, "commands.jsonl"));
+		const writes: string[] = [];
+		const shutdown = vi.fn(async () => undefined);
+		const client = {
+			id: "socket-client",
+			socket: {
+				destroyed: false,
+				write: vi.fn((chunk: string) => {
+					writes.push(chunk);
+					return true;
+				}),
+			},
+		} as unknown as DaemonSocketClient;
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			ready: Promise.resolve(),
+			workers: new Map(),
+			protocolClientIds: new WeakMap(),
+			commandJournal,
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			assertCurrentOwnership: vi.fn(async () => undefined),
+			cancelOwnedWorkerCleanup: vi.fn(),
+			shutdown,
+		}) as unknown as {
+			handleLine(client: DaemonSocketClient, line: string): Promise<void>;
+		};
+
+		try {
+			await supervisor.handleLine(
+				client,
+				JSON.stringify(createDaemonCommandEnvelope({ type: "restart" }, "command-restart", "client-1")),
+			);
+			expect(writes).toEqual([`${JSON.stringify(success("command-restart", "restart"))}\n`]);
+			expect(shutdown).not.toHaveBeenCalled();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(shutdown).toHaveBeenCalledWith(0, false, true, false, "update");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

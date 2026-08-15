@@ -101,7 +101,7 @@ describe("process liveness", () => {
 			process.execPath,
 			[
 				"--eval",
-				'const { spawn } = require("node:child_process"); const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); process.stdout.write(String(child.pid));',
+				'const { spawn } = require("node:child_process"); const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); child.unref(); process.stdout.write(String(child.pid));',
 			],
 			{ detached: true, stdio: ["ignore", "pipe", "ignore"] },
 		);
