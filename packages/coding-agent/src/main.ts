@@ -1071,6 +1071,14 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("parseArgs");
+	if (parsed.version) {
+		console.log(VERSION);
+		process.exit(0);
+	}
+	if (parsed.help) {
+		console.log(formatTopLevelHelp());
+		process.exit(0);
+	}
 	const appMode = resolveAppMode(parsed, process.stdin.isTTY);
 
 	if (shouldRejectNonInteractiveAttach(publicCommand.attachAgent, appMode)) {
@@ -1087,15 +1095,6 @@ export async function main(args: string[], options?: MainOptions) {
 	const shouldTakeOverStdout = appMode !== "interactive";
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
-	}
-
-	if (parsed.version) {
-		console.log(VERSION);
-		process.exit(0);
-	}
-	if (parsed.help) {
-		console.log(formatTopLevelHelp());
-		process.exit(0);
 	}
 
 	if (parsed.export) {

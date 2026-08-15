@@ -17,7 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR, getCronJobsPath } from "../../../src/config.js";
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
-import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { DaemonClient, DaemonSocketClosedError } from "../../../src/modes/daemon/daemon-client.js";
 import { canonicalizeDaemonFilesystemPath } from "../../../src/modes/daemon/daemon-paths.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
 import {
@@ -29,6 +29,7 @@ import {
 	waitForDaemonStartupFence,
 } from "../../../src/modes/daemon/daemon-supervisor-ownership.js";
 import { terminateWindowsProcessTreeByIdentity } from "../../../src/utils/child-process.js";
+import { isolatedDaemonProcessEnv } from "../../isolated-daemon-env.js";
 import { createHarness, type Harness } from "../harness.js";
 
 type FixtureMessage =
@@ -135,8 +136,7 @@ function spawnFixture(
 	paths: { agentDir: string; descriptorDir: string; registryDir: string; socketPath: string },
 	options: { extraEnv?: NodeJS.ProcessEnv; generation?: string; useDefaultRegistry?: boolean } = {},
 ): FixtureHandle {
-	const environment: NodeJS.ProcessEnv = {
-		...process.env,
+	const environment: NodeJS.ProcessEnv = isolatedDaemonProcessEnv({
 		...options.extraEnv,
 		[ENV_AGENT_DIR]: paths.agentDir,
 		ENG_4600_AGENT_DIR: paths.agentDir,
@@ -146,7 +146,7 @@ function spawnFixture(
 		ENG_4600_SOCKET_PATH: paths.socketPath,
 		PI_OFFLINE: "1",
 		TSX_TSCONFIG_PATH: tsconfigPath,
-	};
+	});
 	if (options.useDefaultRegistry) {
 		delete environment[supervisorRegistryDirEnv];
 		delete environment[supervisorSelectedRegistryDirEnv];
@@ -183,13 +183,12 @@ function spawnRealSupervisor(
 	extraEnv: NodeJS.ProcessEnv,
 	useDefaultRegistry = false,
 ): FixtureHandle {
-	const environment: NodeJS.ProcessEnv = {
-		...process.env,
+	const environment: NodeJS.ProcessEnv = isolatedDaemonProcessEnv({
 		...extraEnv,
 		[ENV_AGENT_DIR]: paths.agentDir,
 		PI_OFFLINE: "1",
 		TSX_TSCONFIG_PATH: tsconfigPath,
-	};
+	});
 	if (useDefaultRegistry) {
 		delete environment[supervisorRegistryDirEnv];
 		delete environment[supervisorSelectedRegistryDirEnv];
@@ -586,6 +585,10 @@ async function stopSupervisor(handle: FixtureHandle, socketPath: string): Promis
 		await client.connect(1000);
 		await client.waitForHello(2000);
 		await client.request({ type: "shutdown" }, 5000);
+	} catch (error) {
+		if (!(error instanceof DaemonSocketClosedError) || error.daemonClosingReason !== "shutdown") {
+			throw error;
+		}
 	} finally {
 		client.close();
 	}

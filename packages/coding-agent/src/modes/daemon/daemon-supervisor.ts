@@ -5428,7 +5428,7 @@ export class DaemonSupervisor {
 			await Promise.all(
 				[...this.workers.values()].map(async (worker) => {
 					try {
-						await this.stopWorker(worker, true, forceWorkers);
+						await this.stopWorker(worker, true, forceWorkers, worker.descriptor.ownerClientId === undefined);
 					} catch (error) {
 						if (!(error instanceof WorkerStopTimeoutError)) {
 							throw error;
