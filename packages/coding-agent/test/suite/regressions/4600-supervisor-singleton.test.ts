@@ -23,9 +23,12 @@ import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-li
 import {
 	acquireDaemonSupervisorOwnership,
 	adoptLegacyDaemonSupervisorOwnershipFromHello,
+	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
+	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
 	listDaemonSupervisorAgentDirs,
 	listDaemonSupervisorProcesses,
 	persistDaemonStartupFenceFromOwner,
+	resolveDaemonSupervisorRegistryDir,
 	waitForDaemonStartupFence,
 } from "../../../src/modes/daemon/daemon-supervisor-ownership.js";
 import { terminateWindowsProcessTreeByIdentity } from "../../../src/utils/child-process.js";
@@ -627,6 +630,69 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 			await waitForMessage(owner, (message) => message.type === "probe_ack" || message.type === "failed"),
 		).toMatchObject({ type: "probe_ack" });
 		await releaseOwnershipHolder(owner);
+	});
+
+	it("resolves the selected supervisor registry ahead of the ambient default", () => {
+		const selected = join("selected-registry");
+		const inherited = join("inherited-registry");
+		expect(
+			resolveDaemonSupervisorRegistryDir({
+				[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV]: selected,
+				[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]: inherited,
+			}),
+		).toBe(selected);
+		expect(
+			resolveDaemonSupervisorRegistryDir({
+				[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]: inherited,
+			}),
+		).toBe(inherited);
+	});
+
+	it("waits for startup fences in the selected registry without validating an insecure ambient default", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const paths = await createPaths();
+		const insecureAncestor = join(paths.agentDir, "insecure-ambient");
+		const ambientRegistry = join(insecureAncestor, "supervisor-owners");
+		mkdirSync(ambientRegistry, { recursive: true, mode: 0o777 });
+		chmodSync(insecureAncestor, 0o777);
+		await expect(waitForDaemonStartupFence(paths.socketPath, 50, ambientRegistry)).rejects.toThrow(
+			/Insecure daemon supervisor registry/,
+		);
+		await expect(waitForDaemonStartupFence(paths.socketPath, 50, paths.registryDir)).resolves.toBeUndefined();
+	});
+
+	it("starts a supervisor from a selected registry when the ambient temp default is insecure", async () => {
+		const paths = await createPaths();
+		const insecureTemp = join(paths.agentDir, "insecure-temp");
+		mkdirSync(insecureTemp, { recursive: true, mode: 0o755 });
+		chmodSync(insecureTemp, 0o755);
+		const stateHome = join(paths.agentDir, "xdg-state");
+		mkdirSync(stateHome, { recursive: true, mode: 0o700 });
+		chmodSync(stateHome, 0o700);
+		cleanupRegistryDirs.add(paths.registryDir);
+		cleanupSupervisorSockets.add(paths.socketPath);
+		const supervisor = spawnRealSupervisor(
+			paths,
+			{
+				LOCALAPPDATA: join(paths.agentDir, "local-app-data-selected"),
+				TEMP: insecureTemp,
+				TMP: insecureTemp,
+				TMPDIR: insecureTemp,
+				XDG_STATE_HOME: stateHome,
+			},
+			false,
+		);
+		let client: DaemonClient | undefined;
+		try {
+			client = await connectEventually(paths.socketPath);
+			expect(listOwnerRecords(paths.registryDir)).toHaveLength(1);
+			await client.request({ type: "shutdown", force: true }, 5000);
+			await waitForExit(supervisor);
+		} finally {
+			client?.close();
+		}
 	});
 
 	it("keeps a live Windows supervisor commandable after its OS temp root is deleted", async () => {

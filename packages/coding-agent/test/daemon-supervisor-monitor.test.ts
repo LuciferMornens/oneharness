@@ -3665,6 +3665,13 @@ describe("daemon worker supervisor monitoring", () => {
 
 	it("limits abort admission to mutation drain", async () => {
 		const root = mkdtempSync(join(tmpdir(), `prime-update-drain-${process.pid}-`));
+		chmodSync(root, 0o700);
+		const registryDir = join(root, "supervisor-owners");
+		mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+		chmodSync(registryDir, 0o700);
+		supervisorRegistryDirs.add(registryDir);
+		process.env[supervisorRegistryDirEnv] = registryDir;
+		process.env[supervisorSelectedRegistryDirEnv] = registryDir;
 		const socketPath =
 			process.platform === "win32"
 				? `\\\\.\\pipe\\prime-agent-update-drain-${process.pid}-${Date.now()}`

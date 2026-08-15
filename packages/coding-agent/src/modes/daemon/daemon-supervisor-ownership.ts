@@ -433,12 +433,16 @@ class DaemonShutdownAdmission {
 	}
 }
 
-function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
+export function resolveDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
 	return (
 		environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] ??
 		environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ??
 		platformDefaultDaemonSupervisorRegistryDir(environment)
 	);
+}
+
+function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
+	return resolveDaemonSupervisorRegistryDir(environment);
 }
 
 function platformDefaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {

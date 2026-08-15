@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed daemon startup fencing inspecting the ambient default registry instead of the selected supervisor registry.
 - Fixed daemon session workers being left running when launch failed before a process identity was captured.
 - Fixed daemon supervisor registry setup treating a non-directory path as a registry instead of rejecting it.
 - Fixed daemon supervisor registries created under a shared temp directory inheriting umask `0755` and failing the private-directory check.

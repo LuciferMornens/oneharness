@@ -115,6 +115,7 @@ import {
 	DAEMON_SUPERVISOR_REGISTRY_DIR_ENV,
 	DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV,
 	isDaemonShutdownAdmissionActive,
+	resolveDaemonSupervisorRegistryDir,
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
 import { DaemonWorkerClient } from "./daemon-worker-client.js";
@@ -666,7 +667,10 @@ export class DaemonSupervisor {
 				throw new Error("Daemon supervisor config is missing agentDir");
 			}
 			this.socketLease = await acquireDaemonSocketPathLease(this.socketPath);
-			await waitForDaemonStartupFence(this.socketPath);
+			const supervisorRegistryDir = resolveDaemonSupervisorRegistryDir();
+			const selectedRegistryDir =
+				process.env[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] ?? process.env[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+			await waitForDaemonStartupFence(this.socketPath, 10_000, supervisorRegistryDir);
 			this.ownership = await acquireDaemonSupervisorOwnership({
 				socketPath: this.socketPath,
 				descriptorDir: this.descriptorDir,
@@ -674,6 +678,7 @@ export class DaemonSupervisor {
 				generation: this.generation,
 				appVersion: VERSION,
 				preserveLegacyWindowsWorkerOwnership: this.hasPersistedWorkerDescriptors(),
+				...(selectedRegistryDir ? { registryDir: supervisorRegistryDir } : {}),
 			});
 			await prepareDaemonSocketPath(this.socketPath, this.socketLease);
 
