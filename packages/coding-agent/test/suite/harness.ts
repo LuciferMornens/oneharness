@@ -244,10 +244,21 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		cleanup() {
 			session.dispose();
 			fauxProvider.unregister();
-			if (existsSync(tempDir)) {
-				// Spawned fixture processes may still be flushing their final registry
-				// writes; retry briefly instead of failing the suite on ENOTEMPTY.
-				rmSync(tempDir, { recursive: true, force: true, maxRetries: 40, retryDelay: 50 });
+			if (!existsSync(tempDir)) {
+				return;
+			}
+			// Spawned fixture processes may still hold the temp tree after exit
+			// (Windows EBUSY, Linux ENOTEMPTY). Retry instead of failing the suite.
+			for (let attempt = 0; attempt < 50; attempt++) {
+				try {
+					rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+					return;
+				} catch (error) {
+					const code = (error as NodeJS.ErrnoException).code;
+					if (code !== "EBUSY" && code !== "ENOTEMPTY" && code !== "ENOENT") {
+						throw error;
+					}
+				}
 			}
 		},
 	};

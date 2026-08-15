@@ -285,10 +285,14 @@ async function createPaths(): Promise<{
 }> {
 	const harness = await createHarness();
 	harnesses.push(harness);
+	const registryDir = join(harness.tempDir, "registry");
+	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+	chmodSync(harness.tempDir, 0o700);
+	chmodSync(registryDir, 0o700);
 	return {
 		agentDir: harness.tempDir,
 		descriptorDir: join(harness.tempDir, "workers"),
-		registryDir: join(harness.tempDir, "registry"),
+		registryDir,
 		socketPath:
 			process.platform === "win32"
 				? `\\\\.\\pipe\\prime-agent-eng-4600-${process.pid}-${Date.now()}`
@@ -1181,6 +1185,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 
 		const insecureAncestor = join(paths.agentDir, "insecure-ancestor");
 		mkdirSync(insecureAncestor, { mode: 0o777 });
+		chmodSync(insecureAncestor, 0o777);
 		await expect(listDaemonSupervisorProcesses(join(insecureAncestor, "registry"))).rejects.toThrow(
 			/Insecure daemon supervisor registry/,
 		);

@@ -1,6 +1,15 @@
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1106,6 +1115,7 @@ describe("daemon worker supervisor monitoring", () => {
 
 		rmSync(registryDir, { force: true });
 		mkdirSync(registryDir, { recursive: true });
+		chmodSync(registryDir, 0o700);
 		await vi.advanceTimersByTimeAsync(5000);
 		await probeCompleted;
 		expect(daemon.canConnectToSupervisor).toHaveBeenCalledOnce();
@@ -3435,6 +3445,9 @@ describe("daemon worker supervisor monitoring", () => {
 		};
 		const markInterrupted = vi.fn(async () => undefined);
 		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		const reapSpy = vi
+			.spyOn(childProcessModule, "terminateUnixProcessGroupByIdentity")
+			.mockResolvedValue("terminated");
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			catalog: { markInterrupted },
 			log: vi.fn(),
@@ -3461,6 +3474,7 @@ describe("daemon worker supervisor monitoring", () => {
 			);
 		} finally {
 			kill.mockRestore();
+			reapSpy.mockRestore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

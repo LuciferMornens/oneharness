@@ -4988,8 +4988,6 @@ export class DaemonSupervisor {
 				const result = await terminateUnixProcessGroupByIdentity(entryPid, entryStartId, getProcessStartId);
 				exactTreeTerminationFailed = result === "failed";
 				sigkillSent = result === "terminated";
-			} else {
-				exactTreeTerminationFailed = true;
 			}
 			const forceDeadline = Date.now() + 1000;
 			while (isWorkerProcessAlive() && Date.now() < forceDeadline) {
@@ -4997,6 +4995,7 @@ export class DaemonSupervisor {
 			}
 		}
 		if (exactTreeTerminationFailed) {
+			assertStopStillApplies();
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
 			if (removeDescriptor) {
 				this.scheduleWorkerStopFinalization(worker);
@@ -5006,6 +5005,7 @@ export class DaemonSupervisor {
 			);
 		}
 		if (isWorkerProcessAlive()) {
+			assertStopStillApplies();
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
 			if (removeDescriptor) {
 				this.scheduleWorkerStopFinalization(worker);
