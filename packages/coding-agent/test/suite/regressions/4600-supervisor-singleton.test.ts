@@ -313,10 +313,16 @@ async function assertConnectable(socketPath: string): Promise<void> {
 	});
 }
 
-async function connectEventually(socketPath: string): Promise<DaemonClient> {
+async function connectEventually(socketPath: string, supervisor?: FixtureHandle): Promise<DaemonClient> {
 	const deadline = Date.now() + 30_000;
 	let lastError: unknown;
 	while (Date.now() < deadline) {
+		if (supervisor && (supervisor.child.exitCode !== null || supervisor.child.signalCode !== null)) {
+			throw new Error(
+				`Replacement supervisor exited before accepting connections ` +
+					`(exit=${supervisor.child.exitCode}/${supervisor.child.signalCode})\n${supervisor.diagnostics.stderr}`,
+			);
+		}
 		const client = new DaemonClient(socketPath);
 		try {
 			await client.connect(500);
@@ -328,7 +334,10 @@ async function connectEventually(socketPath: string): Promise<DaemonClient> {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
 		}
 	}
-	throw new Error(`Timed out connecting to replacement supervisor: ${String(lastError)}`);
+	throw new Error(
+		`Timed out connecting to replacement supervisor: ${String(lastError)}` +
+			(supervisor ? `\nSupervisor stderr:\n${supervisor.diagnostics.stderr}` : ""),
+	);
 }
 
 function waitForConnectionStatus(
@@ -686,7 +695,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		);
 		let client: DaemonClient | undefined;
 		try {
-			client = await connectEventually(paths.socketPath);
+			client = await connectEventually(paths.socketPath, supervisor);
 			expect(listOwnerRecords(paths.registryDir)).toHaveLength(1);
 			await client.request({ type: "shutdown", force: true }, 5000);
 			await waitForExit(supervisor);
@@ -718,7 +727,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		);
 		let client: DaemonClient | undefined;
 		try {
-			client = await connectEventually(paths.socketPath);
+			client = await connectEventually(paths.socketPath, supervisor);
 			expect(listOwnerRecords(durableRegistryDir)).toHaveLength(1);
 			rmSync(osTempRoot, { recursive: true, force: true });
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
@@ -781,7 +790,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		let client: DaemonClient | undefined;
 		let connection: DaemonAgentConnection | undefined;
 		try {
-			client = await connectEventually(paths.socketPath);
+			client = await connectEventually(paths.socketPath, predecessor);
 			let created: Awaited<ReturnType<DaemonClient["request"]>>;
 			try {
 				created = await client.request(
@@ -1362,7 +1371,7 @@ describe("ENG-4600 daemon supervisor ownership", () => {
 		delete scope.agentDir;
 		writeFileSync(ownerScopePath(paths.registryDir, owner.generation), JSON.stringify(scope));
 
-		const client = await connectEventually(paths.socketPath);
+		const client = await connectEventually(paths.socketPath, supervisor);
 		try {
 			const hello = await client.waitForHello(2000);
 			const { supervisorProcessStartId: _helloProcessStartId, ...legacyHello } = hello;

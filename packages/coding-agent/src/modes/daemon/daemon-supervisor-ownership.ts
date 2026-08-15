@@ -706,7 +706,9 @@ function resolveUnixRegistryPathForValidation(registryDir: string, uid: number):
 		relativeToTemp === "" ||
 		(!relativeToTemp.startsWith(`..${sep}`) && relativeToTemp !== ".." && !isAbsolute(relativeToTemp));
 	if (!isWithinTrustedTemp) {
-		return resolvedRegistryDir;
+		// Resolve symlinked ancestors (e.g. /var on macOS) so the security walk below
+		// validates the physical chain; the temp branch gets the same via realpath.
+		return canonicalizeDaemonFilesystemPath(resolvedRegistryDir);
 	}
 	const tempRoot = parse(trustedTempBoundary).root;
 	const tempSuffix = trustedTempBoundary.slice(tempRoot.length).split(/[\\/]/u).filter(Boolean);

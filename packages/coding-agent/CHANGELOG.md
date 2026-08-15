@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed daemon supervisor registry validation rejecting macOS temp paths outside the process temp boundary because `/var` is a symlink, which prevented startup with a selected registry under an insecure ambient temp.
 - Fixed daemon startup fencing inspecting the ambient default registry instead of the selected supervisor registry.
 - Fixed the IPython kernel startup timing out on slow or loaded runners before it could answer the readiness probe.
 - Fixed daemon session workers being left running when launch failed before a process identity was captured.
