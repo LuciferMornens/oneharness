@@ -239,18 +239,6 @@ describe("AI Providers Abort Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.CURSOR_API_KEY)("Cursor Provider Abort", () => {
-		const llm = getModel("cursor", "composer-2.5");
-
-		it("should abort mid-stream", { retry: 3 }, async () => {
-			await testAbortSignal(llm);
-		});
-
-		it("should handle immediate abort", { retry: 3 }, async () => {
-			await testImmediateAbort(llm);
-		});
-	});
-
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider Abort", () => {
 		const llm = getKimiCodingTestModel();
 

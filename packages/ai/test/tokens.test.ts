@@ -206,14 +206,6 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.CURSOR_API_KEY)("Cursor Provider", () => {
-		const llm = getModel("cursor", "composer-2.5");
-
-		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider", () => {
 		const llm = getKimiCodingTestModel();
 

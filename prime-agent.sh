@@ -27,8 +27,6 @@ if [[ "$NO_ENV" == "true" ]]; then
   unset ANTHROPIC_OAUTH_TOKEN
   unset OPENAI_API_KEY
   unset PRIME_API_KEY
-  unset CURSOR_API_KEY
-  unset CURSOR_BASE_URL
   unset DEEPSEEK_API_KEY
   unset GEMINI_API_KEY
   unset GOOGLE_CLOUD_API_KEY

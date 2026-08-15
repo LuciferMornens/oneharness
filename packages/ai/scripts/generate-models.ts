@@ -25,7 +25,6 @@ import {
 	type ThinkingLevelMap,
 } from "../src/types.js";
 import { MODELS as EXISTING_MODELS } from "../src/models.generated.js";
-import { getCursorModels } from "./cursor-catalog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2491,7 +2490,7 @@ function getGrokSubscriptionModels(): Model<"grok-responses">[] {
 async function generateModels() {
 	if (process.argv.includes("--preserve-catalog")) {
 		const preservedModels = getExistingCatalogModels();
-		for (const model of [...getGrokSubscriptionModels(), ...getCursorModels()]) {
+		for (const model of getGrokSubscriptionModels()) {
 			if (!preservedModels.some((m) => m.provider === model.provider && m.id === model.id)) {
 				preservedModels.push(model);
 			}
@@ -3041,9 +3040,6 @@ async function generateModels() {
 
 	// xAI Grok subscription models (OAuth via the Grok CLI proxy)
 	allModels.push(...getGrokSubscriptionModels());
-
-	// Cursor subscription / CLI catalog (OpenAI-compatible API)
-	allModels.push(...getCursorModels());
 
 	// Add missing Grok models
 	if (!allModels.some(m => m.provider === "xai" && m.id === "grok-code-fast-1")) {

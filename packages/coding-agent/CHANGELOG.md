@@ -2,7 +2,6 @@
 
 ## [Unreleased]
 
-- Added Cursor as a built-in model provider (`CURSOR_API_KEY`, optional `CURSOR_BASE_URL`) so `/login` and `/model` can use Composer and other Cursor subscription models.
 - Added xAI Grok subscription login via `/login`, letting SuperGrok and X Premium+ subscribers use Grok models under the new `grok` provider without an xAI API key.
 - Added `/fast` support for Grok 4.5 and Grok 4.6 under the `grok` provider, running the same model at low reasoning effort.
 - Changed reasoning controls to be model-aware across the UI and provider payloads, with authoritative Anthropic/Bedrock effort routes, synchronous control-discriminator validation, strict native off-budget and fixed-contract validation, exact custom-provider contracts, native Moonshot controls, and string-only legacy thinking maps.

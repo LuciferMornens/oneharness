@@ -23,7 +23,6 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	openai: "gpt-5.4",
 	"azure-openai-responses": "gpt-5.4",
 	"openai-codex": "gpt-5.5",
-	cursor: "composer-2.5",
 	"prime-inference": PRIME_INFERENCE_DEFAULT_MODEL_ID,
 	deepseek: "deepseek-v4-pro",
 	google: "gemini-3.1-pro-preview",

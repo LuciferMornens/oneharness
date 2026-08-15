@@ -25,7 +25,6 @@ export type KnownProvider =
 	| "openai"
 	| "azure-openai-responses"
 	| "openai-codex"
-	| "cursor"
 	| "prime-inference"
 	| "deepseek"
 	| "github-copilot"
