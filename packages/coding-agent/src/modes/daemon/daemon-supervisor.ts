@@ -1732,7 +1732,13 @@ export class DaemonSupervisor {
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
 					return this.forwardToWorker(match.worker, command);
 				}
-				const workers = [...this.workers.values()].filter((worker) => this.isLiveWorker(worker));
+				// A "failed" lifecycle is terminal (recovery retries exhausted), so a
+				// failed worker can neither serve the command nor run its heartbeats.
+				// Including it would fail every aggregate refresh forever; transient
+				// states (starting/recovering) still block to avoid partial catalogs.
+				const workers = [...this.workers.values()].filter(
+					(worker) => this.isLiveWorker(worker) && worker.descriptor.lifecycle !== "failed",
+				);
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{
 					heartbeats?: AgentConnectionHeartbeat[];

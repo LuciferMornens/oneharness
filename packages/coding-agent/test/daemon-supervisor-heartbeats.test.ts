@@ -30,7 +30,7 @@ function createSupervisorHarness(): SupervisorHarness {
 	}) as unknown as SupervisorHarness;
 }
 
-function worker(lifecycle: "ready" | "recovering", connected = true) {
+function worker(lifecycle: "ready" | "recovering" | "failed", connected = true) {
 	return {
 		descriptor: { lifecycle },
 		...(connected ? { client: {} } : {}),
@@ -135,6 +135,32 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		expect(response).toMatchObject({
 			success: false,
 			error: "Cannot list heartbeats while session worker is recovering",
+		});
+		expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
+	});
+
+	it("skips terminally failed workers instead of failing the aggregate", async () => {
+		const supervisor = createSupervisorHarness();
+		const healthy = worker("ready");
+		const failed = {
+			...worker("failed", false),
+			heartbeatSnapshot: [{ job: { id: "heartbeat-dead" } }],
+			heartbeatSnapshotStale: false,
+		};
+		supervisor.workers.set("healthy", healthy);
+		supervisor.workers.set("failed", failed);
+		supervisor.forwardToWorker = vi.fn(async (_target, command) =>
+			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
+		);
+
+		const response = await supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "list-failed",
+			type: "heartbeats_list",
+		});
+
+		expect(response).toMatchObject({
+			success: true,
+			data: { heartbeats: [{ job: { id: "heartbeat-1" } }] },
 		});
 		expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
 	});
