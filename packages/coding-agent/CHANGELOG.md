@@ -9,6 +9,7 @@
 - Fixed `--version` printing to stdout before non-interactive stdout takeover, while keeping `--help` on stderr in json and print modes.
 - Fixed daemon shutdown and restart closing the client socket before the success response was written.
 - Fixed Windows shell resolution selecting the WSL System32 bash.exe launcher when Git Bash is not installed.
+- Fixed PowerShell shell detection treating Windows `pwsh.exe` paths as non-PowerShell on non-Windows hosts.
 - Fixed explicit daemon shutdown leaving resident session files active instead of archived.
 - Changed ChatGPT subscription GPT models that support `/fast` (GPT-5.4, GPT-5.5, GPT-5.6) to default to fast mode when no service-tier preference is saved.
 - Fixed the agents view failing to refresh heartbeats forever once any session worker entered the terminal failed state; failed workers are now skipped when aggregating heartbeats.

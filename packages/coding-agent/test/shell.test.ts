@@ -81,6 +81,16 @@ function mockWindowsShellLookup(options: {
 	});
 }
 
+describe("isPowerShellShell", () => {
+	it("recognizes PowerShell executables from Windows and POSIX paths", () => {
+		expect(isPowerShellShell(String.raw`C:\Program Files\PowerShell\7\pwsh.exe`)).toBe(true);
+		expect(isPowerShellShell(String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`)).toBe(true);
+		expect(isPowerShellShell("/usr/bin/pwsh")).toBe(true);
+		expect(isPowerShellShell("/bin/bash")).toBe(false);
+		expect(isPowerShellShell(String.raw`C:\Windows\System32\bash.exe`)).toBe(false);
+	});
+});
+
 describe("Windows automatic shell resolution", () => {
 	it("skips the WSL System32 bash launcher and selects PowerShell", () => {
 		const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";

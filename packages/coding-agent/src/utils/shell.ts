@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, delimiter } from "node:path";
+import { delimiter } from "node:path";
 import { type ChildProcess, spawnSync } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
@@ -90,7 +90,7 @@ function findBashOnPath(): string | null {
 }
 
 export function isPowerShellShell(shellPath: string): boolean {
-	const executable = basename(shellPath).toLowerCase();
+	const executable = shellPath.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
 	return (
 		executable === "pwsh" ||
 		executable === "pwsh.exe" ||
