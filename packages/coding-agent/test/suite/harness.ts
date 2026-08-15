@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@earendil-works/pi-ai";
-import { registerFauxProvider } from "@earendil-works/pi-ai";
+import { defaultServiceTierForModel, registerFauxProvider } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageController } from "../../src/core/agent-messages.js";
 import type { AgentObserveController } from "../../src/core/agent-observe.js";
 import { AgentSession, type AgentSessionEvent, type AutoRefineReviewer } from "../../src/core/agent-session.js";
@@ -79,6 +79,7 @@ export interface HarnessOptions {
 	autoRefineReviewer?: AutoRefineReviewer;
 	serializedRefine?: boolean;
 	initialGoal?: { objective: string; tokenBudget?: number };
+	scopedModels?: boolean;
 }
 
 export interface Harness {
@@ -159,6 +160,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		initialState: {
 			model,
 			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
+			serviceTier: defaultServiceTierForModel(model),
 			tools: [],
 		},
 		convertToLlm,
@@ -192,10 +194,14 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const resourceLoader =
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
 
+	const serviceTier = defaultServiceTierForModel(model);
+	sessionManager.appendServiceTierChange(serviceTier);
+
 	const session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager,
+		serviceTierPreference: serviceTier,
 		cwd: tempDir,
 		modelRegistry,
 		resourceLoader,
@@ -210,6 +216,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		scopedModels: options.scopedModels ? fauxProvider.models.map((model) => ({ model })) : undefined,
 	});
 
 	const events: AgentSessionEvent[] = [];

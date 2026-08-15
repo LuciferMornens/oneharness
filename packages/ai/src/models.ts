@@ -8,6 +8,7 @@ import type {
 	ModelThinkingLevel,
 	OpenAICompletionsCompat,
 	ReasoningEffortLevelMap,
+	ServiceTier,
 	ThinkingLevelMap,
 	ThinkingLevelValue,
 	Usage,
@@ -64,6 +65,14 @@ export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean 
 		model.api === "openai-codex-responses" &&
 		(model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-"))
 	);
+}
+
+/** Default service tier when the user has not saved a preference. */
+export function defaultServiceTierForModel<TApi extends Api>(model: Model<TApi> | undefined | null): ServiceTier {
+	if (model && model.provider === "openai-codex" && supportsFastMode(model)) {
+		return "priority";
+	}
+	return "default";
 }
 
 export interface CostOverrides {

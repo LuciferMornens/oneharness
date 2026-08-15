@@ -762,6 +762,10 @@ export class SettingsManager {
 		return this.settings.defaultServiceTier ?? "default";
 	}
 
+	getConfiguredDefaultServiceTier(): ServiceTier | undefined {
+		return this.settings.defaultServiceTier;
+	}
+
 	setDefaultServiceTier(serviceTier: ServiceTier): void {
 		this.globalSettings.defaultServiceTier = serviceTier;
 		this.markModified("defaultServiceTier");

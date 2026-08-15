@@ -19,6 +19,40 @@ describe("ENG-4620 fast mode settings", () => {
 		harness = undefined;
 	});
 
+	it("defaults ChatGPT-auth GPT models to fast when no preference is saved", async () => {
+		harness = await createHarness({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			models: [{ id: "gpt-5.6-sol" }],
+		});
+
+		expect(harness.settingsManager.getConfiguredDefaultServiceTier()).toBeUndefined();
+		expect(harness.session.serviceTier).toBe("priority");
+	});
+
+	it("keeps an explicit default preference over the ChatGPT-auth fast default", async () => {
+		harness = await createHarness({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			models: [{ id: "gpt-5.6-sol" }],
+		});
+		const currentHarness = harness;
+
+		currentHarness.session.setServiceTier("default");
+		expect(currentHarness.settingsManager.getDefaultServiceTier()).toBe("default");
+
+		const { session } = await createAgentSession({
+			cwd: currentHarness.tempDir,
+			authStorage: currentHarness.authStorage,
+			model: currentHarness.getModel(),
+			resourceLoader: createTestResourceLoader(),
+			sessionManager: SessionManager.inMemory(currentHarness.tempDir),
+			settingsManager: currentHarness.settingsManager,
+		});
+		sessions.push(session);
+		expect(session.serviceTier).toBe("default");
+	});
+
 	it("uses the saved fast mode preference for new sessions", async () => {
 		harness = await createHarness({
 			api: "openai-codex-responses",
@@ -27,6 +61,7 @@ describe("ENG-4620 fast mode settings", () => {
 		});
 		const currentHarness = harness;
 
+		currentHarness.session.setServiceTier("default");
 		currentHarness.session.setServiceTier("priority");
 		expect(currentHarness.settingsManager.getDefaultServiceTier()).toBe("priority");
 
@@ -69,6 +104,7 @@ describe("ENG-4620 fast mode settings", () => {
 			models: [{ id: "gpt-5.4" }, { id: "gpt-5.3" }],
 		});
 
+		harness.session.setServiceTier("default");
 		harness.session.setServiceTier("priority");
 		await harness.session.setModel(harness.getModel("gpt-5.3")!);
 
@@ -84,6 +120,7 @@ describe("ENG-4620 fast mode settings", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			models: [{ id: "gpt-5.4" }, { id: "gpt-5.3" }],
+			scopedModels: true,
 		});
 
 		harness.session.setServiceTier("priority");

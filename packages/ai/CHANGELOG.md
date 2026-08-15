@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Changed ChatGPT/Codex subscription GPT models that support fast mode to default to the `priority` service tier when no preference is saved.
 - Added xAI Grok subscription support: a `grok` OAuth provider with device-code login against accounts.x.ai and a `grok-responses` API that streams through xAI's Grok CLI proxy so SuperGrok / X Premium+ subscriptions cover inference.
 - Added fast mode for Grok 4.5 and Grok 4.6 subscription models, mapping the `priority` service tier to `low` reasoning effort on the same model id.
 - Fixed model-aware reasoning controls to preserve provider defaults and native payload schemas, including authoritative custom Anthropic/Bedrock effort routes, synchronous control-discriminator validation, strict off-budget and fixed-contract validation, non-reasoning payload guards, explicit disable precedence, exact custom contracts, string-only legacy maps, Anthropic gateway passthroughs, Fireworks and Kimi compatible controls, native Moonshot K2 toggles and K3 effort, Bedrock Claude sampling compatibility and Nova 2 Lite effort, Gemini Flash aliases, per-alias OpenRouter and Prime effort routes, documented Copilot controls, native Magistral behavior, and GPT-5 Mini/Nano minimal effort.
