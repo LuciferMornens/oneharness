@@ -2379,6 +2379,9 @@ export class DaemonSupervisor {
 			if (startupGate instanceof Writable) {
 				startupGate.destroy();
 			}
+			if (child.exitCode === null && child.signalCode === null) {
+				child.kill("SIGKILL");
+			}
 			await childClosed;
 			child.unref();
 			try {

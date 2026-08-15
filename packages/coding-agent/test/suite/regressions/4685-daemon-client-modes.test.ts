@@ -26,6 +26,22 @@ const harnesses: Harness[] = [];
 const daemonSockets = new Set<string>();
 const tempRoots = new Set<string>();
 
+async function removeTempRoot(root: string): Promise<void> {
+	for (let attempt = 0; attempt < 20; attempt++) {
+		try {
+			rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOTEMPTY" && code !== "EBUSY") {
+				throw error;
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+		}
+	}
+	rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+}
+
 afterEach(async () => {
 	for (const child of children) {
 		if (child.exitCode === null && child.signalCode === null) {
@@ -52,7 +68,7 @@ afterEach(async () => {
 	}
 	daemonSockets.clear();
 	for (const root of tempRoots) {
-		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+		await removeTempRoot(root);
 	}
 	tempRoots.clear();
 });

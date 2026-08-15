@@ -115,7 +115,9 @@ vi.mock("../src/core/session-lease.js", async (importOriginal) => {
 });
 
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorSelectedRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR";
 const previousSupervisorRegistryDir = process.env[supervisorRegistryDirEnv];
+const previousSupervisorSelectedRegistryDir = process.env[supervisorSelectedRegistryDirEnv];
 const supervisorRegistryDirs = new Set<string>();
 
 interface SupervisorMonitorHarness {
@@ -263,6 +265,7 @@ function createHarness(canConnect: () => Promise<boolean>): SupervisorMonitorHar
 	const registryDir = mkdtempSync(join(tmpdir(), "prime-supervisor-registry-test-"));
 	supervisorRegistryDirs.add(registryDir);
 	process.env[supervisorRegistryDirEnv] = registryDir;
+	process.env[supervisorSelectedRegistryDirEnv] = registryDir;
 	return Object.assign(Object.create(AgentDaemon.prototype), {
 		options: { worker: {} },
 		clients: new Set<{ authenticated: boolean }>(),
@@ -298,6 +301,11 @@ describe("daemon worker supervisor monitoring", () => {
 			delete process.env[supervisorRegistryDirEnv];
 		} else {
 			process.env[supervisorRegistryDirEnv] = previousSupervisorRegistryDir;
+		}
+		if (previousSupervisorSelectedRegistryDir === undefined) {
+			delete process.env[supervisorSelectedRegistryDirEnv];
+		} else {
+			process.env[supervisorSelectedRegistryDirEnv] = previousSupervisorSelectedRegistryDir;
 		}
 	});
 
@@ -534,6 +542,7 @@ describe("daemon worker supervisor monitoring", () => {
 		mkdirSync(registryDir, { recursive: true });
 		supervisorRegistryDirs.add(root);
 		process.env[supervisorRegistryDirEnv] = registryDir;
+		process.env[supervisorSelectedRegistryDirEnv] = registryDir;
 		let assertionCount = 0;
 		const workers = new Map<string, unknown>();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
@@ -771,7 +780,7 @@ describe("daemon worker supervisor monitoring", () => {
 		mkdirSync(descriptorDir, { recursive: true });
 		supervisorRegistryDirs.add(root);
 		workerLaunchTestState.capture = true;
-		workerLaunchTestState.forceMissingProcessStartId = process.platform !== "win32";
+		workerLaunchTestState.forceMissingProcessStartId = false;
 		workerLaunchTestState.fixtureMode = "successful-gate";
 		workerLaunchTestState.gateMarkerPath = markerPath;
 		const cancellation = recoveryDeniedError("supervisor_recovery_cancelled");

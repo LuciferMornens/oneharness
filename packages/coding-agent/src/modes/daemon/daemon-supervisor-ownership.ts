@@ -624,6 +624,12 @@ function ensureSecureDaemonSupervisorRegistryDir(
 	registryDir: string,
 	create: boolean,
 ): UnixRegistryPathIdentity[] | undefined {
+	if (existsSync(registryDir)) {
+		const existing = lstatSync(registryDir);
+		if (existing.isSymbolicLink() || !existing.isDirectory()) {
+			throw new Error(`Insecure daemon supervisor registry path: ${registryDir}`);
+		}
+	}
 	if (process.platform === "win32") {
 		if (create) {
 			mkdirSync(registryDir, { recursive: true, mode: 0o700 });

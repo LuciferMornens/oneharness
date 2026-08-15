@@ -79,6 +79,7 @@ const cliPath = resolve(__dirname, "../../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
 const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorSelectedRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR";
 const handles = new Set<FixtureHandle>();
 const harnesses: Harness[] = [];
 const cleanupProcesses = new Map<string, CleanupProcessIdentity>();
@@ -148,9 +149,11 @@ function spawnFixture(
 	};
 	if (options.useDefaultRegistry) {
 		delete environment[supervisorRegistryDirEnv];
+		delete environment[supervisorSelectedRegistryDirEnv];
 		environment.ENG_4600_PROBE_BEFORE_RELEASE = "1";
 	} else {
 		environment[supervisorRegistryDirEnv] = paths.registryDir;
+		environment[supervisorSelectedRegistryDirEnv] = paths.registryDir;
 		environment.ENG_4600_REGISTRY_DIR = paths.registryDir;
 	}
 	const child = spawn(process.execPath, [tsxPath, fixturePath], {
@@ -189,8 +192,10 @@ function spawnRealSupervisor(
 	};
 	if (useDefaultRegistry) {
 		delete environment[supervisorRegistryDirEnv];
+		delete environment[supervisorSelectedRegistryDirEnv];
 	} else {
 		environment[supervisorRegistryDirEnv] = paths.registryDir;
+		environment[supervisorSelectedRegistryDirEnv] = paths.registryDir;
 	}
 	const child = spawn(
 		process.execPath,
