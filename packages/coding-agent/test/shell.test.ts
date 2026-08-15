@@ -31,9 +31,12 @@ const originalEnv = {
 	"ProgramFiles(x86)": process.env["ProgramFiles(x86)"],
 	SystemRoot: process.env.SystemRoot,
 };
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
 afterEach(() => {
-	vi.spyOn(process, "platform", "get").mockRestore();
+	if (originalPlatform) {
+		Object.defineProperty(process, "platform", originalPlatform);
+	}
 	mocks.spawnSync.mockReset();
 	process.env.PATH = originalEnv.PATH;
 	process.env.Path = originalEnv.Path;
@@ -58,7 +61,10 @@ function mockWindowsShellLookup(options: {
 	existing: readonly string[];
 	where: Record<string, string[]>;
 }): void {
-	vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+	Object.defineProperty(process, "platform", {
+		configurable: true,
+		value: "win32",
+	});
 	process.env.ProgramFiles = "C:\\Missing Program Files";
 	process.env["ProgramFiles(x86)"] = "C:\\Missing Program Files (x86)";
 	process.env.SystemRoot = "C:\\Windows";
@@ -78,28 +84,30 @@ function mockWindowsShellLookup(options: {
 describe("Windows automatic shell resolution", () => {
 	it("skips the WSL System32 bash launcher and selects PowerShell", () => {
 		const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+		const wslBash = "C:\\Windows\\System32\\bash.exe";
 		mockWindowsShellLookup({
 			pathSuffix: "wsl-only",
-			existing: [pwsh],
+			existing: [pwsh, wslBash],
 			where: {
-				"bash.exe": ["C:\\Windows\\System32\\bash.exe"],
+				"bash.exe": [wslBash],
 				"pwsh.exe": [pwsh],
 			},
 		});
 
 		const config = getShellConfig();
-		expect(isPowerShellShell(config.shell)).toBe(true);
 		expect(config.shell).toBe(pwsh);
+		expect(isPowerShellShell(config.shell)).toBe(true);
 		expect(config.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
 	});
 
 	it("skips SysWOW64 bash and still prefers a real bash later on PATH", () => {
 		const msysBash = "C:\\tools\\msys64\\usr\\bin\\bash.exe";
+		const wow64Bash = "C:\\Windows\\SysWOW64\\bash.exe";
 		mockWindowsShellLookup({
 			pathSuffix: "msys",
-			existing: [msysBash],
+			existing: [msysBash, wow64Bash],
 			where: {
-				"bash.exe": ["C:\\Windows\\SysWOW64\\bash.exe", msysBash],
+				"bash.exe": [wow64Bash, msysBash],
 			},
 		});
 
