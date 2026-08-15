@@ -33,7 +33,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
 import { DaemonClient } from "../../src/modes/daemon/daemon-client.js";
 import { DAEMON_WORKER_ROLE_ENV } from "../../src/modes/daemon/daemon-worker-protocol.js";
-import { isolatedDaemonProcessEnv } from "../isolated-daemon-env.js";
+import { isolatedDaemonProcessEnv, isolatedDaemonRegistryDir } from "../isolated-daemon-env.js";
 
 const cliPath = resolve(__dirname, "../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../node_modules/tsx/dist/cli.mjs");
@@ -83,6 +83,8 @@ async function runCli(
 			PI_SKIP_VERSION_CHECK: "1",
 			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
 			PRIME_AGENT_KERNEL_FORKSERVER: "0",
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: isolatedDaemonRegistryDir(options.agentDir),
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: isolatedDaemonRegistryDir(options.agentDir),
 			RLM_DEPTH: "0",
 			...options.environment,
 		}),

@@ -1,6 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,7 +12,7 @@ import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
 import { RpcClient } from "../../../src/modes/rpc/rpc-client.js";
 import { createRpcExtensionUiBridge } from "../../../src/modes/rpc/rpc-extension-ui-context.js";
-import { isolatedDaemonProcessEnv } from "../../isolated-daemon-env.js";
+import { createSecureTempDir, isolatedDaemonProcessEnv, isolatedDaemonRegistryDir } from "../../isolated-daemon-env.js";
 import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "../harness.js";
 
 const fixturePath = resolve(__dirname, "../../fixtures/rpc-connection-mode-fixture.ts");
@@ -91,6 +90,8 @@ async function runCli(
 			[ENV_AGENT_DIR]: options.agentDir,
 			PI_SKIP_VERSION_CHECK: "1",
 			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: isolatedDaemonRegistryDir(options.agentDir),
+			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: isolatedDaemonRegistryDir(options.agentDir),
 			RLM_DEPTH: undefined,
 			RLM_MAX_DEPTH: undefined,
 			...options.environment,
@@ -261,7 +262,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 	});
 
 	it("launches real daemon workers for every migrated client surface", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-clients-"));
+		const root = createSecureTempDir("prime-agent-4685-clients-");
 		tempRoots.add(root);
 		const agentDir = join(root, "agent dir");
 		const socketPath = join(root, "daemon.sock");
@@ -299,7 +300,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 	}, 90_000);
 
 	it("keeps the rollback frontend fully off the daemon path", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-rollback-"));
+		const root = createSecureTempDir("prime-agent-4685-rollback-");
 		tempRoots.add(root);
 		const agentDir = join(root, "agent");
 		const socketPath = join(root, "must-not-exist.sock");
@@ -329,7 +330,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 	}, 30_000);
 
 	it("loads headless runtime services only in the worker", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-services-"));
+		const root = createSecureTempDir("prime-agent-4685-services-");
 		tempRoots.add(root);
 		const agentDir = join(root, "agent");
 		const socketPath = join(root, "daemon.sock");
@@ -393,7 +394,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 	});
 
 	it("drains accepted daemon RPC prompt work before EOF", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-4685-rpc-eof-"));
+		const root = createSecureTempDir("prime-agent-4685-rpc-eof-");
 		tempRoots.add(root);
 		const socketPath = join(root, "daemon.sock");
 		daemonSockets.add(socketPath);

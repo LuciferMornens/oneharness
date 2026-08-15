@@ -4,6 +4,7 @@
 
 - Fixed daemon session workers being left running when launch failed before a process identity was captured.
 - Fixed daemon supervisor registry setup treating a non-directory path as a registry instead of rejecting it.
+- Fixed daemon supervisor registries created under a shared temp directory inheriting umask `0755` and failing the private-directory check.
 - Changed ChatGPT subscription GPT models that support `/fast` (GPT-5.4, GPT-5.5, GPT-5.6) to default to fast mode when no service-tier preference is saved.
 - Fixed the agents view failing to refresh heartbeats forever once any session worker entered the terminal failed state; failed workers are now skipped when aggregating heartbeats.
 - Added xAI Grok subscription login via `/login`, letting SuperGrok and X Premium+ subscribers use Grok models under the new `grok` provider without an xAI API key.

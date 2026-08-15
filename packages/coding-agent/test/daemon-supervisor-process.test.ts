@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -72,6 +81,7 @@ afterEach(async () => {
 
 function tempDir(): string {
 	const directory = mkdtempSync(join(tmpdir(), "prime-daemon-supervisor-test-"));
+	chmodSync(directory, 0o700);
 	tempDirs.push(directory);
 	return directory;
 }
@@ -83,6 +93,10 @@ function spawnSupervisor(
 	extraArgs: readonly string[] = [],
 ): ChildProcess {
 	daemonSockets.add(socketPath);
+	const registryDir = join(agentDir, "supervisor-owners");
+	mkdirSync(registryDir, { recursive: true });
+	chmodSync(agentDir, 0o700);
+	chmodSync(registryDir, 0o700);
 	const child = spawn(
 		process.execPath,
 		[tsxPath, cliPath, "--mode", "daemon", "--daemon-socket", socketPath, "--offline", ...extraArgs],
@@ -90,6 +104,8 @@ function spawnSupervisor(
 			cwd,
 			env: isolatedDaemonProcessEnv({
 				[ENV_AGENT_DIR]: agentDir,
+				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: registryDir,
+				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: registryDir,
 				PI_OFFLINE: "1",
 				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
 			}),
