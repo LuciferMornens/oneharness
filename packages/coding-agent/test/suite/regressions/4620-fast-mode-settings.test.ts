@@ -120,6 +120,7 @@ describe("ENG-4620 fast mode settings", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			models: [{ id: "gpt-5.4" }, { id: "gpt-5.3" }],
+			scopedModels: true,
 		});
 
 		harness.session.setServiceTier("priority");

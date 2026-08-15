@@ -79,6 +79,7 @@ export interface HarnessOptions {
 	autoRefineReviewer?: AutoRefineReviewer;
 	serializedRefine?: boolean;
 	initialGoal?: { objective: string; tokenBudget?: number };
+	scopedModels?: boolean;
 }
 
 export interface Harness {
@@ -215,6 +216,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		scopedModels: options.scopedModels ? fauxProvider.models.map((model) => ({ model })) : undefined,
 	});
 
 	const events: AgentSessionEvent[] = [];
