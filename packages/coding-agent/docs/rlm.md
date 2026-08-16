@@ -59,7 +59,7 @@ handle = await rlm("Review the authentication flow for security issues", name="a
 print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 ```
 
-The call returns immediately after task admission with a child handle; it never waits for or returns the child's answer. The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model.
+The call returns immediately after task admission with a child handle; it never waits for or returns the child's answer. The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, reasoning effort, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model or an explicit `effort`. Use `rlm.find_models()` to inspect each match's `reasoning_levels` before choosing `model` and `effort`.
 
 Spawn independent children in separate calls and end the turn instead of awaiting completion:
 

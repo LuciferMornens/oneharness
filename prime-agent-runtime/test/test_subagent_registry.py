@@ -77,6 +77,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                     "check the API",
                     name="api-reviewer",
                     model="deepseek/deepseek-v4-flash",
+                    effort="xhigh",
                 )
             )
 
@@ -87,6 +88,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                 "kwargs": {
                     "name": "api-reviewer",
                     "model": "deepseek/deepseek-v4-flash",
+                    "effort": "xhigh",
                 },
             },
         )
@@ -103,6 +105,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                         "id": "claude-opus-4-7",
                         "name": "Claude Opus 4.7",
                         "selector": "anthropic/claude-opus-4-7",
+                        "reasoning_levels": ["off", "low", "medium", "high", "xhigh", "max"],
                     }
                 ]
             }
@@ -115,6 +118,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(models[0].id, "claude-opus-4-7")
         self.assertEqual(models[0].name, "Claude Opus 4.7")
         self.assertEqual(models[0].selector, "anthropic/claude-opus-4-7")
+        self.assertEqual(models[0].reasoning_levels, ("off", "low", "medium", "high", "xhigh", "max"))
         host_request.assert_awaited_once_with(
             "rlm.find_models",
             {"query": "opus", "limit": 3},

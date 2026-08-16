@@ -150,21 +150,22 @@ await rlm.run("subtask")
 
 Supported `rlm.run` options are:
 
-- `name`: a unique readable child session name; and
-- `model`: an exact `provider/model` selector from `rlm.find_models()`.
+- `name`: a unique readable child session name;
+- `model`: an exact `provider/model` selector from `rlm.find_models()`; and
+- `effort`: an explicit reasoning level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) that the selected child model must support.
 
-Unknown options fail instead of being ignored. Model search is bounded to active, non-expired credentials. If an exact selection is unavailable or fails auth preflight, spawn fails instead of silently falling back to another model. A child otherwise inherits the parent model.
+Unknown options fail instead of being ignored. Model search is bounded to active, non-expired credentials. Each `rlm.find_models()` match includes `reasoning_levels` for that model, so a parent can see whether `xhigh` (or another level) is actually available. If an exact selection is unavailable or fails auth preflight, or if a requested `effort` is unknown or unsupported by the selected model, spawn fails instead of silently falling back. A child otherwise inherits the parent model and the parent reasoning level clamped to the child model.
 
 ## Child Execution
 
 `AgentSession.runRlmChild()` performs the following sequence:
 
 1. Check `RLM_DEPTH < RLM_MAX_DEPTH`.
-2. Resolve the requested model or inherit the parent model.
+2. Resolve the requested model or inherit the parent model, then apply an explicit `effort` or inherit the parent reasoning level clamped to the child model.
 3. Create a `sub-xxxxxxxx` child directory under the parent artifact directory.
 4. Admit the task into the parent registry and return its `RLMSpawnHandle`.
 5. In detached work, create a child `SessionManager`, `Agent`, and `AgentSession`.
-6. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and thinking configuration.
+6. Reuse provider hooks, resource loader, model registry, tools, transport, retry settings, and the resolved thinking level.
 7. Run the child prompt, retain its session, and update lifecycle state independently of the admission call.
 8. Attribute child usage to the parent assistant turn and persist the attribution.
 

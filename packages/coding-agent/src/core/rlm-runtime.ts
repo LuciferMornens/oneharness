@@ -1,5 +1,11 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	clampThinkingLevel,
+	getSupportedThinkingLevels,
+	type Model,
+	type ServiceTier,
+} from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
@@ -38,11 +44,14 @@ export interface RlmDeleteSubagentResult {
 	outcome?: "deleted" | "skipped_running";
 }
 
+export const RLM_REASONING_EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
 export interface RlmModelMatch {
 	provider: string;
 	id: string;
 	name: string;
 	selector: string;
+	reasoning_levels: ThinkingLevel[];
 }
 
 export interface RlmFindModelsResult {
@@ -89,6 +98,48 @@ export function normalizeRequestedRlmSubagentModel(value: unknown): string | und
 		throw new Error("rlm.run model must not be empty");
 	}
 	return model;
+}
+
+function isRlmReasoningEffort(value: string): value is ThinkingLevel {
+	return (RLM_REASONING_EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+/** Validate and normalize an orchestrator-supplied child reasoning effort. */
+export function normalizeRequestedRlmSubagentEffort(value: unknown): ThinkingLevel | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run effort must be a string");
+	}
+	const effort = value.trim().toLowerCase();
+	if (!effort) {
+		throw new Error("rlm.run effort must not be empty");
+	}
+	if (!isRlmReasoningEffort(effort)) {
+		throw new Error(`rlm.run effort must be one of ${RLM_REASONING_EFFORT_LEVELS.join(", ")}`);
+	}
+	return effort;
+}
+
+/** Apply an explicit spawn effort, or inherit the parent level clamped to the child model. */
+export function resolveRlmSubagentThinkingLevel(
+	model: Model<Api>,
+	parentLevel: ThinkingLevel,
+	requestedEffort: ThinkingLevel | undefined,
+): ThinkingLevel {
+	if (requestedEffort === undefined) {
+		return clampThinkingLevel(model, parentLevel) as ThinkingLevel;
+	}
+	const supported = getSupportedThinkingLevels(model) as ThinkingLevel[];
+	if (!supported.includes(requestedEffort)) {
+		const selector = `${model.provider}/${model.id}`;
+		const supportedLabel = supported.length > 0 ? supported.join(", ") : "none";
+		throw new Error(
+			`Requested subagent effort "${requestedEffort}" is not supported by ${selector} (supported: ${supportedLabel})`,
+		);
+	}
+	return requestedEffort;
 }
 
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
@@ -145,6 +196,7 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 			id: model.id,
 			name: model.name || model.id,
 			selector,
+			reasoning_levels: getSupportedThinkingLevels(model) as ThinkingLevel[],
 		}));
 }
 

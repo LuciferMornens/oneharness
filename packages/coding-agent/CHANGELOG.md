@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added `effort` to `rlm.run` so a parent can set a child's reasoning level at spawn, and included each model's supported levels on `rlm.find_models` matches.
 - Fixed daemon supervisor registry validation rejecting macOS temp paths outside the process temp boundary because `/var` is a symlink, which prevented startup with a selected registry under an insecure ambient temp.
 - Fixed daemon startup fencing inspecting the ambient default registry instead of the selected supervisor registry.
 - Fixed the IPython kernel startup timing out on slow or loaded runners before it could answer the readiness probe.

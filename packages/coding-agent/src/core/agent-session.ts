@@ -222,6 +222,7 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	normalizeRequestedRlmSubagentEffort,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	type RlmDeleteSubagentResult,
@@ -230,6 +231,7 @@ import {
 	type RlmSpawnHandle,
 	type RlmSubagentRegistryEntry,
 	type RlmSubagentRuntime,
+	resolveRlmSubagentThinkingLevel,
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import {
@@ -9027,6 +9029,7 @@ export class AgentSession {
 		spawnCode?: string;
 		sessionDir: string;
 		model: Model<any>;
+		thinkingLevel: ThinkingLevel;
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9036,7 +9039,7 @@ export class AgentSession {
 			spawnCode: options.spawnCode,
 			sessionDir: options.sessionDir,
 			model: options.model,
-			thinkingLevel: clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel,
+			thinkingLevel: options.thinkingLevel,
 			serviceTier:
 				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
 			scopedModels: [...this._scopedModels],
@@ -9700,13 +9703,14 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, ...unsupported } = kwargs;
+		const { name: rawName, model: rawModel, effort: rawEffort, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
 		}
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
+		const requestedEffort = normalizeRequestedRlmSubagentEffort(rawEffort);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -9726,6 +9730,7 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
+		const thinkingLevel = resolveRlmSubagentThinkingLevel(modelSelection.model, this.thinkingLevel, requestedEffort);
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
 
 		const childSessionDir = this._createChildRlmSessionDir();
@@ -9796,6 +9801,7 @@ export class AgentSession {
 				spawnCode,
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
+				thinkingLevel,
 			}),
 			onSessionPublished: publishChildSession,
 		};
