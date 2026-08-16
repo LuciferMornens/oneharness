@@ -109,8 +109,12 @@ describe("buildRlmPrompt", () => {
 
 		expect(prompt).toContain("await rlm.find_models(...)");
 		expect(prompt).toContain("exact returned selector");
-		expect(prompt).toContain("An unavailable requested model fails spawn");
-		expect(prompt).toContain("decide whether to retry or omit `model`");
+		expect(prompt).toContain("reasoning_levels");
+		expect(prompt).toContain("effort='xhigh'");
+		expect(prompt).toContain("off`/`minimal`/`low`/`medium`/`high`/`max");
+		expect(prompt).toContain("An unavailable model or unsupported effort fails spawn");
+		expect(prompt).toContain("decide whether to retry or omit `model`/`effort`");
+		expect(prompt).toContain("Unknown `rlm.run` options fail");
 		expect(prompt).not.toContain("model choices for subagents");
 	});
 

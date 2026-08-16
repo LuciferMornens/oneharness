@@ -38,6 +38,7 @@ class RLMModel:
     id: str
     name: str
     selector: str
+    reasoning_levels: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,8 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
     ``model`` selects a child with an exact ``provider/model`` selector.
+    ``effort`` sets the child's reasoning level when the selected model supports it.
+    Omitted ``effort`` inherits the parent level clamped to the child model.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
@@ -158,13 +161,27 @@ def _model_from_payload(payload: Any) -> RLMModel:
     model_id = payload.get("id")
     name = payload.get("name")
     selector = payload.get("selector")
+    reasoning_levels = payload.get("reasoning_levels")
     if not all(isinstance(value, str) and value for value in (provider, model_id, name, selector)):
         raise RuntimeError("rlm.find_models returned an invalid model entry")
-    return RLMModel(provider=provider, id=model_id, name=name, selector=selector)
+    if not isinstance(reasoning_levels, list) or not all(
+        isinstance(level, str) and level for level in reasoning_levels
+    ):
+        raise RuntimeError("rlm.find_models returned an invalid model entry")
+    return RLMModel(
+        provider=provider,
+        id=model_id,
+        name=name,
+        selector=selector,
+        reasoning_levels=tuple(reasoning_levels),
+    )
 
 
 async def find_models(query: str = "", limit: int = 8) -> list[RLMModel]:
-    """Search a bounded list of models backed by active user credentials."""
+    """Search a bounded list of models backed by active user credentials.
+
+    Each match includes ``reasoning_levels`` supported by that model.
+    """
     if not isinstance(query, str):
         raise TypeError(f"query must be str, got {type(query).__name__}")
     if not isinstance(limit, int):

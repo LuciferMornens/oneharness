@@ -34,6 +34,7 @@ describe("ENG-4649 subagent model selection", () => {
 						id: "model-319",
 						name: "model-319",
 						selector: `${provider}/model-319`,
+						reasoning_levels: ["off"],
 					},
 				],
 			});
