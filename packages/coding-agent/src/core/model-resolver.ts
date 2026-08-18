@@ -33,7 +33,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	xai: "grok-4.20-0309-reasoning",
 	grok: "grok-4.6",
 	groq: "openai/gpt-oss-120b",
-	cerebras: "zai-glm-4.7",
+	cerebras: "gpt-oss-120b",
 	zai: "glm-5.1",
 	mistral: "devstral-medium-latest",
 	minimax: "MiniMax-M2.7",

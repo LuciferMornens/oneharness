@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -16,8 +16,8 @@ import {
 	shouldEnsureDaemonBeforeActiveSessionLookup,
 	shouldEnsureInteractiveDaemonForStartup,
 	shouldOpenAgentsViewForDaemonInteractive,
-	shouldRejectBareResume,
 	shouldRejectNonInteractiveAttach,
+	shouldRejectNonInteractiveBareResume,
 	shouldUseDaemonClient,
 	shouldUseDaemonClientRuntime,
 	shouldUseDaemonInteractive,
@@ -127,9 +127,10 @@ describe("interactive startup routing", () => {
 		expect(shouldRejectNonInteractiveAttach("worker", "print")).toBe(true);
 		expect(shouldRejectNonInteractiveAttach("worker", "interactive")).toBe(false);
 		expect(shouldRejectNonInteractiveAttach(undefined, "print")).toBe(false);
-		expect(shouldRejectBareResume(true)).toBe(true);
-		expect(shouldRejectBareResume("session-id")).toBe(false);
-		expect(shouldRejectBareResume(undefined)).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "print")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume(true, "rpc")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume("session-id", "print")).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "interactive")).toBe(false);
 	});
 
 	test("does not start the daemon for attach", () => {
@@ -183,14 +184,14 @@ describe("daemon-backed interactive session manager routing", () => {
 		expect(shouldOpenAgentsViewForDaemonInteractive(decision)).toBe(false);
 	});
 
-	test("bare --resume no longer routes to the agents view (it is rejected at startup)", () => {
+	test.each([false, true])("opens the agents view for bare --resume (onboarding=%s)", (needsOnboarding) => {
 		expect(
 			shouldOpenAgentsViewForDaemonInteractive({
 				useDaemonInteractive: true,
-				needsOnboarding: false,
+				needsOnboarding,
 				resume: true,
 			}),
-		).toBe(false);
+		).toBe(true);
 	});
 
 	test("ensures daemon is available before probing non-path session selectors", () => {
@@ -278,8 +279,8 @@ describe("daemon-backed interactive session manager routing", () => {
 		expect(shouldUseEphemeralSessionManagerForDaemonInteractive(decision)).toBe(false);
 	});
 
-	test("keeps bare --resume off the ephemeral local session manager", () => {
-		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(false);
+	test("uses an ephemeral local session manager for bare --resume", () => {
+		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(true);
 	});
 
 	test("finds an active daemon session by resolved session file", () => {
@@ -305,17 +306,22 @@ describe("daemon-backed interactive session manager routing", () => {
 	test("finds an active daemon session through a symlinked resume path", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-agent-resume-"));
 		try {
-			const sessionFile = join(directory, "session.jsonl");
-			const symlink = join(directory, "session-link.jsonl");
+			const realDir = join(directory, "real");
+			const aliasDir = join(directory, "alias");
+			mkdirSync(realDir);
+			const sessionFile = join(realDir, "session.jsonl");
 			writeFileSync(sessionFile, "");
-			symlinkSync(sessionFile, symlink);
+			// Junction on Windows: file symlinks require SeCreateSymbolicLinkPrivilege.
+			symlinkSync(realDir, aliasDir, process.platform === "win32" ? "junction" : "dir");
 			const activeSummary = makeSessionSummary({
 				id: "active-1",
 				activeSessionId: "active-1",
 				sessionFile,
 			});
 
-			expect(findActiveDaemonSessionSummaryForSessionFile([activeSummary], symlink)).toBe(activeSummary);
+			expect(findActiveDaemonSessionSummaryForSessionFile([activeSummary], join(aliasDir, "session.jsonl"))).toBe(
+				activeSummary,
+			);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}

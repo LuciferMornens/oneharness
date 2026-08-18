@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
+import { canonicalSessionPath } from "../src/core/session-lease.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { SettingsManager } from "../src/core/settings-manager.js";
 import {
@@ -193,7 +194,7 @@ describe("agents view state", () => {
 		expect(rows.map((row) => row.section)).toEqual(["running", "running", "running", "idle"]);
 	});
 
-	test("keeps row order stable when modification times and daemon input order change", () => {
+	test("keeps row order stable when activity and modification times and daemon input order change", () => {
 		const older = makeSummary({
 			id: "older",
 			sessionId: "older",
@@ -201,6 +202,7 @@ describe("agents view state", () => {
 			activity: "working",
 			created: "2026-01-01T00:00:00Z",
 			modified: "2026-01-04T00:00:00Z",
+			lastActivityAt: "2026-01-04T00:00:00Z",
 		});
 		const newer = makeSummary({
 			id: "newer",
@@ -209,12 +211,13 @@ describe("agents view state", () => {
 			activity: "working",
 			created: "2026-01-02T00:00:00Z",
 			modified: "2026-01-03T00:00:00Z",
+			lastActivityAt: "2026-01-03T00:00:00Z",
 		});
 
 		const initialOrder = buildAgentsViewRows([older, newer]).map((row) => row.summary.sessionId);
 		const refreshedOrder = buildAgentsViewRows([
-			{ ...newer, modified: "2026-01-05T00:00:00Z" },
-			{ ...older, modified: "2026-01-06T00:00:00Z" },
+			{ ...newer, modified: "2026-01-05T00:00:00Z", lastActivityAt: "2026-01-05T00:00:00Z" },
+			{ ...older, modified: "2026-01-06T00:00:00Z", lastActivityAt: "2026-01-06T00:00:00Z" },
 		]).map((row) => row.summary.sessionId);
 
 		expect(initialOrder).toEqual(["newer", "older"]);
@@ -229,6 +232,52 @@ describe("agents view state", () => {
 		]);
 
 		expect(rows.map((row) => row.summary.sessionId)).toEqual(["alpha", "beta-1", "beta-2"]);
+	});
+
+	test("sorts idle rows by last message activity, newest first", () => {
+		const rows = buildAgentsViewRows([
+			makeSummary({
+				id: "created-newest",
+				sessionId: "created-newest",
+				sessionName: "created newest",
+				activity: "idle",
+				created: "2026-01-03T00:00:00Z",
+				lastActivityAt: "2026-01-01T00:00:00Z",
+			}),
+			makeSummary({
+				id: "middle",
+				sessionId: "middle",
+				sessionName: "middle",
+				activity: "idle",
+				created: "2026-01-02T00:00:00Z",
+				lastActivityAt: "2026-01-02T00:00:00Z",
+			}),
+			makeSummary({
+				id: "active-newest",
+				sessionId: "active-newest",
+				sessionName: "active newest",
+				activity: "idle",
+				created: "2026-01-01T00:00:00Z",
+				lastActivityAt: "2026-01-03T00:00:00Z",
+			}),
+			makeSummary({
+				id: "running-oldest",
+				sessionId: "running-oldest",
+				sessionName: "running oldest",
+				activity: "working",
+				isStreaming: true,
+				created: "2025-12-31T00:00:00Z",
+				lastActivityAt: "2025-12-31T00:00:00Z",
+			}),
+		]);
+
+		expect(rows.map((row) => row.summary.sessionId)).toEqual([
+			"running-oldest",
+			"active-newest",
+			"middle",
+			"created-newest",
+		]);
+		expect(rows.map((row) => row.section)).toEqual(["running", "idle", "idle", "idle"]);
 	});
 
 	test("summarizes subagents on their parent and omits subagent rows", () => {
@@ -907,7 +956,12 @@ describe("agents view state", () => {
 		});
 
 		const [record] = reconcileUnifiedSessions([daemon], [saved]);
-		expect(record).toMatchObject({ daemon, saved, identity: "file:/tmp/sessions/merged.jsonl", section: "idle" });
+		expect(record).toMatchObject({
+			daemon,
+			saved,
+			identity: `file:${canonicalSessionPath("/tmp/sessions/merged.jsonl")}`,
+			section: "idle",
+		});
 		expect(record?.searchableText).toContain("uniquely searchable transcript");
 		expect(record?.searchableText).toContain("lunar regression");
 		expect(buildAgentsViewRows([record!])[0]).toMatchObject({
@@ -972,10 +1026,13 @@ describe("agents view state", () => {
 	test("deduplicates and protects sessions across symlink aliases", () => {
 		const root = mkdtempSync(join(tmpdir(), "session-view-alias-"));
 		try {
-			const real = join(root, "session.jsonl");
-			const alias = join(root, "alias.jsonl");
+			const realDir = join(root, "real");
+			const aliasDir = join(root, "alias");
+			mkdirSync(realDir);
+			const real = join(realDir, "session.jsonl");
 			writeFileSync(real, "");
-			symlinkSync(real, alias);
+			symlinkSync(realDir, aliasDir, process.platform === "win32" ? "junction" : "dir");
+			const alias = join(aliasDir, "session.jsonl");
 			const daemon = makeSummary({ activeSessionId: "active", sessionFile: alias, sessionId: "same" });
 			const saved = makeSessionInfo({ id: "same", path: real });
 			expect(reconcileUnifiedSessions([daemon], [saved])).toHaveLength(1);
@@ -988,10 +1045,13 @@ describe("agents view state", () => {
 	test("uses canonical path and fallback active-id keys for heartbeat ancestry", () => {
 		const root = mkdtempSync(join(tmpdir(), "session-view-parent-alias-"));
 		try {
-			const path = join(root, "parent.jsonl");
-			const alias = join(root, "alias.jsonl");
+			const realDir = join(root, "real");
+			const aliasDir = join(root, "alias");
+			mkdirSync(realDir);
+			const path = join(realDir, "parent.jsonl");
 			writeFileSync(path, "");
-			symlinkSync(path, alias);
+			symlinkSync(realDir, aliasDir, process.platform === "win32" ? "junction" : "dir");
+			const alias = join(aliasDir, "parent.jsonl");
 			const summaries = [
 				makeSummary({ id: "root", activeSessionId: undefined, sessionFile: path }),
 				makeSummary({
@@ -1044,9 +1104,12 @@ describe("agents view state", () => {
 		const enriched = enrichedRecords.find((record) => record.daemon?.sessionId === parent.sessionId);
 		const expanded = buildAgentsViewRows(enrichedRecords, new Set([live!.identity]), new Set([live!.identity]));
 
-		expect(inactive).toMatchObject({ identity: "file:/tmp/saved.jsonl", section: "inactive" });
+		expect(inactive).toMatchObject({
+			identity: `file:${canonicalSessionPath("/tmp/saved.jsonl")}`,
+			section: "inactive",
+		});
 		expect(enriched).toMatchObject({ identity: live?.identity, section: "idle", saved });
-		expect(enriched?.identityAliases).toContain("file:/tmp/saved.jsonl");
+		expect(enriched?.identityAliases).toContain(`file:${canonicalSessionPath("/tmp/saved.jsonl")}`);
 		expect(expanded.map((row) => row.kind)).toContain("subagent-code");
 		expect(expanded.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(true);
 	});
@@ -1379,12 +1442,17 @@ describe("agents view state", () => {
 						id: "saved-child",
 						path: "/tmp/project/saved-child.jsonl",
 						parentSessionPath: "/tmp/project/missing-parent.jsonl",
+						modified: new Date("2026-01-04T00:00:00Z"),
 					}),
 				],
 			);
 
 			expect(buildAgentsViewRows([child!])).toMatchObject([
-				{ kind: "agent", depth: 0, summary: { sessionId: "saved-child" } },
+				{
+					kind: "agent",
+					depth: 0,
+					summary: { sessionId: "saved-child", lastActivityAt: "2026-01-04T00:00:00.000Z" },
+				},
 			]);
 		});
 
