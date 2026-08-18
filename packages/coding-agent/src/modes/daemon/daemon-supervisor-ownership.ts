@@ -196,8 +196,16 @@ class DaemonSupervisorAlreadyRunningError extends Error {
 class DaemonSupervisorOwnershipLostError extends Error {
 	readonly code = "supervisor_generation_stale" as const;
 
-	constructor(generation: string) {
-		super(`Daemon supervisor generation ${generation} no longer owns its registry entry`);
+	constructor(generation: string, details: { socketPath?: string; registryDir?: string } = {}) {
+		const context = [
+			details.socketPath ? `socket: ${details.socketPath}` : undefined,
+			details.registryDir ? `registry: ${details.registryDir}` : undefined,
+		].filter((part) => part !== undefined);
+		super(
+			`Daemon supervisor generation ${generation} no longer owns its registry entry ` +
+				`(record on disk is missing or was replaced)${context.length > 0 ? `; ${context.join("; ")}` : ""}; ` +
+				"restart the daemon to recover — sessions are preserved",
+		);
 		this.name = "DaemonSupervisorOwnershipLostError";
 	}
 }
@@ -222,7 +230,7 @@ class DaemonSupervisorOwnership {
 
 	async assertCurrent(): Promise<void> {
 		if (this.released) {
-			throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			throw this.ownershipLostError();
 		}
 		// The durable registration is authoritative; Temp compatibility metadata may disappear while this owner is live.
 		const current =
@@ -232,8 +240,15 @@ class DaemonSupervisorOwnership {
 						readOwnerRecord(ownerDirectoryPath(this.registryDir, this.record.generation)),
 					);
 		if (!current || !sameOwnerRecord(current, this.record)) {
-			throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			throw this.ownershipLostError();
 		}
+	}
+
+	private ownershipLostError(): DaemonSupervisorOwnershipLostError {
+		return new DaemonSupervisorOwnershipLostError(this.record.generation, {
+			socketPath: this.record.socketPath,
+			registryDir: this.registryDir,
+		});
 	}
 
 	async updatePhase(phase: DaemonSupervisorOwnerPhase): Promise<void> {
@@ -310,11 +325,7 @@ class DaemonShutdownAdmission {
 		private registryDirs: string[],
 	) {
 		this.refreshTimer = setInterval(() => {
-			this.refreshPromise ??= this.assertOrRenew()
-				.catch(() => undefined)
-				.finally(() => {
-					this.refreshPromise = undefined;
-				});
+			void this.assertOrRenew().catch(() => undefined);
 		}, SHUTDOWN_ADMISSION_REFRESH_MS);
 		this.refreshTimer.unref();
 	}
@@ -390,8 +401,20 @@ class DaemonShutdownAdmission {
 		if (this.released || this.lost) {
 			throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
 		}
+		this.refreshPromise ??= this.performRenew().finally(() => {
+			this.refreshPromise = undefined;
+		});
+		await this.refreshPromise;
+	}
+
+	private async performRenew(): Promise<void> {
 		try {
 			await withDaemonSupervisorRegistryGuards(this.registryDirs, () => {
+				// release() may have completed while this call waited on the guard;
+				// a released record must never be rewritten to disk.
+				if (this.released || this.lost) {
+					throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
+				}
 				const primary = readShutdownAdmission(shutdownAdmissionPath(this.registryDirs[0]!));
 				if (!sameShutdownAdmission(primary, this.record) || !matchesExactProcessIdentity(this.record)) {
 					throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
@@ -420,7 +443,7 @@ class DaemonShutdownAdmission {
 		}
 		this.released = true;
 		clearInterval(this.refreshTimer);
-		await this.refreshPromise;
+		await this.refreshPromise?.catch(() => undefined);
 		await withDaemonSupervisorRegistryGuards(this.registryDirs, () => {
 			for (const registryDir of this.registryDirs) {
 				const path = shutdownAdmissionPath(registryDir);
@@ -448,7 +471,7 @@ function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = pro
 function platformDefaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
 	return process.platform === "win32"
 		? durableWindowsDaemonSupervisorRegistryDir(environment)
-		: resolve(defaultDaemonSocketDir(), "supervisor-owners");
+		: join(homedir(), ".prime", "supervisor-owners");
 }
 
 function durableWindowsDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
@@ -472,6 +495,43 @@ function durableDaemonSupervisorDiscoveryRegistryDir(environment: NodeJS.Process
 
 function legacyWindowsDaemonSupervisorRegistryDir(): string {
 	return resolve(defaultDaemonSocketDir(), "supervisor-owners");
+}
+
+/**
+ * Pre-move registry location under $TMPDIR, consulted READ-ONLY while daemons
+ * from before the ~/.prime move may still be running. Gated off whenever the
+ * registry is overridden. Windows already used a durable LOCALAPPDATA path;
+ * its temp location stays the Windows-only legacy helper above.
+ */
+function implicitLegacyDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+	if (environment[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV] || environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]) {
+		return undefined;
+	}
+	return process.platform === "win32"
+		? legacyWindowsDaemonSupervisorRegistryDir()
+		: resolve(defaultDaemonSocketDir(), "supervisor-owners");
+}
+
+/**
+ * Non-mutating legacy scan: never reclaims abandoned directories (old-build
+ * daemons own that location's lifecycle) and runs without the legacy guard.
+ */
+function readLegacyOwnersForSocket(
+	legacyRegistryDir: string,
+	normalizedSocketPath: string,
+): DaemonSupervisorOwnerRecord[] {
+	let entries: string[];
+	try {
+		entries = readdirSync(legacyRegistryDir);
+	} catch {
+		return [];
+	}
+	return entries
+		.filter((name) => name.endsWith(".owner"))
+		.flatMap((name) => {
+			const owner = readOwnerRecord(resolve(legacyRegistryDir, name));
+			return owner && owner.socketPath === normalizedSocketPath ? [owner] : [];
+		});
 }
 
 export function resolveWindowsDaemonSupervisorSocketCandidates(
@@ -927,14 +987,18 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		socketPath: string;
 	},
 	validatedFingerprint?: string,
+	registryDir?: string,
+	legacyRegistryDir: string | undefined = registryDir === undefined
+		? implicitLegacyDaemonSupervisorRegistryDir()
+		: undefined,
 ): Promise<string> {
-	const registryDir = defaultDaemonSupervisorRegistryDir();
+	registryDir ??= defaultDaemonSupervisorRegistryDir();
+	const primaryDirectory = ownerDirectoryPath(registryDir, owner.generation);
 	const current =
-		process.platform === "win32"
-			? readOwnerRecord(ownerDirectoryPath(registryDir, owner.generation))
-			: await withDaemonSupervisorRegistryGuard(registryDir, () =>
-					readOwnerRecord(ownerDirectoryPath(registryDir, owner.generation)),
-				);
+		(process.platform === "win32"
+			? readOwnerRecord(primaryDirectory)
+			: await withDaemonSupervisorRegistryGuard(registryDir, () => readOwnerRecord(primaryDirectory))) ??
+		(legacyRegistryDir ? readOwnerRecord(ownerDirectoryPath(legacyRegistryDir, owner.generation)) : undefined);
 	if (
 		!current ||
 		current.pid !== owner.pid ||
@@ -943,11 +1007,11 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
 		!isProcessAlive(current.pid)
 	) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation);
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
 	}
 	const fingerprint = ownerRecordFingerprint(current);
 	if (fingerprint !== validatedFingerprint && !matchesExactProcessIdentity(current)) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation);
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
 	}
 	return fingerprint;
 }
@@ -1072,7 +1136,7 @@ export async function listDaemonSupervisorRegistryDirs(): Promise<string[]> {
 		defaultDaemonSupervisorRegistryDir(),
 		platformDefaultDaemonSupervisorRegistryDir(),
 		discoveryRegistryDir,
-		...(process.platform === "win32" ? [legacyWindowsDaemonSupervisorRegistryDir()] : []),
+		...(implicitLegacyDaemonSupervisorRegistryDir() ? [implicitLegacyDaemonSupervisorRegistryDir()!] : []),
 		...knownEntries.flatMap((entry) => (entry.registryDir ? [entry.registryDir] : [])),
 	]);
 }
@@ -1127,7 +1191,9 @@ function daemonSupervisorRegistryDirs(registryDir?: string, legacyRegistryDir?: 
 		legacyRegistryDir ??
 		(usesDurableWindowsDaemonSupervisorRegistry(durableRegistryDir)
 			? legacyWindowsDaemonSupervisorRegistryDir()
-			: undefined);
+			: registryDir === undefined
+				? implicitLegacyDaemonSupervisorRegistryDir()
+				: undefined);
 	if (legacyCandidate && legacyCandidate !== durableRegistryDir && existsSync(legacyCandidate)) {
 		candidateRegistryDirs.push(legacyCandidate);
 	}
@@ -1164,12 +1230,80 @@ export function daemonSupervisorSuccessorRegistryDir(registryDir: string): strin
 	return migratedDaemonSupervisorRegistryDir(registryDir);
 }
 
+async function persistFenceFromReadOnlyLegacy(
+	socketPath: string,
+	hello: DaemonSupervisorHelloIdentity,
+	registryDir: string,
+	legacyRegistryDir: string,
+): Promise<string> {
+	const fenceDirectory = resolve(registryDir, "startup-fences");
+	const path = startupFencePath(fenceDirectory, socketPath);
+	const normalizedSocketPath = normalizeSocketPath(socketPath);
+	await withDaemonSupervisorRegistryGuard(registryDir, () => {
+		mkdirPrivateDaemonSupervisorDir(fenceDirectory, true);
+		const owners = existsSync(registryDir)
+			? listOwnerDirectories(registryDir).flatMap((directory) => {
+					const owner = readOwnerRecord(directory);
+					return owner?.socketPath === normalizedSocketPath ? [owner] : [];
+				})
+			: [];
+		let matchingOwners = owners.filter((owner) => owner.socketPath === normalizedSocketPath);
+		if (matchingOwners.length === 0) {
+			matchingOwners = readLegacyOwnersForSocket(legacyRegistryDir, normalizedSocketPath).filter(
+				(owner) => owner.token === hello.supervisorOwnerToken && owner.pid === hello.supervisorPid,
+			);
+		}
+		if (matchingOwners.length === 0) {
+			throw new Error(`Daemon supervisor owner does not match ${socketPath}`);
+		}
+		if (matchingOwners.length > 1) {
+			throw new Error(`Multiple daemon supervisor owners match ${socketPath}`);
+		}
+		const owner = matchingOwners[0];
+		if (!owner) {
+			throw new Error(`Daemon supervisor owner disappeared for ${socketPath}`);
+		}
+		const helloSocketPath = hello.supervisorSocketPath;
+		if (
+			!Number.isInteger(hello.supervisorPid) ||
+			hello.supervisorPid !== owner.pid ||
+			hello.supervisorGeneration !== owner.generation ||
+			hello.supervisorOwnerToken !== owner.token ||
+			typeof helloSocketPath !== "string" ||
+			normalizeSocketPath(helloSocketPath) !== owner.socketPath ||
+			typeof owner.processStartId !== "string" ||
+			hello.supervisorProcessStartId !== owner.processStartId
+		) {
+			throw new Error(`Daemon supervisor hello does not match its durable owner for ${socketPath}`);
+		}
+		const observedProcessStartId = getProcessStartId(owner.pid);
+		if (observedProcessStartId !== owner.processStartId) {
+			throw new Error(`Daemon supervisor process identity changed for ${socketPath}`);
+		}
+		const record: DaemonStartupFenceRecord = {
+			version: OWNER_VERSION,
+			token: randomUUID(),
+			ownerToken: owner.token,
+			pid: owner.pid,
+			processStartId: owner.processStartId,
+			socketPath: owner.socketPath,
+			supervisorGeneration: owner.generation,
+			createdAt: new Date().toISOString(),
+		};
+		writeJsonAtomically(path, record);
+	});
+	return registryDir;
+}
+
 export async function persistDaemonStartupFenceFromOwner(
 	socketPath: string,
 	hello: DaemonSupervisorHelloIdentity,
 	registryDir?: string,
 	legacyRegistryDir?: string,
 ): Promise<string> {
+	if (registryDir !== undefined && legacyRegistryDir !== undefined) {
+		return persistFenceFromReadOnlyLegacy(socketPath, hello, registryDir, legacyRegistryDir);
+	}
 	const adoptedRegistryDir = await adoptLegacyDaemonSupervisorOwnershipFromHello(
 		socketPath,
 		hello,
