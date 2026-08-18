@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -7442,6 +7442,36 @@ describe("daemon mode helpers", () => {
 			await host.deleteRlmSubagentRuntime(fixture.childId);
 			expect(existsSync(fixture.childArtifactDir)).toBe(false);
 			expect(existsSync(fixture.childSessionFile)).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("tombstones descendant ledger edges when deleting a child", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-descendant-tombstone-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
+
+			const ledger = new RlmSpawnLedger(tempDir, join(tempDir, "sessions"));
+			const live = await ledger.edges();
+			expect(live.map((edge) => edge.childId)).not.toContain(fixture.childId);
+			expect(live.map((edge) => edge.childId)).not.toContain(fixture.grandchildId);
+			const all = await ledger.edges(true);
+			expect(all.find((edge) => edge.childId === fixture.grandchildId)?.deleted).toBe("parent-teardown");
+			expect(all.find((edge) => edge.childId === fixture.childId)?.deleted).toBe("user");
+
+			expect(existsSync(fixture.childSessionFile)).toBe(true);
+			expect(existsSync(fixture.grandchildSessionFile)).toBe(true);
+			const grandchildDisplay = JSON.parse(
+				readFileSync(join(dirname(fixture.grandchildSessionFile), "rlm-subagent.json"), "utf8"),
+			) as { childId: string; status: string };
+			expect(grandchildDisplay).toMatchObject({ childId: fixture.grandchildId, status: "deleted" });
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

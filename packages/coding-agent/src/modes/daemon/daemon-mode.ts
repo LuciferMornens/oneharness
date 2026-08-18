@@ -11,7 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
@@ -1105,6 +1105,124 @@ export class AgentDaemon {
 		}
 	}
 
+	private sessionIdFromSessionFile(sessionFile: string): string {
+		return basename(sessionFile, ".jsonl");
+	}
+
+	/**
+	 * Live descendants of `rootSessionFile`, deepest first. Ledger edges first,
+	 * then any still-live legacy-registry children the seed missed, so a
+	 * subtree delete cannot drop a grandchild registry by sweeping the child
+	 * first.
+	 */
+	private async collectLiveRlmDescendants(
+		rootSessionFile: string,
+		rootSessionId: string,
+	): Promise<PassiveRlmSubagentEntry[]> {
+		const ledger = this.rlmSpawnLedger();
+		const live = await ledger.edges();
+		const childrenByParent = new Map<string, RlmLedgerEdge[]>();
+		for (const edge of live) {
+			const parentPath = canonicalSessionPath(edge.parent);
+			const siblings = childrenByParent.get(parentPath) ?? [];
+			siblings.push(edge);
+			childrenByParent.set(parentPath, siblings);
+		}
+		const collected: PassiveRlmSubagentEntry[] = [];
+		const visited = new Set<string>();
+		const visit = async (parentFile: string, parentId: string): Promise<void> => {
+			const parent = { sessionId: parentId, sessionFile: parentFile };
+			const seen = new Set<string>();
+			const queue: PassiveRlmSubagentEntry[] = [];
+			for (const edge of childrenByParent.get(canonicalSessionPath(parentFile)) ?? []) {
+				seen.add(`${edge.childId}\0${canonicalSessionPath(edge.child)}`);
+				queue.push(await this.passiveRlmSubagentEntryForEdge(edge, parent));
+			}
+			for (const legacy of await this.readLegacyRlmSubagentRegistry(
+				this.legacyRlmSubagentRegistryPath(parentFile, parentId),
+			)) {
+				if (legacy.status === "deleted") continue;
+				const key = `${legacy.childId}\0${canonicalSessionPath(legacy.sessionFile)}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				const depth = legacy.rlmDepth !== undefined && legacy.rlmDepth >= 1 ? legacy.rlmDepth : 1;
+				try {
+					await ledger.appendSpawn({
+						childId: legacy.childId,
+						parent: parentFile,
+						child: legacy.sessionFile,
+						depth,
+						name: legacy.sessionName,
+					});
+				} catch {
+					// Already recorded, or a concurrent writer admitted the same path.
+				}
+				queue.push({
+					childId: legacy.childId,
+					sessionName: legacy.sessionName,
+					sessionDir: legacy.sessionDir,
+					sessionFile: legacy.sessionFile,
+					parentSessionId: parentId,
+					parentSessionFile: parentFile,
+					...(legacy.rlmDepth !== undefined ? { rlmDepth: legacy.rlmDepth } : {}),
+					...rlmSubagentMetadataFields(legacy),
+					status: legacy.status,
+					createdAt: legacy.createdAt,
+				});
+			}
+			for (const entry of queue) {
+				const visitKey = canonicalSessionPath(entry.sessionFile);
+				if (visited.has(visitKey)) continue;
+				visited.add(visitKey);
+				const info = await readSessionInfo(entry.sessionFile);
+				await visit(entry.sessionFile, info?.id ?? this.sessionIdFromSessionFile(entry.sessionFile));
+				collected.push(entry);
+			}
+		};
+		await visit(rootSessionFile, rootSessionId);
+		return collected;
+	}
+
+	/** Display tombstone first, then the ledger delete. A failed append fails the deletion. */
+	private async persistRlmSubagentDeletion(
+		entry: PassiveRlmSubagentEntry,
+		reason: RlmLedgerDeleteReason,
+	): Promise<void> {
+		try {
+			writeRlmSubagentDisplayEntry({
+				type: "rlm_subagent",
+				childId: entry.childId,
+				sessionName: entry.sessionName,
+				sessionDir: entry.sessionDir,
+				sessionFile: entry.sessionFile,
+				...rlmSubagentMetadataFields(entry),
+				status: "deleted",
+				createdAt: entry.createdAt,
+				updatedAt: new Date().toISOString(),
+			});
+		} catch (error) {
+			throw new Error(
+				`Failed to persist deletion for RLM subagent ${entry.childId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		await this.rlmSpawnLedger().appendDelete({
+			childId: entry.childId,
+			child: entry.sessionFile,
+			reason,
+		});
+	}
+
+	private async sweepDeletedRlmSubagent(childId: string, sessionFile: string): Promise<void> {
+		try {
+			this.cancelScheduledJobsForSessionFile(sessionFile);
+		} catch (error) {
+			this.log(
+				`failed to cancel scheduled jobs for deleted RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		await this.deleteRlmSubagentArtifacts(childId, sessionFile);
+	}
+
 	private async recordRlmSubagentDeletion(
 		parentState: ActiveSessionState,
 		childId: string,
@@ -1125,15 +1243,7 @@ export class AgentDaemon {
 				sessionId: parentState.runtime.session.sessionId,
 				sessionFile: parentFile,
 			});
-		} else if (edges.length > 0) {
-			// Only tombstoned edges: the tombstones are already durable, nothing
-			// to re-append. A prior deletion may have crashed before its artifact
-			// sweep, so retry it here.
-			for (const tombstoned of edges) {
-				await this.deleteRlmSubagentArtifacts(childId, tombstoned.child);
-			}
-			return;
-		} else {
+		} else if (edges.length === 0) {
 			// No edge at all. A pre-ledger child the seed missed may still exist
 			// in the legacy registry; an unreadable registry means the durable
 			// deletion boundary cannot be established, so the deletion fails.
@@ -1161,35 +1271,44 @@ export class AgentDaemon {
 				createdAt: legacy.createdAt,
 			};
 		}
-		// Display tombstone first ("deleted deliberately, transcript retained"):
-		// a crash in between leaves a live ledger edge over a deleted display
-		// entry, healed by retrying the deletion; the reverse order could
-		// tombstone the ledger while the display file still claims the child
-		// exists.
-		try {
-			writeRlmSubagentDisplayEntry({
-				type: "rlm_subagent",
-				childId: entry.childId,
-				sessionName: entry.sessionName,
-				sessionDir: entry.sessionDir,
-				sessionFile: entry.sessionFile,
-				...rlmSubagentMetadataFields(entry),
-				status: "deleted",
-				createdAt: entry.createdAt,
-				updatedAt: new Date().toISOString(),
-			});
-		} catch (error) {
-			throw new Error(
-				`Failed to persist deletion for RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
-			);
+		const subtreeRoots = entry
+			? [entry]
+			: edges.map((tombstoned) => ({
+					childId,
+					sessionName: tombstoned.name,
+					sessionDir: dirname(tombstoned.child),
+					sessionFile: tombstoned.child,
+					parentSessionId: parentState.runtime.session.sessionId,
+					parentSessionFile: parentFile,
+					status: "deleted" as const,
+					createdAt: 0,
+				}));
+		const descendants: PassiveRlmSubagentEntry[] = [];
+		const seenDescendants = new Set<string>();
+		for (const root of subtreeRoots) {
+			const info = await readSessionInfo(root.sessionFile);
+			for (const descendant of await this.collectLiveRlmDescendants(
+				root.sessionFile,
+				info?.id ?? this.sessionIdFromSessionFile(root.sessionFile),
+			)) {
+				const key = `${descendant.childId}\0${canonicalSessionPath(descendant.sessionFile)}`;
+				if (seenDescendants.has(key)) continue;
+				seenDescendants.add(key);
+				descendants.push(descendant);
+			}
 		}
-		// The ledger delete record is the topology tombstone; unlike the
-		// dual-write era it has no other writer to fall back on, so a failed
-		// append is a failed deletion.
-		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
-		// Deletion boundary: transcript + display tombstone are the durable
-		// record and stay; the nested artifact dir is a runtime cache and goes.
-		await this.deleteRlmSubagentArtifacts(childId, entry.sessionFile);
+		for (const descendant of descendants) {
+			await this.persistRlmSubagentDeletion(descendant, "parent-teardown");
+		}
+		if (entry) {
+			await this.persistRlmSubagentDeletion(entry, reason);
+		}
+		for (const descendant of descendants) {
+			await this.sweepDeletedRlmSubagent(descendant.childId, descendant.sessionFile);
+		}
+		for (const root of subtreeRoots) {
+			await this.deleteRlmSubagentArtifacts(root.childId, root.sessionFile);
+		}
 	}
 
 	/** Best-effort artifact-dir removal: cache cleanup must never fail a deletion. */
