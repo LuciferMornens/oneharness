@@ -111,7 +111,7 @@ describe("Anthropic thinking disable payload", () => {
 	it("preserves temperature and provider thinking defaults when reasoning is omitted", async () => {
 		for (const model of [
 			getModel("anthropic", "claude-sonnet-4-5"),
-			getModel("cloudflare-ai-gateway", "claude-sonnet-4-5"),
+			getModel("cloudflare-ai-gateway", "claude-sonnet-4.5"),
 			getModel("vercel-ai-gateway", "anthropic/claude-sonnet-4.5"),
 		]) {
 			const payload = await capturePayload(model, { temperature: 0.4 });
@@ -123,7 +123,7 @@ describe("Anthropic thinking disable payload", () => {
 	it("sends thinking.type=disabled for budget-based reasoning models when thinking is off", async () => {
 		for (const model of [
 			getModel("anthropic", "claude-sonnet-4-5"),
-			getModel("cloudflare-ai-gateway", "claude-sonnet-4-5"),
+			getModel("cloudflare-ai-gateway", "claude-sonnet-4.5"),
 			getModel("vercel-ai-gateway", "anthropic/claude-sonnet-4.5"),
 		]) {
 			const payload = await capturePayload(model, { reasoning: "off" });
@@ -271,7 +271,7 @@ describe("Anthropic thinking disable payload", () => {
 	it("uses adaptive thinking for Claude Opus 4.7 when reasoning is enabled", async () => {
 		for (const model of [
 			getModel("anthropic", "claude-opus-4-7"),
-			getModel("cloudflare-ai-gateway", "claude-opus-4-7"),
+			getModel("cloudflare-ai-gateway", "claude-opus-4.7"),
 			getModel("vercel-ai-gateway", "anthropic/claude-opus-4.7"),
 		]) {
 			const payload = await capturePayload(model, { reasoning: "high" });
