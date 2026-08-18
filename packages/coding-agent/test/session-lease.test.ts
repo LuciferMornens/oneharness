@@ -1,9 +1,27 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, type renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+type RenameSync = typeof renameSync;
+
+const fsMocks = vi.hoisted(() => ({
+	actualRenameSync: undefined as RenameSync | undefined,
+	renameSync: vi.fn<RenameSync>(),
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	fsMocks.actualRenameSync = actual.renameSync;
+	fsMocks.renameSync.mockImplementation(actual.renameSync);
+	return {
+		...actual,
+		renameSync: fsMocks.renameSync,
+	};
+});
+
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
@@ -16,6 +34,10 @@ import {
 const tempDirs: string[] = [];
 
 afterEach(() => {
+	fsMocks.renameSync.mockReset();
+	if (fsMocks.actualRenameSync) {
+		fsMocks.renameSync.mockImplementation(fsMocks.actualRenameSync);
+	}
 	for (const directory of tempDirs.splice(0)) {
 		rmSync(directory, { recursive: true, force: true });
 	}
@@ -149,7 +171,14 @@ describe("session leases", () => {
 		const sessionPath = join(agentDir, "session.jsonl");
 		const aliasPath = join(agentDir, "session-alias.jsonl");
 		writeFileSync(sessionPath, "");
-		symlinkSync(sessionPath, aliasPath);
+		try {
+			symlinkSync(sessionPath, aliasPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EPERM") {
+				return;
+			}
+			throw error;
+		}
 		const first = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-a"));
 
 		expect(() => acquireSessionLease(aliasPath, agentDir, enabledEnvironment("owned-b"))).toThrow(
@@ -186,4 +215,113 @@ describe("session leases", () => {
 		const agentDir = createTempDir();
 		expect(acquireSessionLease(join(agentDir, "session.jsonl"), agentDir, {})).toBeUndefined();
 	});
+
+	it("reclaims a stale lease when renaming onto the lock throws EPERM", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "eperm.jsonl"));
+		const lockDirectory = plantDeadOwnerLease(agentDir, sessionPath, "dead-owner");
+		forceCandidateRenameError(lockDirectory, "EPERM", true);
+
+		const lease = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"));
+		expect(lease?.sessionPath).toBe(sessionPath);
+		lease?.release();
+	});
+
+	it("rejects a live owner when renaming onto the lock throws EPERM", () => {
+		const agentDir = createTempDir();
+		const sessionPath = join(agentDir, "session.jsonl");
+		const first = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-a"));
+		const lockDirectory = join(
+			agentDir,
+			"session-leases",
+			`${createHash("sha256").update(canonicalSessionPath(sessionPath)).digest("hex")}.lock`,
+		);
+		forceCandidateRenameError(lockDirectory, "EPERM", true);
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("owned-b"))).toThrow(
+			SessionAlreadyActiveError,
+		);
+
+		first?.release();
+	});
+
+	it("throws a clear error when a stale lease cannot be reclaimed", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "reclaim-fail.jsonl"));
+		const lockDirectory = plantDeadOwnerLease(agentDir, sessionPath, "dead-owner");
+		fsMocks.renameSync.mockImplementation((source, destination, ...rest) => {
+			if (isCandidateLockRename(source, destination, lockDirectory)) {
+				throw renameErrno("EPERM", source, destination);
+			}
+			if (typeof source === "string" && source === lockDirectory) {
+				throw renameErrno("EPERM", source, destination);
+			}
+			return fsMocks.actualRenameSync!(source, destination, ...rest);
+		});
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow(
+			/Could not reclaim stale session lease/,
+		);
+	});
+
+	it("rethrows rename errors when the lock destination does not exist", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "missing-dest.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		forceCandidateRenameError(lockDirectory, "EIO");
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"))).toThrow(/EIO/);
+	});
 });
+
+function plantDeadOwnerLease(agentDir: string, sessionPath: string, activeSessionId: string): string {
+	const key = createHash("sha256").update(sessionPath).digest("hex");
+	const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+	mkdirSync(lockDirectory, { recursive: true });
+	writeFileSync(
+		join(lockDirectory, "owner.json"),
+		JSON.stringify({
+			version: 1,
+			token: "stale",
+			pid: 2_147_483_647,
+			activeSessionId,
+			sessionPath,
+			createdAt: new Date(0).toISOString(),
+		}),
+	);
+	return lockDirectory;
+}
+
+function isCandidateLockRename(source: unknown, destination: unknown, lockDirectory: string): boolean {
+	return (
+		typeof source === "string" &&
+		typeof destination === "string" &&
+		destination === lockDirectory &&
+		source.includes(".candidate-")
+	);
+}
+
+function renameErrno(code: string, source: unknown, destination: unknown): NodeJS.ErrnoException {
+	const error = new Error(
+		`${code}: operation not permitted, rename '${String(source)}' -> '${String(destination)}'`,
+	) as NodeJS.ErrnoException;
+	error.code = code;
+	error.syscall = "rename";
+	if (typeof source === "string") {
+		error.path = source;
+	}
+	return error;
+}
+
+function forceCandidateRenameError(lockDirectory: string, code: string, onlyWhenDestinationExists = false): void {
+	fsMocks.renameSync.mockImplementation((source, destination, ...rest) => {
+		if (
+			isCandidateLockRename(source, destination, lockDirectory) &&
+			(!onlyWhenDestinationExists || existsSync(lockDirectory))
+		) {
+			throw renameErrno(code, source, destination);
+		}
+		return fsMocks.actualRenameSync!(source, destination, ...rest);
+	});
+}
