@@ -566,6 +566,27 @@ describe("totalTokens field", () => {
 	// OpenRouter - Multiple backend providers
 	// =========================================================================
 
+	describe.skipIf(!process.env.ORCAROUTER_API_KEY)("OrcaRouter", () => {
+		it("orcarouter/auto - should return totalTokens equal to sum of components", {
+			retry: 3,
+			timeout: 60000,
+		}, async () => {
+			const llm = (getModel as (provider: string, modelId: string) => Model<"openai-completions">)(
+				"orcarouter",
+				"orcarouter/auto",
+			);
+
+			console.log(`\nOrcaRouter / ${llm.id}:`);
+			const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.ORCAROUTER_API_KEY });
+
+			logUsage("First request", first);
+			logUsage("Second request", second);
+
+			assertTotalTokensEqualsComponents(first);
+			assertTotalTokensEqualsComponents(second);
+		});
+	});
+
 	describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter", () => {
 		it("anthropic/claude-sonnet-4 - should return totalTokens equal to sum of components", {
 			retry: 3,

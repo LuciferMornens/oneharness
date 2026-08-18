@@ -72,6 +72,7 @@ prime-agent
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` (+ `CLOUDFLARE_ACCOUNT_ID`) | `cloudflare-workers-ai` |
 | xAI | `XAI_API_KEY` | `xai` |
 | OpenRouter | `OPENROUTER_API_KEY` | `openrouter` |
+| OrcaRouter | `ORCAROUTER_API_KEY` (fallback `ORCA_KEY`) | `orcarouter` |
 | Vercel AI Gateway | `AI_GATEWAY_API_KEY` | `vercel-ai-gateway` |
 | ZAI | `ZAI_API_KEY` | `zai` |
 | OpenCode Zen | `OPENCODE_API_KEY` | `opencode` |
@@ -134,6 +135,12 @@ OAuth credentials are also stored here after `/login` and managed automatically.
 ### Prime Inference
 
 Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.
+
+### OrcaRouter
+
+OrcaRouter is an OpenAI-compatible router at `https://api.orcarouter.ai/v1`. Set `ORCAROUTER_API_KEY` (fallback `ORCA_KEY`) or store a key under `orcarouter` via `/login`. Keys start with `sk-orca-`; get one at [https://www.orcarouter.ai](https://www.orcarouter.ai). The default model is `orcarouter/auto`.
+
+To configure fallback routing, set `compat.orcaRouterRouting` in `models.json` (`models` plus `route: "fallback"`). See [models.md](models.md).
 
 ## Cloud Providers
 

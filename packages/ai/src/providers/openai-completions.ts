@@ -158,7 +158,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
 					: undefined;
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
+			const client = createClient(
+				model,
+				context,
+				apiKey,
+				options?.headers,
+				cacheSessionId,
+				compat,
+				options?.sessionId,
+			);
 			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -468,6 +476,7 @@ function createClient(
 	optionsHeaders?: Record<string, string>,
 	sessionId?: string,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
+	requestSessionId?: string,
 ) {
 	if (!apiKey) {
 		if (!process.env.OPENAI_API_KEY) {
@@ -497,6 +506,10 @@ function createClient(
 		headers.session_id = sessionId;
 		headers["x-client-request-id"] = sessionId;
 		headers["x-session-affinity"] = sessionId;
+	}
+
+	if (requestSessionId && (model.provider === "orcarouter" || model.baseUrl.includes("orcarouter.ai"))) {
+		headers["X-OrcaRouter-Session-Id"] = requestSessionId;
 	}
 
 	// Merge options headers last so they can override defaults
@@ -687,6 +700,17 @@ function buildParams(
 			if (routing.only) gatewayOptions.only = routing.only;
 			if (routing.order) gatewayOptions.order = routing.order;
 			(params as any).providerOptions = { gateway: gatewayOptions };
+		}
+	}
+
+	if (
+		(model.provider === "orcarouter" || model.baseUrl.includes("orcarouter.ai")) &&
+		model.compat?.orcaRouterRouting
+	) {
+		const routing = model.compat.orcaRouterRouting;
+		if (routing.route === "fallback" && Array.isArray(routing.models) && routing.models.length > 0) {
+			(params as any).models = routing.models.slice(0, 5);
+			(params as any).route = "fallback";
 		}
 	}
 
@@ -1200,6 +1224,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 					: "openai",
 		openRouterRouting: {},
 		vercelGatewayRouting: {},
+		orcaRouterRouting: {},
 		zaiToolStream: false,
 		supportsStrictMode: !isMoonshot && !isCloudflareAiGateway && !isPrimeInference,
 		cacheControlFormat,
@@ -1232,6 +1257,7 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		thinkingFormat: model.compat.thinkingFormat ?? detected.thinkingFormat,
 		openRouterRouting: model.compat.openRouterRouting ?? {},
 		vercelGatewayRouting: model.compat.vercelGatewayRouting ?? detected.vercelGatewayRouting,
+		orcaRouterRouting: model.compat.orcaRouterRouting ?? {},
 		zaiToolStream: model.compat.zaiToolStream ?? detected.zaiToolStream,
 		supportsStrictMode: model.compat.supportsStrictMode ?? detected.supportsStrictMode,
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,

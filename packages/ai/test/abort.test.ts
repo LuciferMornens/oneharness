@@ -263,6 +263,21 @@ describe("AI Providers Abort Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ORCAROUTER_API_KEY)("OrcaRouter Provider Abort", () => {
+		const llm = (getModel as (provider: string, modelId: string) => Model<"openai-completions">)(
+			"orcarouter",
+			"orcarouter/auto",
+		);
+
+		it("should abort mid-stream", { retry: 3 }, async () => {
+			await testAbortSignal(llm);
+		});
+
+		it("should handle immediate abort", { retry: 3 }, async () => {
+			await testImmediateAbort(llm);
+		});
+	});
+
 	describe("OpenAI Codex Provider Abort", () => {
 		it.skipIf(!openaiCodexToken)("should abort mid-stream", { retry: 3 }, async () => {
 			const llm = getModel("openai-codex", "gpt-5.2-codex");

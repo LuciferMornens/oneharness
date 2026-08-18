@@ -42,6 +42,8 @@ if ($noEnvironment) {
 		"CEREBRAS_API_KEY",
 		"XAI_API_KEY",
 		"OPENROUTER_API_KEY",
+		"ORCAROUTER_API_KEY",
+		"ORCA_KEY",
 		"ZAI_API_KEY",
 		"MISTRAL_API_KEY",
 		"MINIMAX_API_KEY",

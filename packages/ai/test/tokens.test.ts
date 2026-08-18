@@ -222,6 +222,17 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ORCAROUTER_API_KEY)("OrcaRouter Provider", () => {
+		const llm = (getModel as (provider: string, modelId: string) => Model<"openai-completions">)(
+			"orcarouter",
+			"orcarouter/auto",
+		);
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
 	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider", () => {
 		const llm = getModel("xiaomi", "mimo-v2.5-pro");
 

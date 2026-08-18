@@ -77,6 +77,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Cloudflare Workers AI**
 - **xAI**
 - **OpenRouter**
+- **OrcaRouter**
 - **Vercel AI Gateway**
 - **MiniMax**
 - **GitHub Copilot** (requires OAuth, see below)
@@ -933,6 +934,7 @@ interface OpenAICompletionsCompat {
   supportsLongCacheRetention?: boolean; // Whether long retention fields/TTL are supported (default: true)
   openRouterRouting?: OpenRouterRouting; // OpenRouter routing preferences (default: {})
   vercelGatewayRouting?: VercelGatewayRouting; // Vercel AI Gateway routing preferences (default: {})
+  orcaRouterRouting?: OrcaRouterRouting; // OrcaRouter fallback chain: top-level models + route: "fallback" (max 5, default: {})
 }
 
 interface OpenAIResponsesCompat {
@@ -1105,6 +1107,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | xAI | `XAI_API_KEY` |
 | Fireworks | `FIREWORKS_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
+| OrcaRouter | `ORCAROUTER_API_KEY` (fallback `ORCA_KEY`) |
 | Vercel AI Gateway | `AI_GATEWAY_API_KEY` |
 | zAI | `ZAI_API_KEY` |
 | MiniMax | `MINIMAX_API_KEY` |

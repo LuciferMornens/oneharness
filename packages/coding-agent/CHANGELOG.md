@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added OrcaRouter as a built-in OpenAI-compatible provider with ORCAROUTER_API_KEY / ORCA_KEY authentication and orcarouter/auto as the default model.
 - Fixed deleting an RLM child leaving descendant spawn-ledger edges live after the child was tombstoned.
 - Fixed leftover Windows session leases blocking resume with `EPERM` when the previous owner process is gone.
 - Added `effort` to `rlm.run` so a parent can set a child's reasoning level at spawn, and included each model's supported levels on `rlm.find_models` matches.
