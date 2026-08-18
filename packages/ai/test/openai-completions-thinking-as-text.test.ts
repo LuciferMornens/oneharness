@@ -34,6 +34,7 @@ const compat = {
 	thinkingFormat: "openai",
 	openRouterRouting: {},
 	vercelGatewayRouting: {},
+	orcaRouterRouting: {},
 	zaiToolStream: false,
 	supportsStrictMode: true,
 	cacheControlFormat: undefined,

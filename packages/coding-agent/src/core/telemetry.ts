@@ -456,6 +456,7 @@ export function telemetryProviderCategory(provider: string | undefined): string 
 		"google",
 		"prime",
 		"openrouter",
+		"orcarouter",
 		"bedrock",
 		"vertex",
 		"mistral",

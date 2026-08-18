@@ -98,6 +98,7 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 - Cloudflare Workers AI
 - xAI
 - OpenRouter
+- OrcaRouter
 - Vercel AI Gateway
 - ZAI
 - OpenCode Zen

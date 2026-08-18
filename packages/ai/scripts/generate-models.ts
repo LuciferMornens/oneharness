@@ -1844,6 +1844,34 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
+		// Process OrcaRouter models
+		if (data.orcarouter?.models) {
+			for (const [modelId, model] of Object.entries(data.orcarouter.models)) {
+				const m = model as ModelsDevModel;
+				if (m.tool_call !== true) continue;
+				// skip image/video generation-only outputs
+				if (m.modalities?.output?.includes("image") || m.modalities?.output?.includes("video")) continue;
+				models.push({
+					id: modelId,
+					name: m.name || modelId,
+					api: "openai-completions",
+					provider: "orcarouter",
+					baseUrl: "https://api.orcarouter.ai/v1",
+					reasoning: m.reasoning === true,
+					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
+					cost: {
+						input: m.cost?.input || 0,
+						output: m.cost?.output || 0,
+						cacheRead: m.cost?.cache_read || 0,
+						cacheWrite: m.cost?.cache_write || 0,
+					},
+					contextWindow: m.limit?.context || 4096,
+					maxTokens: m.limit?.output || 4096,
+					...(modelId === "orcarouter/auto" ? { featured: true } : {}),
+				});
+			}
+		}
+
 		// Process Fireworks models
 		if (data["fireworks-ai"]?.models) {
 			for (const [modelId, model] of Object.entries(data["fireworks-ai"].models)) {
@@ -2321,6 +2349,26 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 		if (model.reasoningCapabilities.levels.off === "off") {
 			replaceReasoningOffValue(model, "none");
 		}
+	}
+	if (model.api === "openai-completions" && model.provider === "orcarouter" && model.reasoning) {
+		// OrcaRouter translates flat reasoning_effort across upstreams.
+		model.compat = {
+			...model.compat,
+			supportsReasoningEffort: true,
+		};
+		model.reasoningCapabilities = {
+			control: "effort",
+			levels: {
+				off: "none",
+				minimal: null,
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+		};
+		syncLegacyThinkingLevelMap(model);
 	}
 	if (
 		model.api === "openai-completions" &&
@@ -3103,6 +3151,22 @@ async function generateModels() {
 			},
 			contextWindow: 2000000,
 			maxTokens: 30000,
+		});
+	}
+
+	if (!allModels.some(m => m.provider === "orcarouter" && m.id === "orcarouter/auto")) {
+		allModels.push({
+			id: "orcarouter/auto",
+			name: "OrcaRouter Auto",
+			featured: true,
+			api: "openai-completions",
+			provider: "orcarouter",
+			baseUrl: "https://api.orcarouter.ai/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 16384,
 		});
 	}
 

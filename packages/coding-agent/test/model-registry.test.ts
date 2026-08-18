@@ -8,6 +8,10 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
 
+type OpenAICompletionsCompatWithOrca = OpenAICompletionsCompat & {
+	orcaRouterRouting?: { models?: string[]; route?: "fallback" };
+};
+
 describe("ModelRegistry", () => {
 	let tempDir: string;
 	let modelsJsonPath: string;
@@ -1073,6 +1077,76 @@ describe("ModelRegistry", () => {
 			const sonnet = models.find((m) => m.id === "anthropic/claude-sonnet-4");
 			const compat = sonnet?.compat as OpenAICompletionsCompat | undefined;
 			expect(compat?.openRouterRouting).toEqual({ only: ["amazon-bedrock"] });
+		});
+
+		test("orcarouter model override preserves compat.orcaRouterRouting", () => {
+			writeRawModelsJson({
+				orcarouter: {
+					baseUrl: "https://api.orcarouter.ai/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "orcarouter/auto",
+							name: "OrcaRouter Auto",
+							compat: {
+								orcaRouterRouting: {
+									models: ["openai/gpt-4o", "anthropic/claude-sonnet-4"],
+									route: "fallback",
+								},
+							},
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toBeUndefined();
+
+			const model = registry.find("orcarouter", "orcarouter/auto");
+			expect(model).toBeDefined();
+			const compat = model?.compat as OpenAICompletionsCompatWithOrca | undefined;
+			expect(compat?.orcaRouterRouting).toEqual({
+				models: ["openai/gpt-4o", "anthropic/claude-sonnet-4"],
+				route: "fallback",
+			});
+		});
+
+		test("orcaRouterRouting merge prefers override fields", () => {
+			writeRawModelsJson({
+				orcarouter: {
+					baseUrl: "https://api.orcarouter.ai/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					compat: {
+						orcaRouterRouting: {
+							models: ["openai/gpt-4o", "anthropic/claude-sonnet-4"],
+							route: "fallback",
+						},
+					},
+					models: [
+						{
+							id: "orcarouter/auto",
+							name: "OrcaRouter Auto",
+							compat: {
+								orcaRouterRouting: {
+									models: ["google/gemini-2.5-pro"],
+								},
+							},
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.getError()).toBeUndefined();
+
+			const model = registry.find("orcarouter", "orcarouter/auto");
+			const compat = model?.compat as OpenAICompletionsCompatWithOrca | undefined;
+			expect(compat?.orcaRouterRouting).toEqual({
+				models: ["google/gemini-2.5-pro"],
+				route: "fallback",
+			});
 		});
 
 		test("model override deep merges compat settings", () => {

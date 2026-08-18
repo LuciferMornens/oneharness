@@ -33,6 +33,7 @@ export type KnownProvider =
 	| "groq"
 	| "cerebras"
 	| "openrouter"
+	| "orcarouter"
 	| "vercel-ai-gateway"
 	| "zai"
 	| "mistral"
@@ -345,6 +346,8 @@ export interface OpenAICompletionsCompat {
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
 	vercelGatewayRouting?: VercelGatewayRouting;
+	/** OrcaRouter fallback chain. Emitted as top-level `models` + `route` on chat completions. */
+	orcaRouterRouting?: OrcaRouterRouting;
 	/** Whether z.ai supports top-level `tool_stream: true` for streaming tool call deltas. Default: false. */
 	zaiToolStream?: boolean;
 	/** Whether the provider supports the `strict` field in tool definitions. Default: true. */
@@ -452,6 +455,15 @@ export interface OpenRouterRouting {
 				/** Maximum latency in seconds at the 99th percentile. */
 				p99?: number;
 		  };
+}
+
+/**
+ * OrcaRouter fallback routing.
+ * Emitted as top-level `models` and `route` on chat completions (max 5 models).
+ */
+export interface OrcaRouterRouting {
+	models?: string[];
+	route?: "fallback";
 }
 
 /**

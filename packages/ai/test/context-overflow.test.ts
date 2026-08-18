@@ -538,6 +538,20 @@ describe("Context overflow error handling", () => {
 		}, 120000);
 	});
 
+	describe.skipIf(!process.env.ORCAROUTER_API_KEY)("OrcaRouter", () => {
+		it("orcarouter/auto via OrcaRouter - should detect overflow via isContextOverflow", async () => {
+			const model = (getModel as (provider: string, modelId: string) => Model<"openai-completions">)(
+				"orcarouter",
+				"orcarouter/auto",
+			);
+			const result = await testContextOverflow(model, process.env.ORCAROUTER_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
 	// =============================================================================
 	// Ollama (local)
 	// =============================================================================

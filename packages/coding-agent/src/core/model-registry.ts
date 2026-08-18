@@ -90,6 +90,12 @@ const VercelGatewayRoutingSchema = Type.Object({
 	order: Type.Optional(Type.Array(Type.String())),
 });
 
+// Schema for OrcaRouter fallback routing preferences
+const OrcaRouterRoutingSchema = Type.Object({
+	models: Type.Optional(Type.Array(Type.String())),
+	route: Type.Optional(Type.Literal("fallback")),
+});
+
 // Schema for thinking level support and provider-specific values
 const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Null()]);
 const ThinkingLevelMapSchema = Type.Object({
@@ -226,6 +232,7 @@ const OpenAICompletionsCompatSchema = Type.Object({
 	cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
 	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
 	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
+	orcaRouterRouting: Type.Optional(OrcaRouterRoutingSchema),
 	supportsStrictMode: Type.Optional(Type.Boolean()),
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
 });
@@ -422,6 +429,13 @@ function mergeCompat(
 		mergedCompletions.vercelGatewayRouting = {
 			...baseCompletions?.vercelGatewayRouting,
 			...overrideCompletions.vercelGatewayRouting,
+		};
+	}
+
+	if (baseCompletions?.orcaRouterRouting || overrideCompletions.orcaRouterRouting) {
+		mergedCompletions.orcaRouterRouting = {
+			...baseCompletions?.orcaRouterRouting,
+			...overrideCompletions.orcaRouterRouting,
 		};
 	}
 

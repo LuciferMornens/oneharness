@@ -360,6 +360,7 @@ prime-agent --tools ipython -p "Review the code"
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing when it has `agent_traces` scope |
+| `ORCAROUTER_API_KEY` | OrcaRouter API key; `ORCA_KEY` is accepted as a fallback |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `ipykernel` instead of bootstrapping `~/.prime/agent/kernel-venv` |

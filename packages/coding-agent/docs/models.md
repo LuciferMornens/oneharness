@@ -418,6 +418,7 @@ For providers with partial OpenAI compatibility, use the `compat` field.
 | `supportsLongCacheRetention` | Whether the provider accepts long cache retention when cache retention is `long`: `prompt_cache_retention: "24h"` for OpenAI prompt caching, or `cache_control.ttl: "1h"` when `cacheControlFormat` is `anthropic`. Default: `true`. |
 | `openRouterRouting` | OpenRouter provider routing preferences. This object is sent as-is in the `provider` field of the [OpenRouter API request](https://openrouter.ai/docs/guides/routing/provider-selection). |
 | `vercelGatewayRouting` | Vercel AI Gateway routing config for provider selection (`only`, `order`) |
+| `orcaRouterRouting` | OrcaRouter fallback routing. Optional `models` list and `route: "fallback"`. |
 
 `openrouter` sends `reasoning: { effort }`. `zai` and `moonshot` send `thinking: { type: "enabled" | "disabled" }`. `qwen` uses top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that require `chat_template_kwargs.enable_thinking`.
 
@@ -495,6 +496,32 @@ Vercel AI Gateway example:
             "vercelGatewayRouting": {
               "only": ["fireworks", "novita"],
               "order": ["fireworks", "novita"]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+OrcaRouter fallback routing example:
+
+```json
+{
+  "providers": {
+    "orcarouter": {
+      "baseUrl": "https://api.orcarouter.ai/v1",
+      "apiKey": "ORCAROUTER_API_KEY",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "orcarouter/auto",
+          "name": "OrcaRouter Auto",
+          "compat": {
+            "orcaRouterRouting": {
+              "models": ["openai/gpt-4o", "anthropic/claude-sonnet-4"],
+              "route": "fallback"
             }
           }
         }
