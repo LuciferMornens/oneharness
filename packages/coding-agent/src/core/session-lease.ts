@@ -221,18 +221,25 @@ function withLeaseGuard<T>(directory: string, action: () => T): T {
 	}
 }
 
-function reclaimStaleLease(directory: string): boolean {
+function isOccupiedLeaseDestination(error: unknown, directory: string): boolean {
+	if (existsSync(directory)) {
+		return true;
+	}
+	const code = (error as NodeJS.ErrnoException).code;
+	return code === "EEXIST" || code === "ENOTEMPTY";
+}
+
+function reclaimStaleLease(directory: string): void {
 	const stalePath = `${directory}.stale-${process.pid}-${randomUUID()}`;
 	try {
 		renameSync(directory, stalePath);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-			return true;
+			return;
 		}
-		return false;
+		throw new Error(`Could not reclaim stale session lease: ${directory}`, { cause: error });
 	}
 	rmSync(stalePath, { recursive: true, force: true });
-	return true;
 }
 
 export function acquireSessionLease(
@@ -270,8 +277,7 @@ export function acquireSessionLease(
 				return new SessionLease(canonicalPath, directory, token);
 			} catch (error) {
 				rmSync(candidateDirectory, { recursive: true, force: true });
-				const code = (error as NodeJS.ErrnoException).code;
-				if (code !== "EEXIST" && code !== "ENOTEMPTY") {
+				if (!isOccupiedLeaseDestination(error, directory)) {
 					throw error;
 				}
 				const existingOwner = readLeaseOwner(directory);
