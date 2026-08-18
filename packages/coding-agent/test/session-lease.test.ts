@@ -168,17 +168,14 @@ describe("session leases", () => {
 
 	it("treats symlink aliases as the same persisted session", () => {
 		const agentDir = createTempDir();
-		const sessionPath = join(agentDir, "session.jsonl");
-		const aliasPath = join(agentDir, "session-alias.jsonl");
+		const realDir = join(agentDir, "real");
+		const aliasDir = join(agentDir, "alias");
+		mkdirSync(realDir);
+		const sessionPath = join(realDir, "session.jsonl");
+		const aliasPath = join(aliasDir, "session.jsonl");
 		writeFileSync(sessionPath, "");
-		try {
-			symlinkSync(sessionPath, aliasPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "EPERM") {
-				return;
-			}
-			throw error;
-		}
+		// Use a junction on Windows to avoid EPERM when file-symlink privileges are unavailable.
+		symlinkSync(realDir, aliasDir, process.platform === "win32" ? "junction" : "dir");
 		const first = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("resident-a"));
 
 		expect(() => acquireSessionLease(aliasPath, agentDir, enabledEnvironment("owned-b"))).toThrow(
