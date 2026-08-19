@@ -5,6 +5,7 @@ import {
 	getSupportedThinkingLevels,
 	type Model,
 	type ServiceTier,
+	supportsFastMode,
 } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
@@ -140,6 +141,14 @@ export function resolveRlmSubagentThinkingLevel(
 		);
 	}
 	return requestedEffort;
+}
+
+/** Default grok-subscription `/fast` models to priority; otherwise inherit parent, clamped to model support. */
+export function resolveRlmSubagentServiceTier(model: Model<Api>, parentServiceTier: ServiceTier): ServiceTier {
+	if (model.provider === "grok" && supportsFastMode(model)) {
+		return "priority";
+	}
+	return parentServiceTier === "priority" && !supportsFastMode(model) ? "default" : parentServiceTier;
 }
 
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */

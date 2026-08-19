@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Changed Grok 4.5 and Grok 4.6 subagents on the grok provider to default to `/fast` regardless of parent service tier or spawn reasoning effort.
 - Added OrcaRouter as a built-in OpenAI-compatible provider with ORCAROUTER_API_KEY / ORCA_KEY authentication and orcarouter/auto as the default model.
 - Fixed deleting an RLM child leaving descendant spawn-ledger edges live after the child was tombstoned.
 - Fixed leftover Windows session leases blocking resume with `EPERM` when the previous owner process is gone.
