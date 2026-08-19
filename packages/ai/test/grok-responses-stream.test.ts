@@ -182,24 +182,27 @@ describe("grok-responses provider", () => {
 		expect(capturedBody?.reasoning).toMatchObject({ effort: "medium" });
 	});
 
-	it("maps the priority service tier to grok fast mode (low effort, no service_tier)", async () => {
-		const model = getModel("grok", "grok-4.6");
-		let capturedBody: Record<string, unknown> | undefined;
+	it.each(["high", "xhigh"] as const)(
+		"maps the priority service tier plus %s reasoning to grok fast mode (low effort, no service_tier)",
+		async (reasoning) => {
+			const model = getModel("grok", "grok-4.6");
+			let capturedBody: Record<string, unknown> | undefined;
 
-		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
-			capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-			return sseResponse();
-		});
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+				capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return sseResponse();
+			});
 
-		await streamSimpleGrokResponses(model, buildContext(), {
-			apiKey: "grok-oauth-token",
-			reasoning: "high",
-			serviceTier: "priority",
-		}).result();
+			await streamSimpleGrokResponses(model, buildContext(), {
+				apiKey: "grok-oauth-token",
+				reasoning,
+				serviceTier: "priority",
+			}).result();
 
-		expect(capturedBody?.reasoning).toMatchObject({ effort: "low" });
-		expect(capturedBody?.service_tier).toBeUndefined();
-	});
+			expect(capturedBody?.reasoning).toMatchObject({ effort: "low" });
+			expect(capturedBody?.service_tier).toBeUndefined();
+		},
+	);
 
 	it("ignores non-priority service tiers for reasoning effort", async () => {
 		const model = getModel("grok", "grok-4.6");

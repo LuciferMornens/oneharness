@@ -231,6 +231,7 @@ import {
 	type RlmSpawnHandle,
 	type RlmSubagentRegistryEntry,
 	type RlmSubagentRuntime,
+	resolveRlmSubagentServiceTier,
 	resolveRlmSubagentThinkingLevel,
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
@@ -9109,8 +9110,7 @@ export class AgentSession {
 			sessionDir: options.sessionDir,
 			model: options.model,
 			thinkingLevel: options.thinkingLevel,
-			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+			serviceTier: resolveRlmSubagentServiceTier(options.model, this.serviceTier),
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
