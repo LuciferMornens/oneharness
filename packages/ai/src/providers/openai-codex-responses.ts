@@ -50,10 +50,6 @@ import { headersToRecord } from "../utils/headers.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const MAX_RETRIES = 3;
@@ -69,10 +65,6 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"queued",
 	"in_progress",
 ]);
-
-// ============================================================================
-// Types
-// ============================================================================
 
 export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -105,10 +97,6 @@ interface RequestBody {
 	[key: string]: unknown;
 }
 
-// ============================================================================
-// Retry Helpers
-// ============================================================================
-
 function isRetryableError(status: number, errorText: string): boolean {
 	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
 		return true;
@@ -129,10 +117,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 		});
 	});
 }
-
-// ============================================================================
-// Main Stream Function
-// ============================================================================
 
 export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions> = (
 	model: Model<"openai-codex-responses">,
@@ -237,7 +221,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				}
 			}
 
-			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
 			let lastError: Error | undefined;
 
@@ -269,7 +252,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						continue;
 					}
 
-					// Parse error for friendly message on final attempt or non-retryable error
 					const fakeResponse = new Response(errorText, {
 						status: response.status,
 						statusText: response.statusText,
@@ -283,7 +265,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						}
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
 					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await sleep(delayMs, options?.signal);
@@ -357,10 +338,6 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 		reasoningEnabled: resolvedReasoning?.enabled,
 	} satisfies OpenAICodexResponsesOptions);
 };
-
-// ============================================================================
-// Request Building
-// ============================================================================
 
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
@@ -475,10 +452,6 @@ function resolveCodexWebSocketUrl(baseUrl?: string): string {
 	return url.toString();
 }
 
-// ============================================================================
-// Response Processing
-// ============================================================================
-
 async function processStream(
 	response: Response,
 	output: AssistantMessage,
@@ -560,10 +533,6 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 	return CODEX_RESPONSE_STATUSES.has(status as CodexResponseStatus) ? (status as CodexResponseStatus) : undefined;
 }
 
-// ============================================================================
-// SSE Parsing
-// ============================================================================
-
 async function* parseSSE(response: Response): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
@@ -603,23 +572,18 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 			}
 		}
 	} finally {
-		// Best-effort stream teardown: the reader may already be closed or errored.
 		try {
 			await reader.cancel();
 		} catch {
-			// Already closed.
+			// The reader may already be closed.
 		}
 		try {
 			reader.releaseLock();
 		} catch {
-			// Lock already released.
+			// The reader lock may already be released.
 		}
 	}
 }
-
-// ============================================================================
-// WebSocket Parsing
-// ============================================================================
 
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -1250,10 +1214,6 @@ async function processWebSocketStream(
 	}
 }
 
-// ============================================================================
-// Error Handling
-// ============================================================================
-
 async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
 	const raw = await response.text();
 	let message = raw || response.statusText || "Request failed";
@@ -1282,10 +1242,6 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 
 	return { message, friendlyMessage };
 }
-
-// ============================================================================
-// Auth & Headers
-// ============================================================================
 
 function extractAccountId(token: string): string {
 	try {

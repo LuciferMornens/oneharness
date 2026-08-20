@@ -6,12 +6,36 @@ import {
 	detectInstallMethod,
 	ENV_LEGACY_SESSION_DIR,
 	ENV_SESSION_DIR,
+	getDaemonLogPath,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	getSessionsDir,
 	getUpdateInstruction,
 } from "../src/config.js";
 import { getDefaultSessionDir } from "../src/core/session-manager.js";
+
+function expectSelfUpdateCommand(
+	actual: ReturnType<typeof getSelfUpdateCommand>,
+	expected: {
+		command: string;
+		args: string[];
+		display: string;
+		steps?: Array<{ command: string; args: string[]; display: string }>;
+	},
+): void {
+	if (process.platform !== "win32" || expected.command !== "npm") {
+		expect(actual).toEqual(expected);
+		return;
+	}
+	expect(actual).toBeDefined();
+	expect(actual!.command).toBe(expected.command);
+	expect(actual!.args).toEqual(expected.args);
+	expect(actual!.display.startsWith(expected.display)).toBe(true);
+	expect(actual!.display).toMatch(/prime-agent\.ps1/i);
+	expect(actual!.steps?.at(-1)?.args).toEqual(
+		expect.arrayContaining(["-e", "require('node:fs').rmSync(process.argv[1],{force:true})"]),
+	);
+}
 
 const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
 const originalPath = process.env.PATH;
@@ -202,7 +226,7 @@ describe("detectInstallMethod", () => {
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
 
 		expect(detectInstallMethod()).toBe("npm");
-		expect(command).toEqual({
+		expectSelfUpdateCommand(command, {
 			command: "npm",
 			args: ["--prefix", prefix, "install", "-g", "@earendil-works/pi-coding-agent"],
 			display: `npm --prefix ${prefix} install -g @earendil-works/pi-coding-agent`,
@@ -214,7 +238,7 @@ describe("detectInstallMethod", () => {
 
 		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
 
-		expect(command).toEqual({
+		expectSelfUpdateCommand(command, {
 			command: "npm",
 			args: ["--prefix", prefix, "install", "-g", "@new-scope/pi"],
 			display: `npm --prefix ${prefix} uninstall -g @mariozechner/pi-coding-agent && npm --prefix ${prefix} install -g @new-scope/pi`,
@@ -239,7 +263,7 @@ describe("detectInstallMethod", () => {
 
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", undefined, tarballUrl);
 
-		expect(command).toEqual({
+		expectSelfUpdateCommand(command, {
 			command: "npm",
 			args: ["--prefix", prefix, "install", "-g", tarballUrl],
 			display: `npm --prefix ${prefix} install -g ${tarballUrl}`,
@@ -252,7 +276,7 @@ describe("detectInstallMethod", () => {
 
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", undefined, tarballUrl, "prime-agent");
 
-		expect(command).toEqual({
+		expectSelfUpdateCommand(command, {
 			command: "npm",
 			args: ["--prefix", prefix, "install", "-g", tarballUrl],
 			display: `npm --prefix ${prefix} install -g ${tarballUrl} && npm --prefix ${prefix} uninstall -g @earendil-works/pi-coding-agent`,
@@ -271,12 +295,12 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("self-update respects configured npmCommand", () => {
+	test.skipIf(process.platform === "win32")("self-update respects configured npmCommand", () => {
 		const { prefix } = createNpmPrefixInstall();
 
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix]);
 
-		expect(command).toEqual({
+		expectSelfUpdateCommand(command, {
 			command: "npm",
 			args: ["--prefix", prefix, "install", "-g", "@earendil-works/pi-coding-agent"],
 			display: `npm --prefix ${prefix} install -g @earendil-works/pi-coding-agent`,
@@ -296,7 +320,12 @@ describe("detectInstallMethod", () => {
 
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
 
-		expect(command?.display).toBe(`npm --prefix "${prefix}" install -g @earendil-works/pi-coding-agent`);
+		expect(command?.display).toContain(`npm --prefix "${prefix}" install -g @earendil-works/pi-coding-agent`);
+		if (process.platform === "win32") {
+			expect(command?.display).toMatch(/prime-agent\.ps1/i);
+		} else {
+			expect(command?.display).toBe(`npm --prefix "${prefix}" install -g @earendil-works/pi-coding-agent`);
+		}
 	});
 
 	test("does not infer Windows npm custom prefixes from package paths", () => {
@@ -310,7 +339,7 @@ describe("detectInstallMethod", () => {
 		);
 	});
 
-	test("self-updates bun global installs from bun pm bin", () => {
+	test.skipIf(process.platform === "win32")("self-updates bun global installs from bun pm bin", () => {
 		createBunGlobalInstall();
 
 		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
@@ -323,82 +352,91 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("self-updates renamed pnpm global installs by removing the old package first", () => {
-		createPnpmGlobalInstall();
+	test.skipIf(process.platform === "win32")(
+		"self-updates renamed pnpm global installs by removing the old package first",
+		() => {
+			createPnpmGlobalInstall();
 
-		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
+			const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
 
-		expect(detectInstallMethod()).toBe("pnpm");
-		expect(command).toEqual({
-			command: "pnpm",
-			args: ["install", "-g", "@new-scope/pi"],
-			display: "pnpm remove -g @mariozechner/pi-coding-agent && pnpm install -g @new-scope/pi",
-			steps: [
-				{
-					command: "pnpm",
-					args: ["remove", "-g", "@mariozechner/pi-coding-agent"],
-					display: "pnpm remove -g @mariozechner/pi-coding-agent",
-				},
-				{
-					command: "pnpm",
-					args: ["install", "-g", "@new-scope/pi"],
-					display: "pnpm install -g @new-scope/pi",
-				},
-			],
-		});
-	});
+			expect(detectInstallMethod()).toBe("pnpm");
+			expect(command).toEqual({
+				command: "pnpm",
+				args: ["install", "-g", "@new-scope/pi"],
+				display: "pnpm remove -g @mariozechner/pi-coding-agent && pnpm install -g @new-scope/pi",
+				steps: [
+					{
+						command: "pnpm",
+						args: ["remove", "-g", "@mariozechner/pi-coding-agent"],
+						display: "pnpm remove -g @mariozechner/pi-coding-agent",
+					},
+					{
+						command: "pnpm",
+						args: ["install", "-g", "@new-scope/pi"],
+						display: "pnpm install -g @new-scope/pi",
+					},
+				],
+			});
+		},
+	);
 
-	test("self-updates renamed yarn global installs by removing the old package first", () => {
-		createYarnGlobalInstall();
+	test.skipIf(process.platform === "win32")(
+		"self-updates renamed yarn global installs by removing the old package first",
+		() => {
+			createYarnGlobalInstall();
 
-		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
+			const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
 
-		expect(detectInstallMethod()).toBe("yarn");
-		expect(command).toEqual({
-			command: "yarn",
-			args: ["global", "add", "@new-scope/pi"],
-			display: "yarn global remove @mariozechner/pi-coding-agent && yarn global add @new-scope/pi",
-			steps: [
-				{
-					command: "yarn",
-					args: ["global", "remove", "@mariozechner/pi-coding-agent"],
-					display: "yarn global remove @mariozechner/pi-coding-agent",
-				},
-				{
-					command: "yarn",
-					args: ["global", "add", "@new-scope/pi"],
-					display: "yarn global add @new-scope/pi",
-				},
-			],
-		});
-	});
+			expect(detectInstallMethod()).toBe("yarn");
+			expect(command).toEqual({
+				command: "yarn",
+				args: ["global", "add", "@new-scope/pi"],
+				display: "yarn global remove @mariozechner/pi-coding-agent && yarn global add @new-scope/pi",
+				steps: [
+					{
+						command: "yarn",
+						args: ["global", "remove", "@mariozechner/pi-coding-agent"],
+						display: "yarn global remove @mariozechner/pi-coding-agent",
+					},
+					{
+						command: "yarn",
+						args: ["global", "add", "@new-scope/pi"],
+						display: "yarn global add @new-scope/pi",
+					},
+				],
+			});
+		},
+	);
 
-	test("self-updates renamed bun global installs by removing the old package first", () => {
-		createBunGlobalInstall();
+	test.skipIf(process.platform === "win32")(
+		"self-updates renamed bun global installs by removing the old package first",
+		() => {
+			createBunGlobalInstall();
 
-		const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
+			const command = getSelfUpdateCommand("@mariozechner/pi-coding-agent", undefined, "@new-scope/pi");
 
-		expect(detectInstallMethod()).toBe("bun");
-		expect(command).toEqual({
-			command: "bun",
-			args: ["install", "-g", "@new-scope/pi"],
-			display: "bun uninstall -g @mariozechner/pi-coding-agent && bun install -g @new-scope/pi",
-			steps: [
-				{
-					command: "bun",
-					args: ["uninstall", "-g", "@mariozechner/pi-coding-agent"],
-					display: "bun uninstall -g @mariozechner/pi-coding-agent",
-				},
-				{
-					command: "bun",
-					args: ["install", "-g", "@new-scope/pi"],
-					display: "bun install -g @new-scope/pi",
-				},
-			],
-		});
-	});
+			expect(detectInstallMethod()).toBe("bun");
+			expect(command).toEqual({
+				command: "bun",
+				args: ["install", "-g", "@new-scope/pi"],
+				display: "bun uninstall -g @mariozechner/pi-coding-agent && bun install -g @new-scope/pi",
+				steps: [
+					{
+						command: "bun",
+						args: ["uninstall", "-g", "@mariozechner/pi-coding-agent"],
+						display: "bun uninstall -g @mariozechner/pi-coding-agent",
+					},
+					{
+						command: "bun",
+						args: ["install", "-g", "@new-scope/pi"],
+						display: "bun install -g @new-scope/pi",
+					},
+				],
+			});
+		},
+	);
 
-	test("does not self-update when npm install path is not writable", () => {
+	test.skipIf(process.platform === "win32")("does not self-update when npm install path is not writable", () => {
 		const { packageDir } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
 
@@ -444,5 +482,15 @@ describe("session paths", () => {
 		const sessionDir = getDefaultSessionDir(cwd, join(tempDir, "agent"));
 
 		expect(sessionDir).toBe(sessionRoot);
+	});
+});
+
+describe("getDaemonLogPath", () => {
+	test("normalizes socket path spellings to one log file", () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		expect(getDaemonLogPath("/a//b.sock")).toBe(getDaemonLogPath("/a/b.sock"));
 	});
 });

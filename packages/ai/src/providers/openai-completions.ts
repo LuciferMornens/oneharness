@@ -512,7 +512,6 @@ function createClient(
 		headers["X-OrcaRouter-Session-Id"] = requestSessionId;
 	}
 
-	// Merge options headers last so they can override defaults
 	if (optionsHeaders) {
 		Object.assign(headers, optionsHeaders);
 	}
@@ -683,16 +682,13 @@ function buildParams(
 			(params as any).reasoning_effort = resolvedOff;
 		}
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
-		// OpenAI-style reasoning_effort
 		(params as any).reasoning_effort = resolvedEffortValue ?? options.reasoningEffort;
 	}
 
-	// OpenRouter provider routing preferences
 	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
 		(params as any).provider = model.compat.openRouterRouting;
 	}
 
-	// Vercel AI Gateway provider routing preferences
 	if (model.baseUrl.includes("ai-gateway.vercel.sh") && model.compat?.vercelGatewayRouting) {
 		const routing = model.compat.vercelGatewayRouting;
 		if (routing.only || routing.order) {
@@ -1021,7 +1017,6 @@ export function convertMessages(
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
 				const toolMsg = transformedMessages[j] as ToolResultMessage;
 
-				// Extract text and image content
 				const textResult = toolMsg.content
 					.filter(isTextContentBlock)
 					.map((block) => block.text)
@@ -1030,7 +1025,6 @@ export function convertMessages(
 
 				// Always send tool result with text (or placeholder if only images)
 				const hasText = textResult.length > 0;
-				// Some providers require the 'name' field in tool results
 				const toolResultMsg: ChatCompletionToolMessageParam = {
 					role: "tool",
 					content: sanitizeSurrogates(hasText ? textResult : hasImages ? "(see attached image)" : ""),

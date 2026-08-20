@@ -108,6 +108,7 @@ import {
 	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
+	normalizeSocketPath,
 	prepareDaemonSocketPath,
 	restrictDaemonSocketPath,
 } from "./daemon-socket.js";
@@ -447,7 +448,8 @@ function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is 
 	const descriptor = value as Partial<DaemonWorkerDescriptor>;
 	return (
 		descriptor.version === 1 &&
-		descriptor.supervisorSocketPath === socketPath &&
+		typeof descriptor.supervisorSocketPath === "string" &&
+		normalizeSocketPath(descriptor.supervisorSocketPath) === socketPath &&
 		typeof descriptor.workerId === "string" &&
 		Number.isInteger(descriptor.pid) &&
 		(descriptor.pid ?? 0) > 0 &&
@@ -519,7 +521,7 @@ function sortCronJobs(jobs: AgentCronJob[]): AgentCronJob[] {
 }
 
 function descriptorKey(socketPath: string): string {
-	return createHash("sha256").update(socketPath).digest("hex").slice(0, 12);
+	return createHash("sha256").update(normalizeSocketPath(socketPath)).digest("hex").slice(0, 12);
 }
 
 function defaultWorkerDescriptorDir(agentDir: string, socketPath: string): string {
@@ -598,7 +600,7 @@ function mergeSessionLists(active: readonly SessionSummary[], saved: readonly Se
 }
 
 export async function runDaemonSupervisorMode(options: DaemonSupervisorOptions): Promise<never> {
-	const socketPath = options.socketPath ?? defaultDaemonSocketPath();
+	const socketPath = normalizeSocketPath(options.socketPath ?? defaultDaemonSocketPath());
 	const supervisor = new DaemonSupervisor(socketPath, options);
 	await supervisor.start();
 	return new Promise(() => {});
@@ -962,6 +964,7 @@ export class DaemonSupervisor {
 				if (!isDaemonWorkerDescriptor(descriptor, this.socketPath)) {
 					continue;
 				}
+				descriptor.supervisorSocketPath = normalizeSocketPath(descriptor.supervisorSocketPath);
 				descriptor.lifecycle = "recovering";
 				descriptor.recoveryJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.recovery.jsonl`);
 				descriptor.orphanProcessJournalPath ??= join(this.descriptorDir, `${descriptor.workerId}.orphans.jsonl`);
@@ -989,7 +992,8 @@ export class DaemonSupervisor {
 			) as Partial<PersistedSupervisorConfig>;
 			if (
 				parsed.version !== 1 ||
-				parsed.socketPath !== this.socketPath ||
+				typeof parsed.socketPath !== "string" ||
+				normalizeSocketPath(parsed.socketPath) !== this.socketPath ||
 				!parsed.defaultSessionConfig ||
 				typeof parsed.defaultSessionConfig !== "object" ||
 				typeof parsed.defaultSessionConfig.agentDir !== "string"
@@ -2159,8 +2163,6 @@ export class DaemonSupervisor {
 			if (existing && !(await this.reclaimStaleWorkerRegistration(existing.worker))) {
 				return this.reuseWorkerForCreate(existing.worker, ownerClientId, sessionPath);
 			}
-			// A passive child from a stopped worker reopens as top-level here (pre-existing behavior);
-			// the recursive-harness residency/eviction PR will revisit it.
 		}
 		const key = createCommand.sessionPath
 			? canonicalSessionPath(createCommand.sessionPath)
@@ -2304,7 +2306,7 @@ export class DaemonSupervisor {
 		if (!supervisorRegistryDir) {
 			throw new Error("Daemon supervisor ownership registry is unavailable");
 		}
-		const environment = createCliSubprocessEnv({
+		const workerEnvironment = createCliSubprocessEnv({
 			...process.env,
 			...launchEnv,
 			[DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR_ENV]: supervisorRegistryDir,
@@ -2318,11 +2320,12 @@ export class DaemonSupervisor {
 			[SESSION_LEASES_ENABLED_ENV]: "1",
 			[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
 		});
-		delete environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
+		delete workerEnvironment.RLM_DEPTH;
+		delete workerEnvironment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV];
 		const child: ChildProcess = spawn(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
-			env: environment,
+			env: workerEnvironment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});

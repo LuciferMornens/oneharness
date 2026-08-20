@@ -17,7 +17,6 @@ import type {
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 const generatedReasoningContracts = new WeakMap<ModelReasoningCapabilities, ThinkingLevelMap | undefined>();
 
-// Initialize registry from MODELS on module load
 for (const [provider, models] of Object.entries(MODELS)) {
 	const providerModels = new Map<string, Model<Api>>();
 	for (const [id, model] of Object.entries(models)) {

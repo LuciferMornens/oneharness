@@ -149,10 +149,49 @@ describe("subagent reasoning effort", () => {
 			await expect(harness.session.runRlmChild("unknown option", { temperature: 0 })).rejects.toThrow(
 				"Unsupported rlm.run kwargs: temperature",
 			);
-			await expect(harness.session.runRlmChild("wrong name", { thinking: "xhigh" })).rejects.toThrow(
-				"Unsupported rlm.run kwargs: thinking",
-			);
 			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("accepts thinking as an alias for effort and fails when they disagree", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [
+				{
+					id: "parent-model",
+					reasoning: true,
+					reasoningCapabilities: grok45LikeCapabilities,
+				},
+				{
+					id: "opus-like",
+					name: "Opus Like",
+					reasoning: true,
+					reasoningCapabilities: opusLikeCapabilities,
+				},
+			],
+		});
+		try {
+			harness.session.setThinkingLevel("medium");
+			harness.setResponses([fauxAssistantMessage("child at xhigh via thinking")]);
+
+			const result = await harness.session.runRlmChild("review at xhigh", {
+				model: `${provider}/opus-like`,
+				thinking: "xhigh",
+			});
+			await vi.waitFor(() => {
+				expect(harness.session.getRlmChildSession(result.rlm_child_id)).toBeDefined();
+			});
+			expect(harness.session.getRlmChildSession(result.rlm_child_id)?.thinkingLevel).toBe("xhigh");
+
+			await expect(
+				harness.session.runRlmChild("conflicting kwargs", {
+					model: `${provider}/opus-like`,
+					effort: "high",
+					thinking: "xhigh",
+				}),
+			).rejects.toThrow('rlm.run effort and thinking disagree: "high" vs "xhigh"');
 		} finally {
 			harness.cleanup();
 		}
@@ -182,16 +221,21 @@ describe("subagent reasoning effort", () => {
 			const findModels = handlers["rlm.find_models"];
 			if (!findModels) throw new Error("Missing rlm.find_models host handler");
 
-			await expect(findModels({ query: "opus", limit: 5 })).resolves.toEqual({
-				models: [
-					{
-						provider,
-						id: "opus-like",
-						name: "Opus Like",
-						selector: `${provider}/opus-like`,
-						reasoning_levels: ["off", "low", "medium", "high", "xhigh", "max"],
-					},
-				],
+			const opusMatches = (await findModels({ query: "opus", limit: 5 })) as {
+				models: Array<{
+					provider: string;
+					id: string;
+					name: string;
+					selector: string;
+					reasoning_levels: string[];
+				}>;
+			};
+			expect(opusMatches.models[0]).toEqual({
+				provider,
+				id: "opus-like",
+				name: "Opus Like",
+				selector: `${provider}/opus-like`,
+				reasoning_levels: ["off", "low", "medium", "high", "xhigh", "max"],
 			});
 
 			const grokMatches = await harness.session.findRlmModels("parent", 8);

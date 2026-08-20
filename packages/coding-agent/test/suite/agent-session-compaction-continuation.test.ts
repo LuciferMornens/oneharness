@@ -15,6 +15,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.js";
+import { type ActionStore, transitionSessionAction } from "../../src/core/session-action-store.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionInternals = {
@@ -28,6 +29,7 @@ type SessionInternals = {
 		signal: AbortSignal;
 	}) => Promise<unknown>;
 	_continueAfterThresholdCompaction: boolean;
+	_actionStore: ActionStore;
 };
 
 function createUsage(totalTokens: number): Usage {
@@ -201,9 +203,9 @@ describe("compaction continuation", () => {
 		const sessionRef: { current?: AgentSession } = {};
 		const harness = await createHarness({
 			tools: [createFauxIpythonTool(sessionRef)],
-			// Small window; faux usage grows per turn, so a later goal-continuation turn crosses the threshold.
-			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 4_300 }],
+			// Let a running goal continuation cross the threshold while remaining well below overflow.
+			settings: { compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 10_000 }],
 			persistSession: true,
 			extensionFactories: [
 				(pi) => {
@@ -230,14 +232,50 @@ describe("compaction continuation", () => {
 		]);
 
 		await harness.session.prompt("/goal finish the task");
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		await harness.session.waitForIdle();
-		await new Promise((resolve) => setTimeout(resolve, 300));
+		await vi.waitFor(
+			() => {
+				const compactionReasons = harness.eventsOfType("compaction_start").map((event) => event.reason);
+				expect(compactionReasons).toContain("threshold");
+				expect(compactionReasons).not.toContain("overflow");
+				expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
+				expect(harness.getPendingResponseCount()).toBe(0);
+				expect(harness.session.goalState.status).toBe("complete");
+			},
+			{ timeout: 5_000 },
+		);
+	});
 
-		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toContain("threshold");
-		expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
-		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.session.goalState.status).toBe("complete");
+	it("queues a fresh goal continuation when the previous one is already running", async () => {
+		const sessionRef: { current?: AgentSession } = {};
+		const harness = await createHarness({
+			tools: [createFauxIpythonTool(sessionRef)],
+			settings: { compaction: { enabled: true, reserveTokens: 1000 } },
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+		});
+		harnesses.push(harness);
+		sessionRef.current = harness.session;
+		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		const internals = harness.session as unknown as SessionInternals;
+		const context = midToolLoopContext(harness);
+
+		expect(await internals._shouldStopAfterTurn(context)).toBe(true);
+		expect(harness.session.queuedActionCount).toBe(1);
+		expect(harness.session.goalState.continuationsUsed).toBe(1);
+
+		expect(await internals._shouldStopAfterTurn(context)).toBe(true);
+		expect(harness.session.queuedActionCount).toBe(1);
+		expect(harness.session.goalState.continuationsUsed).toBe(1);
+
+		const selected = internals._actionStore.selectFirst();
+		expect(selected?.lifecycle.state).toBe("selected");
+		if (!selected) throw new Error("expected a selected goal continuation");
+		transitionSessionAction(selected, { state: "running", execution: "agent_turn" });
+		expect(harness.session.queuedActionCount).toBe(0);
+
+		expect(await internals._shouldStopAfterTurn(context)).toBe(true);
+		expect(harness.session.queuedActionCount).toBe(1);
+		expect(harness.session.unfinishedActionCount).toBe(2);
+		expect(harness.session.goalState.continuationsUsed).toBe(2);
 	});
 
 	// With both drivers active the goal continuation takes exclusive priority, matching _getContinuationMessages.

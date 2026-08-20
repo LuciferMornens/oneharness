@@ -52,7 +52,6 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 	return mappedDeployment || model.id;
 }
 
-// Azure OpenAI Responses-specific options
 export interface AzureOpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningEffortValue?: string;
@@ -65,9 +64,6 @@ export interface AzureOpenAIResponsesOptions extends StreamOptions {
 	azureDeploymentName?: string;
 }
 
-/**
- * Generate function for Azure OpenAI Responses API
- */
 export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
 	model: Model<"azure-openai-responses">,
 	context: Context,
@@ -75,7 +71,6 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 
-	// Start async processing
 	(async () => {
 		const deploymentName = resolveDeploymentName(model, options);
 
@@ -98,7 +93,6 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 		};
 
 		try {
-			// Create Azure OpenAI client
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const client = createClient(model, apiKey, options);
 			let params = buildParams(model, context, options, deploymentName);

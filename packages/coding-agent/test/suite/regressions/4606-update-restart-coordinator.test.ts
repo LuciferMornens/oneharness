@@ -12,6 +12,7 @@ import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemo
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
 import type { DaemonResponse } from "../../../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
+import { normalizeSocketPath } from "../../../src/modes/daemon/daemon-socket.js";
 import { isolatedDaemonProcessEnv } from "../../isolated-daemon-env.js";
 import { createHarness, type Harness } from "../harness.js";
 
@@ -326,7 +327,7 @@ describe("ENG-4606 update restart coordinator", () => {
 			}),
 		);
 
-		expect(status).toMatchObject({ phase: "skipped", socketPath });
+		expect(status).toMatchObject({ phase: "skipped", socketPath: normalizeSocketPath(socketPath) });
 	});
 
 	it("resolves a relative custom socket before changing coordinator cwd", async () => {
@@ -345,7 +346,10 @@ describe("ENG-4606 update restart coordinator", () => {
 			}),
 		);
 
-		expect(status).toMatchObject({ phase: "skipped", socketPath });
+		expect(status).toMatchObject({
+			phase: "skipped",
+			socketPath: normalizeSocketPath(socketPath),
+		});
 	});
 
 	it("outlives a daemon-owned updater and restores the exact custom socket", async () => {

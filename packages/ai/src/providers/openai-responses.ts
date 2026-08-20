@@ -63,7 +63,6 @@ function getPromptCacheRetention(
 	return cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined;
 }
 
-// OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningEffortValue?: string;
@@ -73,9 +72,6 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 }
 
-/**
- * Generate function for OpenAI Responses API
- */
 export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 	model: Model<"openai-responses">,
 	context: Context,
@@ -83,7 +79,6 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 
-	// Start async processing
 	(async () => {
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -104,7 +99,6 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 		};
 
 		try {
-			// Create OpenAI client
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
@@ -219,7 +213,6 @@ function createClient(
 		headers["x-client-request-id"] = sessionId;
 	}
 
-	// Merge options headers last so they can override defaults
 	if (optionsHeaders) {
 		Object.assign(headers, optionsHeaders);
 	}

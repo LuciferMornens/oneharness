@@ -4,13 +4,13 @@ import {
 	buildRestoreCode,
 	buildSnapshotCode,
 	DEFAULT_SNAPSHOT_MAX_BYTES,
+	DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 	manifestPathIn,
 	parseRestoreResult,
 	parseSnapshotResult,
 	snapshotPathIn,
 } from "../src/core/kernel/state-snapshot.js";
 
-// Kept in sync with the marker the Python helpers print.
 const MARKER = "__PRIME_AGENT_KERNEL_STATE__";
 
 describe("kernel state snapshot paths", () => {
@@ -26,12 +26,14 @@ describe("parseSnapshotResult", () => {
 		const stdout = `${MARKER}${JSON.stringify({
 			saved: ["x", "y"],
 			skipped: [{ name: "sock", reason: "TypeError: cannot pickle" }],
+			pruned: ["large_text"],
 			bytes: 1234,
 		})}\n`;
 		const result = parseSnapshotResult(stdout, "/tmp/s.dill");
 		expect(result).toEqual({
 			saved: ["x", "y"],
 			skipped: [{ name: "sock", reason: "TypeError: cannot pickle" }],
+			pruned: ["large_text"],
 			bytes: 1234,
 			path: "/tmp/s.dill",
 		});
@@ -90,14 +92,32 @@ describe("buildSnapshotCode", () => {
 		expect(code).toContain('"/state/sess.dill"');
 		expect(code).toContain('"/state/sess.json"');
 		expect(code).toContain(String(DEFAULT_SNAPSHOT_MAX_BYTES));
+		expect(code).toContain(String(DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES));
 	});
 
 	it("uses dill, an atomic write, and skips internal handles", () => {
 		expect(code).toContain("import dill");
 		expect(code).toContain("os.replace");
-		// rlm and the IPython display names must never be serialized.
+		expect(code).toContain("except _b.KeyboardInterrupt");
 		expect(code).toContain('"rlm"');
 		expect(code).toContain(`print(${JSON.stringify(MARKER)}`);
+	});
+
+	it("excludes oversized variables from persistent snapshots and deletes them when pruning", () => {
+		expect(code).toContain("identify_oversized = False");
+		expect(code).toContain("exceeds per-variable snapshot size cap");
+		expect(code).not.toContain("identify_oversized = True");
+
+		const pruneCode = buildSnapshotCode(
+			"/state/sess.dill",
+			"/state/sess.json",
+			DEFAULT_SNAPSHOT_MAX_BYTES,
+			DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+			true,
+		);
+		expect(pruneCode).toContain("identify_oversized = True");
+		expect(pruneCode).toContain("del ns[name]");
+		expect(pruneCode).toContain("pruned_ids");
 	});
 });
 
