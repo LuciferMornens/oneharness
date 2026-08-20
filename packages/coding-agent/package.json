@@ -58,7 +58,7 @@
 		"extract-zip": "^2.0.1",
 		"file-type": "^21.1.1",
 		"glob": "^13.0.1",
-		"hosted-git-info": "^9.0.2",
+		"hosted-git-info": "^10.1.1",
 		"ignore": "^7.0.5",
 		"jiti": "^2.7.0",
 		"marked": "^18.0.7",
