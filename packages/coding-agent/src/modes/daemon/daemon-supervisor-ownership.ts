@@ -20,6 +20,7 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } fr
 import lockfile from "proper-lockfile";
 import { APP_NAME } from "../../config.js";
 import { getProcessStartId } from "../../core/session-lease.js";
+import { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 import { canonicalizeDaemonFilesystemPath, defaultDaemonSocketDir } from "./daemon-paths.js";
 
 export const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
@@ -497,6 +498,7 @@ function legacyWindowsDaemonSupervisorRegistryDir(): string {
 	return resolve(defaultDaemonSocketDir(), "supervisor-owners");
 }
 
+/** Read-only legacy registry location, disabled when the registry is overridden. */
 /**
  * Pre-move registry location under $TMPDIR, consulted READ-ONLY while daemons
  * from before the ~/.prime move may still be running. Gated off whenever the
@@ -1605,13 +1607,6 @@ function isProcessAlive(pid: number): boolean {
 		return (error as NodeJS.ErrnoException).code !== "ESRCH";
 	}
 	return true;
-}
-
-function normalizeSocketPath(socketPath: string): string {
-	if (process.platform === "win32") {
-		return socketPath.toLowerCase();
-	}
-	return resolve(socketPath);
 }
 
 function ownerConflicts(

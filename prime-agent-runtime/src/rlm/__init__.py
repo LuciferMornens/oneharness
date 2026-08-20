@@ -146,7 +146,9 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
 
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``effort`` sets the child's reasoning level when the selected model supports it.
-    Omitted ``effort`` inherits the parent level clamped to the child model.
+    ``thinking`` is an alias for ``effort``.
+    Omitted ``effort``/``thinking`` inherits the parent level clamped to the child model.
+    Levels invalid for the resolved model fail the spawn.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")

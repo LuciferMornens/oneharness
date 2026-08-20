@@ -18,6 +18,7 @@ import {
 	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
 	listRecoverableWindowsDaemonSocketPaths,
+	normalizeSocketPath,
 	windowsDefaultDaemonSocketPathForAgentDir,
 } from "../modes/daemon/daemon-socket.js";
 import {
@@ -101,14 +102,6 @@ export function evaluateShutdownQuietPeriod(now: number, quietSince: number | un
 
 // Linux comm names (and thus the process name ss reports) are capped at 15 chars.
 const MAX_COMM_LENGTH = 15;
-
-/** Normalize a socket path so process-scan and dir-sweep entries merge cleanly. */
-function normalizeSocketPath(socketPath: string): string {
-	if (process.platform === "win32") {
-		return socketPath.toLowerCase();
-	}
-	return resolve(socketPath);
-}
 
 function processNameMatches(name: string, appName: string): boolean {
 	return name === appName || appName.slice(0, MAX_COMM_LENGTH) === name;

@@ -84,6 +84,7 @@ function spawnSupervisor(
 	socketPath: string,
 	cwd: string,
 	extraArgs: readonly string[] = [],
+	extraEnv: NodeJS.ProcessEnv = {},
 ): ChildProcess {
 	daemonSockets.add(socketPath);
 	const registryDir = join(agentDir, "supervisor-owners");
@@ -96,6 +97,7 @@ function spawnSupervisor(
 		{
 			cwd,
 			env: isolatedDaemonProcessEnv({
+				...extraEnv,
 				[ENV_AGENT_DIR]: agentDir,
 				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: registryDir,
 				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SELECTED_REGISTRY_DIR: registryDir,
@@ -304,6 +306,55 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 }
 
 describe("daemon supervisor resident workers", () => {
+	it("accepts the canonical socket path when launched with duplicate slashes", async () => {
+		if (process.platform === "win32") return;
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const socketPath = join(root, "daemon.sock");
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, `${root}//daemon.sock`, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const response = await client.request({ type: "list" });
+
+		expect(response.success).toBe(true);
+		expect(requireSessionList(response.success ? response.data : undefined)).toHaveLength(0);
+		await client.request({ type: "shutdown", force: true });
+		client.close();
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
+	it("creates top-level sessions at depth zero when the supervisor inherits a child depth", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketId = `prime-supervisor-depth-${process.pid}-${randomUUID().slice(0, 8)}`;
+		const socketPath = process.platform === "win32" ? `\\\\.\\pipe\\${socketId}` : join(tmpdir(), `${socketId}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], { RLM_DEPTH: "1" });
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) throw new Error(created.error);
+		const summary = requireSummary(created.data);
+		if (!summary.workerPid || !summary.sessionFile) throw new Error("Worker did not expose its session identity");
+		workerPids.add(summary.workerPid);
+
+		expect(summary).toMatchObject({ runtimeKind: "top-level", rlmDepth: 0 });
+		expect(await readSessionInfo(summary.sessionFile)).toMatchObject({ rlmDepth: 0, parentSessionPath: undefined });
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForProcessGone(summary.workerPid);
+		workerPids.delete(summary.workerPid);
+		await waitForSocketGone(socketPath);
+	}, 60_000);
+
 	it("lists, creates, and attaches passive children through their owning worker", async () => {
 		const root = tempDir();
 		const agentDir = join(root, "agent");

@@ -11,6 +11,8 @@
 - Fixed legacy Google and Vertex thinkingLevelMap overlays to fill missing levels with native named thinking levels or token budgets.
 - Updated the generated model catalog with current reasoning-capable provider routes.
 
+## [0.7.4] - 2026-08-19
+
 ## [0.7.3] - 2026-08-17
 
 - Added provider-derived reasoning levels for OpenRouter and Prime Inference models, including sparse, mandatory, toggle-only, and explicit-off capabilities.

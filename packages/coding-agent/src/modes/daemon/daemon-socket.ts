@@ -13,6 +13,7 @@ import {
 	selectWindowsDaemonSupervisorSocketCandidate,
 } from "./daemon-supervisor-ownership.js";
 
+export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 export { canonicalizeDaemonFilesystemPath, defaultDaemonSocketDir } from "./daemon-paths.js";
 
 const DAEMON_SOCKET_MODE = 0o600;

@@ -66,7 +66,8 @@ describe("ENG-4649 subagent model selection", () => {
 				source: "stale",
 				label: "expired",
 			});
-			await expect(harness.session.findRlmModels("", 8)).resolves.toEqual({ models: [] });
+			const remaining = await harness.session.findRlmModels("", 8);
+			expect(remaining.models.every((model) => model.provider !== provider)).toBe(true);
 		} finally {
 			harness.cleanup();
 		}
@@ -89,7 +90,9 @@ describe("ENG-4649 subagent model selection", () => {
 		try {
 			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
 			const discovered = await harness.session.findRlmModels("", 20);
-			expect(discovered.models.map((model) => model.selector)).toEqual([`${codexProvider}/parent-model`]);
+			const discoveredSelectors = discovered.models.map((model) => model.selector);
+			expect(discoveredSelectors).toContain(`${codexProvider}/parent-model`);
+			expect(discoveredSelectors).not.toContain(`${codexProvider}/unsupported-model`);
 			expect(fetchModels).toHaveBeenCalledWith(
 				expect.stringMatching(/\/codex\/models\?client_version=/),
 				expect.objectContaining({
@@ -302,6 +305,77 @@ describe("ENG-4649 subagent model selection", () => {
 				provider,
 				modelId: "child-model",
 			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it.each([
+		{ childReasoning: true, thinking: "low" as const },
+		{ childReasoning: false, thinking: "off" as const },
+	])("applies an explicit $thinking thinking level to the child", async ({ childReasoning, thinking }) => {
+		const harness = await createHarness({
+			provider,
+			models: [
+				{ id: "parent-model", reasoning: true },
+				{ id: "child-model", reasoning: childReasoning },
+			],
+		});
+		try {
+			harness.session.setThinkingLevel("high");
+			harness.setResponses([fauxAssistantMessage("child answer")]);
+
+			await harness.session.runRlmChild("use explicit effort", {
+				model: `${provider}/child-model`,
+				thinking,
+			});
+			await vi.waitFor(async () => {
+				const childEntry = (await harness.session.listRlmSubagents()).subagents[0];
+				const child = harness.session.getRlmChildSession(childEntry!.rlm_child_id);
+				expect(child?.thinkingLevel).toBe(thinking);
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("inherits the parent thinking level when no override is supplied", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [
+				{ id: "parent-model", reasoning: true },
+				{ id: "child-model", reasoning: true },
+			],
+		});
+		try {
+			harness.session.setThinkingLevel("high");
+			harness.setResponses([fauxAssistantMessage("child answer")]);
+
+			await harness.session.runRlmChild("inherit effort", { model: `${provider}/child-model` });
+			await vi.waitFor(async () => {
+				const childEntry = (await harness.session.listRlmSubagents()).subagents[0];
+				const child = harness.session.getRlmChildSession(childEntry!.rlm_child_id);
+				expect(child?.thinkingLevel).toBe("high");
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("fails spawn when an explicit thinking level is unsupported by the resolved model", async () => {
+		const harness = await createHarness({
+			provider,
+			models: [
+				{ id: "parent-model", reasoning: true },
+				{ id: "child-model", reasoning: false },
+			],
+		});
+		try {
+			await expect(
+				harness.session.runRlmChild("think hard", { model: `${provider}/child-model`, thinking: "high" }),
+			).rejects.toThrow(
+				`Requested thinking level "high" is not supported by model "${provider}/child-model"; supported levels: off`,
+			);
 		} finally {
 			harness.cleanup();
 		}

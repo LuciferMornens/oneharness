@@ -92,7 +92,6 @@ export function createLocalBashOperations(options?: { shellPath?: string; shellC
 				let timeoutHandle: NodeJS.Timeout | undefined;
 				let terminationSettleHandle: NodeJS.Timeout | undefined;
 				let terminationPromise: Promise<boolean> | undefined;
-				// Stream stdout and stderr.
 				child.stdout?.on("data", onData);
 				child.stderr?.on("data", onData);
 

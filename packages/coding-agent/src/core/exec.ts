@@ -85,13 +85,11 @@ export async function execCommand(
 		let killRequested = false;
 		let settled = false;
 		let timeoutId: NodeJS.Timeout | undefined;
-		let forceKillTimeoutId: NodeJS.Timeout | undefined;
 		let terminationSettleTimeoutId: NodeJS.Timeout | undefined;
 		let terminationPromise: Promise<boolean> | undefined;
 
 		const cleanup = () => {
 			if (timeoutId) clearTimeout(timeoutId);
-			if (forceKillTimeoutId) clearTimeout(forceKillTimeoutId);
 			if (terminationSettleTimeoutId) clearTimeout(terminationSettleTimeoutId);
 			if (options?.signal) {
 				options.signal.removeEventListener("abort", killProcess);
@@ -132,7 +130,6 @@ export async function execCommand(
 			}
 		};
 
-		// Handle abort signal
 		if (options?.signal) {
 			if (options.signal.aborted) {
 				killProcess();
@@ -141,7 +138,6 @@ export async function execCommand(
 			}
 		}
 
-		// Handle timeout
 		if (options?.timeout && options.timeout > 0) {
 			timeoutId = setTimeout(() => {
 				killProcess();

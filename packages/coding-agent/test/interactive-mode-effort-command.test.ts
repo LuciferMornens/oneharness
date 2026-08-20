@@ -352,7 +352,6 @@ describe("InteractiveMode /effort", () => {
 			expect(patch.thinkingLevel).toBe("max");
 			expect(patch.serviceTier).toBe("priority");
 			expect(patch.availableThinkingLevels).toEqual(["off", "low", "high", "max"]);
-			// Provider rebuild keeps the /effort argument hint in sync with the model.
 			expect(setupAutocompleteProvider).toHaveBeenCalledTimes(1);
 		});
 	});
