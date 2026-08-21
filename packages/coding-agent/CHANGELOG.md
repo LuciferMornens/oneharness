@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed the parent being told a still-live RLM child completed without sending a reply after the spawn turn ended ([#1637](https://github.com/PrimeIntellect-ai/prime-agent/issues/1637)).
 - Changed Grok 4.5 and Grok 4.6 subagents on the grok provider to default to `/fast` regardless of parent service tier or spawn reasoning effort.
 - Added OrcaRouter as a built-in OpenAI-compatible provider with ORCAROUTER_API_KEY / ORCA_KEY authentication and orcarouter/auto as the default model.
 - Fixed deleting an RLM child leaving descendant spawn-ledger edges live after the child was tombstoned.
