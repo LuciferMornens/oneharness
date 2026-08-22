@@ -9347,10 +9347,11 @@ export class AgentSession {
 		return this._rlmHeartbeatController?.listRlmHeartbeats().some((job) => job.status === "active") === true;
 	}
 
-	/** True when this session still has in-flight work, queued work, an active heartbeat, or live descendants. */
+	/** True when this session still has in-flight work, queued work, pending admission, an active heartbeat, or live descendants. */
 	hasLiveRlmSessionWork(): boolean {
 		return (
 			this.isSessionActive ||
+			this.hasPendingAdmissionWaiters ||
 			this.agent.hasQueuedMessages() ||
 			this.hasRunningRlmChildren() ||
 			this._hasActiveRlmHeartbeat()

@@ -131,7 +131,9 @@ interface InspectableRlmSession {
 	_rlmChildCleanupFailures: Map<string, Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number]>;
 	_rlmChildSessions: Map<string, AgentSession>;
 	_rlmChildUnsubscribes: Map<string, () => void>;
+	_pendingSessionActionFenceWaiters: number;
 	_createKernelHostHandlers(): HostRequestHandlers;
+	_acquireDirectTurnAdmissionFence(signal?: AbortSignal): Promise<{ release(): void }>;
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
 
@@ -1397,6 +1399,81 @@ describe("AgentSession rlm recursion", () => {
 			expect(completedWithoutReplyContents(root)).toHaveLength(1);
 		});
 		expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, child);
+	});
+
+	it("does not notice a silent child while a follow-up waits on the admission fence", async () => {
+		let releaseFirst = () => {};
+		const firstGate = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		let releaseFollowUp = () => {};
+		const followUpGate = new Promise<void>((resolve) => {
+			releaseFollowUp = resolve;
+		});
+		let firstStarted = false;
+		let followUpStarted = false;
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "admission-fence-child"),
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				if (text === "silent with fenced follow-up") {
+					firstStarted = true;
+					const stream = createAssistantMessageEventStream();
+					void firstGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("first turn") });
+					});
+					return stream;
+				}
+				followUpStarted = true;
+				const stream = createAssistantMessageEventStream();
+				void followUpGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage(`follow-up: ${text}`) });
+				});
+				return stream;
+			},
+		});
+		const completeRlmSubagentRuntime = vi.fn(() => true);
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				completeRlmSubagentRuntime,
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+		const internals = child as unknown as InspectableRlmSession;
+
+		const spawned = await root.runRlmChild("silent with fenced follow-up", { name: "fenced-worker" });
+		await waitFor(() => firstStarted);
+		const heldFence = await internals._acquireDirectTurnAdmissionFence();
+		try {
+			releaseFirst();
+			await waitFor(() => child.getLastAssistantText() !== undefined && !child.isSessionActive);
+			await expectNoCompletedWithoutReply(root);
+			expect(child.hasPendingAdmissionWaiters).toBe(true);
+			expect(child.hasLiveRlmSessionWork()).toBe(true);
+			expect(root.getRlmChildRunStatus(spawned.rlm_child_id)).toBe("running");
+			expect(completeRlmSubagentRuntime).not.toHaveBeenCalled();
+
+			const followUp = child.promptUntilAccepted("keep going");
+			await vi.waitFor(() => expect(internals._pendingSessionActionFenceWaiters).toBe(1));
+			await expectNoCompletedWithoutReply(root);
+			expect(followUpStarted).toBe(false);
+
+			heldFence.release();
+			await waitFor(() => followUpStarted);
+			await expectNoCompletedWithoutReply(root);
+			expect(completeRlmSubagentRuntime).not.toHaveBeenCalled();
+
+			releaseFollowUp();
+			await followUp;
+			await vi.waitFor(() => {
+				expect(completedWithoutReplyContents(root)).toHaveLength(1);
+			});
+			expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, child);
+		} finally {
+			heldFence.release();
+		}
 	});
 
 	it("does not notice a silent child while an active heartbeat remains", async () => {
