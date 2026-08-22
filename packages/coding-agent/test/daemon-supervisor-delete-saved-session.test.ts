@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { canonicalSessionPath } from "../src/core/session-lease.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import type { DaemonWorkerLifecycle } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
 	return {
@@ -19,23 +21,35 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
 	};
 }
 
-function makeWorker(workerId: string, summaries: SessionSummary[], sessionFile?: string) {
+function makeWorker(
+	workerId: string,
+	summaries: SessionSummary[],
+	sessionFile?: string,
+	lifecycle: DaemonWorkerLifecycle = "ready",
+) {
+	const configuredPath = sessionFile ?? summaries.find((summary) => summary.activeSessionId)?.sessionFile;
 	return {
 		descriptor: {
 			workerId,
-			sessionFile: sessionFile ?? summaries.find((summary) => summary.activeSessionId)?.sessionFile,
+			lifecycle,
+			sessionFile: configuredPath,
 			createCommand: {
 				type: "create" as const,
-				sessionPath: sessionFile ?? summaries.find((summary) => summary.activeSessionId)?.sessionFile,
+				sessionPath: configuredPath,
 			},
 		},
 		summaries: new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary])),
 	};
 }
 
-function supervisorWithWorkers(workers: Array<ReturnType<typeof makeWorker>>, catalogDelete: ReturnType<typeof vi.fn>) {
+function supervisorWithWorkers(
+	workers: Array<ReturnType<typeof makeWorker>>,
+	catalogDelete: ReturnType<typeof vi.fn>,
+	openingWorkers: Map<string, Promise<unknown>> = new Map(),
+) {
 	return Object.assign(Object.create(DaemonSupervisor.prototype), {
 		workers: new Map(workers.map((worker) => [worker.descriptor.workerId, worker])),
+		openingWorkers,
 		catalog: { delete: catalogDelete },
 	}) as {
 		handleCommand(
@@ -112,6 +126,49 @@ describe("daemon supervisor delete_saved_session occupancy", () => {
 
 		expect(response).toMatchObject({ success: true, data: { ok: true } });
 		expect(catalogDelete).toHaveBeenCalledWith(stalePath);
+	});
+
+	it("refuses to delete a file a starting worker is opening before summaries exist", async () => {
+		const openingPath = "/tmp/project/opening.jsonl";
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" as const }));
+		const supervisor = supervisorWithWorkers([makeWorker("starting", [], openingPath, "starting")], catalogDelete);
+
+		expect(supervisor.sessionFileIsLiveResident(openingPath)).toBe(true);
+		await expect(
+			supervisor.handleCommand({}, { id: "del-4", type: "delete_saved_session", sessionPath: openingPath }),
+		).rejects.toThrow("Cannot delete the currently active session");
+		expect(catalogDelete).not.toHaveBeenCalled();
+	});
+
+	it("refuses to delete a file a recovering worker is registered for before summaries exist", async () => {
+		const recoveringPath = "/tmp/project/recovering.jsonl";
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" as const }));
+		const supervisor = supervisorWithWorkers(
+			[makeWorker("recovering", [], recoveringPath, "recovering")],
+			catalogDelete,
+		);
+
+		expect(supervisor.sessionFileIsLiveResident(recoveringPath)).toBe(true);
+		await expect(
+			supervisor.handleCommand({}, { id: "del-5", type: "delete_saved_session", sessionPath: recoveringPath }),
+		).rejects.toThrow("Cannot delete the currently active session");
+		expect(catalogDelete).not.toHaveBeenCalled();
+	});
+
+	it("refuses to delete a file whose create is already in-flight", async () => {
+		const openingPath = "/tmp/project/pending-open.jsonl";
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" as const }));
+		const supervisor = supervisorWithWorkers(
+			[],
+			catalogDelete,
+			new Map([[canonicalSessionPath(openingPath), Promise.resolve({})]]),
+		);
+
+		expect(supervisor.sessionFileIsLiveResident(openingPath)).toBe(true);
+		await expect(
+			supervisor.handleCommand({}, { id: "del-6", type: "delete_saved_session", sessionPath: openingPath }),
+		).rejects.toThrow("Cannot delete the currently active session");
+		expect(catalogDelete).not.toHaveBeenCalled();
 	});
 
 	it("refuses to delete a file a worker still hosts as a live session", async () => {

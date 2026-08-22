@@ -3796,10 +3796,26 @@ export class DaemonSupervisor {
 	}
 
 	private sessionFileIsLiveResident(sessionFile: string): boolean {
-		return hasLiveResidentSessionFile(
-			sessionFile,
-			[...this.workers.values()].flatMap((worker) => [...worker.summaries.values()]),
-		);
+		if (
+			hasLiveResidentSessionFile(
+				sessionFile,
+				[...this.workers.values()].flatMap((worker) => [...worker.summaries.values()]),
+			)
+		) {
+			return true;
+		}
+		const target = canonicalSessionPath(sessionFile);
+		if (this.openingWorkers.has(target)) return true;
+		for (const worker of this.workers.values()) {
+			if (worker.descriptor.lifecycle !== "starting" && worker.descriptor.lifecycle !== "recovering") {
+				continue;
+			}
+			const configured = [worker.descriptor.sessionFile, worker.descriptor.createCommand.sessionPath];
+			if (configured.some((path) => path !== undefined && canonicalSessionPath(path) === target)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private findWorkerBySessionFile(sessionFile: string): ResidentWorker | undefined {

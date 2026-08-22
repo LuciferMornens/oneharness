@@ -1,1 +1,2 @@
 - Fixed deleting Inactive agents-view rows that were not live-resident sessions, which previously failed with "Cannot delete the currently active session".
+- Fixed a race that allowed deleting a session file while its daemon worker was still starting.
