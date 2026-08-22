@@ -169,6 +169,7 @@ import {
 	buildRlmChildSnapshots,
 	buildSessionList,
 	classifySessionRosterStatus,
+	hasLiveResidentSessionFile,
 	inactiveLifecycleForSession,
 	isActiveSessionBusy,
 	type SessionSummary,
@@ -4202,7 +4203,15 @@ export class AgentDaemon {
 				if (command.activeSessionId) {
 					this.getSessionState(command.activeSessionId);
 				}
-				if (this.findActiveSessionByFile(command.sessionPath)) {
+				if (
+					hasLiveResidentSessionFile(
+						command.sessionPath,
+						[...this.sessions.values()].map((state) => ({
+							activeSessionId: state.activeSessionId,
+							sessionFile: state.runtime.session.sessionFile,
+						})),
+					)
+				) {
 					throw new Error("Cannot delete the currently active session");
 				}
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
@@ -6507,10 +6516,10 @@ export class AgentDaemon {
 	}
 
 	private findActiveSessionByFile(sessionPath: string): ActiveSessionState | undefined {
-		const resolvedSessionPath = resolve(sessionPath);
+		const resolvedSessionPath = canonicalSessionPath(sessionPath);
 		for (const state of this.sessions.values()) {
 			const sessionFile = state.runtime.session.sessionFile;
-			if (sessionFile && resolve(sessionFile) === resolvedSessionPath) {
+			if (sessionFile && canonicalSessionPath(sessionFile) === resolvedSessionPath) {
 				return state;
 			}
 		}

@@ -101,6 +101,7 @@ import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
 	classifySessionRosterStatus,
+	hasLiveResidentSessionFile,
 	isSessionSummaryBusy,
 	type SessionSummary,
 	summaryForInactiveSession,
@@ -2110,8 +2111,7 @@ export class DaemonSupervisor {
 			}
 			case "delete_saved_session":
 				if (!command.activeSessionId) {
-					const active = this.findWorkerBySessionFile(command.sessionPath);
-					if (active) {
+					if (this.sessionFileIsLiveResident(command.sessionPath)) {
 						throw new Error("Cannot delete the currently active session");
 					}
 					const result = await this.catalog.delete(command.sessionPath);
@@ -3793,6 +3793,13 @@ export class DaemonSupervisor {
 				matchesSessionIdSuffix(activeSessionId, selector) || matchesSessionIdSuffix(summary.sessionId, selector)
 			);
 		});
+	}
+
+	private sessionFileIsLiveResident(sessionFile: string): boolean {
+		return hasLiveResidentSessionFile(
+			sessionFile,
+			[...this.workers.values()].flatMap((worker) => [...worker.summaries.values()]),
+		);
 	}
 
 	private findWorkerBySessionFile(sessionFile: string): ResidentWorker | undefined {

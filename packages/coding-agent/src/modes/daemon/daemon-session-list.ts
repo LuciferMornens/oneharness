@@ -7,6 +7,7 @@ import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runti
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
+import { canonicalSessionPath } from "../../core/session-lease.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
@@ -105,6 +106,24 @@ export function classifySessionRosterStatus(summary: SessionSummary): SessionRos
 	if (!summary.activeSessionId) return "inactive";
 	if (summary.hasActiveHeartbeat || summary.activity === "working" || isSessionSummaryBusy(summary)) return "running";
 	return "idle";
+}
+
+/**
+ * True when a daemon still hosts this session file as a live session.
+ * Passive/no-`activeSessionId` summaries (passivated RLM children listed by a
+ * parent worker) do not occupy the file. Descriptor/`createCommand` paths are
+ * not occupancy; callers must pass live summaries only.
+ */
+export function hasLiveResidentSessionFile(
+	sessionPath: string,
+	summaries: Iterable<Pick<SessionSummary, "activeSessionId" | "sessionFile">>,
+): boolean {
+	const target = canonicalSessionPath(sessionPath);
+	for (const summary of summaries) {
+		if (!summary.activeSessionId || !summary.sessionFile) continue;
+		if (canonicalSessionPath(summary.sessionFile) === target) return true;
+	}
+	return false;
 }
 
 export function isSessionSummaryBusy(summary: SessionSummary): boolean {

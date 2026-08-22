@@ -7,6 +7,7 @@ import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
+	hasLiveResidentSessionFile,
 	resolveAttachModelFallbackMessage,
 	type SessionSummary,
 	summaryForActiveSession,
@@ -677,6 +678,31 @@ describe("resolveAttachModelFallbackMessage", () => {
 
 	it("falls back to the attaching process's snapshot when the session has no model", () => {
 		expect(resolveAttachModelFallbackMessage(makeSummary({}), startupMessage)).toBe(startupMessage);
+	});
+});
+
+describe("hasLiveResidentSessionFile", () => {
+	it("treats a live summary with activeSessionId as occupying the file", () => {
+		expect(
+			hasLiveResidentSessionFile("/tmp/live.jsonl", [{ activeSessionId: "live-1", sessionFile: "/tmp/live.jsonl" }]),
+		).toBe(true);
+	});
+
+	it("does not treat a passive/no-activeSessionId summary as occupying the file", () => {
+		expect(
+			hasLiveResidentSessionFile("/tmp/child.jsonl", [
+				{ activeSessionId: "parent-1", sessionFile: "/tmp/parent.jsonl" },
+				{ activeSessionId: undefined, sessionFile: "/tmp/child.jsonl" },
+			]),
+		).toBe(false);
+	});
+
+	it("ignores summaries that name a different live file", () => {
+		expect(
+			hasLiveResidentSessionFile("/tmp/stale.jsonl", [
+				{ activeSessionId: "other-live", sessionFile: "/tmp/other.jsonl" },
+			]),
+		).toBe(false);
 	});
 });
 

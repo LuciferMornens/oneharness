@@ -1832,6 +1832,14 @@ export class AgentsViewMode implements Component, Focusable {
 		if (row.kind !== "agent") {
 			return;
 		}
+		// Scoped/orphaned passivated RLM children render as Inactive agent rows.
+		// Tombstone them through the subagent-delete command when parent+child ids
+		// are known; otherwise a saved-session file delete is enough.
+		if (!row.summary.activeSessionId && this.resolveInactiveRlmChildDeleteTarget(row)) {
+			this.pendingDeleteAgent = undefined;
+			await this.handleKillSubagentSelected(row);
+			return;
+		}
 		this.pendingKillSubagent = undefined;
 		const identity = getSummaryIdentity(row.summary);
 		if (!row.summary.activeSessionId && row.summary.sessionFile) {
@@ -1897,14 +1905,55 @@ export class AgentsViewMode implements Component, Focusable {
 			await this.killSubagent(pending, row);
 			return;
 		}
-		const childId = row.summary.rlmChildId;
-		const rootActiveSessionId = this.findSubagentRootRow(row)?.summary.activeSessionId;
-		if (!childId || !rootActiveSessionId) {
+		const target = this.resolveInactiveRlmChildDeleteTarget(row);
+		if (!target) {
 			this.setStatusMessage("Cannot stop subagent without its parent agent");
 			return;
 		}
-		this.pendingKillSubagent = { identity, rootActiveSessionId, childId };
+		this.pendingKillSubagent = {
+			identity,
+			rootActiveSessionId: target.rootActiveSessionId,
+			childId: target.childId,
+		};
 		this.showDeleteConfirmation();
+	}
+
+	/**
+	 * Nested subagent rows carry parentIdentity; scoped Inactive children are
+	 * shown as depth-0 agent rows, so parent identity comes from the summary,
+	 * the current scope root, or the last live list.
+	 */
+	private resolveInactiveRlmChildDeleteTarget(
+		row: AgentsViewRow,
+	): { rootActiveSessionId: string; childId: string } | undefined {
+		const childId = row.summary.rlmChildId;
+		if (!childId) return undefined;
+		const rootActiveSessionId = this.resolveRlmSubagentParentActiveSessionId(row);
+		if (!rootActiveSessionId) return undefined;
+		return { rootActiveSessionId, childId };
+	}
+
+	private resolveRlmSubagentParentActiveSessionId(row: AgentsViewRow): string | undefined {
+		const treeRoot = this.findSubagentRootRow(row)?.summary.activeSessionId;
+		if (treeRoot) return treeRoot;
+		if (row.summary.parentActiveSessionId) return row.summary.parentActiveSessionId;
+		const scoped = this.scopeRootSummary?.activeSessionId ?? this.scopeKey?.activeSessionId;
+		if (scoped) return scoped;
+		const parentSessionId = row.summary.parentSessionId;
+		const parentPath = row.summary.parentSessionPath;
+		if (!parentSessionId && !parentPath) return undefined;
+		for (const summary of this.lastListedSummaries) {
+			if (!summary.activeSessionId) continue;
+			if (parentSessionId && summary.sessionId === parentSessionId) return summary.activeSessionId;
+			if (
+				parentPath &&
+				summary.sessionFile &&
+				resolvePath(canonicalizePath(summary.sessionFile)) === resolvePath(canonicalizePath(parentPath))
+			) {
+				return summary.activeSessionId;
+			}
+		}
+		return undefined;
 	}
 
 	private async killSubagent(pending: PendingKillSubagent, currentRow: AgentsViewRow): Promise<void> {

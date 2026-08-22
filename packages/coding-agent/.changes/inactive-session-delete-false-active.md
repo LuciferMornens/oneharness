@@ -1,0 +1,1 @@
+- Fixed deleting Inactive agents-view rows that were not live-resident sessions, which previously failed with "Cannot delete the currently active session".

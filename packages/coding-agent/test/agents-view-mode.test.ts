@@ -12,7 +12,11 @@ import {
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { type AgentsViewRow, resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
+import {
+	type AgentsViewRow,
+	getAgentsViewSummaryIdentity,
+	resolveAgentsViewLeftResult,
+} from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
@@ -81,6 +85,35 @@ function invoke(method: string, self: object, ...args: unknown[]): unknown {
 	return member.call(self, ...args);
 }
 
+function deleteSelectedHarness(overrides: Record<string, unknown>): Record<string, unknown> {
+	const self: Record<string, unknown> = {
+		pendingDeleteAgent: undefined,
+		pendingKillSubagent: undefined,
+		deleteConfirmExpiresAt: 0,
+		deleteConfirmTimer: undefined,
+		lastListedSummaries: [],
+		scopeRootSummary: undefined,
+		scopeKey: undefined,
+		ui: { requestRender: vi.fn() },
+		setStatusMessage: vi.fn(),
+		refreshSessions: vi.fn(async () => true),
+		refreshSavedSessions: vi.fn(async () => true),
+		getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
+		...overrides,
+	};
+	self.handleKillSubagentSelected = (row: unknown) => invoke("handleKillSubagentSelected", self, row);
+	self.findSubagentRootRow = (row: unknown) => invoke("findSubagentRootRow", self, row);
+	self.resolveInactiveRlmChildDeleteTarget = (row: unknown) =>
+		invoke("resolveInactiveRlmChildDeleteTarget", self, row);
+	self.resolveRlmSubagentParentActiveSessionId = (row: unknown) =>
+		invoke("resolveRlmSubagentParentActiveSessionId", self, row);
+	self.isDeleteConfirmationVisible = () => invoke("isDeleteConfirmationVisible", self);
+	self.showDeleteConfirmation = () => invoke("showDeleteConfirmation", self);
+	self.clearDeleteConfirmation = (options: unknown) => invoke("clearDeleteConfirmation", self, options);
+	self.killSubagent = (pending: unknown, row: unknown) => invoke("killSubagent", self, pending, row);
+	return self;
+}
+
 const settingsManager = {
 	getTheme: () => "dark",
 	getShowHardwareCursor: () => false,
@@ -123,59 +156,35 @@ describe("AgentsViewMode", () => {
 			data: command.type === "cancel_rlm_child" ? { cancelled: false } : { deleted: true },
 		}));
 		const client = { request, supportsServerCapability: vi.fn(() => true) };
-		const self = {
-			rows: [
-				{
-					kind: "subagent",
-					section: "running",
-					summary: child,
-					selectable: true,
-					identity: "child-row",
-					parentIdentity: "root-row",
-				},
-				{
-					kind: "agent",
-					section: "idle",
-					summary: summary({ id: "root-active", activeSessionId: "root-active", sessionId: "root-session" }),
-					selectable: true,
-					identity: "root-row",
-				},
-			],
+		const rows = [
+			{
+				kind: "subagent" as const,
+				section: "running" as AgentsViewRow["section"],
+				summary: child,
+				selectable: true,
+				identity: "child-row",
+				parentIdentity: "root-row",
+			},
+			{
+				kind: "agent" as const,
+				section: "idle" as AgentsViewRow["section"],
+				summary: summary({ id: "root-active", activeSessionId: "root-active", sessionId: "root-session" }),
+				selectable: true,
+				identity: "root-row",
+			},
+		];
+		const self = deleteSelectedHarness({
+			rows,
 			selectedIndex: 0,
-			pendingDeleteAgent: undefined,
-			pendingKillSubagent: undefined,
-			deleteConfirmExpiresAt: 0,
-			deleteConfirmTimer: undefined,
-			ui: { requestRender: vi.fn() },
 			requireClient: () => client,
-			setStatusMessage: vi.fn(),
-			refreshSessions: vi.fn(async () => true),
-			handleKillSubagentSelected(row: unknown) {
-				return invoke("handleKillSubagentSelected", self, row);
-			},
-			findSubagentRootRow(row: unknown) {
-				return invoke("findSubagentRootRow", self, row);
-			},
-			isDeleteConfirmationVisible() {
-				return invoke("isDeleteConfirmationVisible", self);
-			},
-			showDeleteConfirmation() {
-				return invoke("showDeleteConfirmation", self);
-			},
-			clearDeleteConfirmation(options: unknown) {
-				return invoke("clearDeleteConfirmation", self, options);
-			},
-			killSubagent(pending: unknown, row: unknown) {
-				return invoke("killSubagent", self, pending, row);
-			},
-		};
+		});
 
 		await invoke("handleDeleteSelected", self);
 		expect(request).not.toHaveBeenCalled();
 
 		// The child finishes during confirmation. The second keypress must use the
 		// current row state rather than the original running state.
-		self.rows[0]!.section = "inactive";
+		rows[0]!.section = "inactive";
 		await invoke("handleDeleteSelected", self);
 		expect(request).toHaveBeenCalledWith({
 			type: "delete_rlm_subagent",
@@ -229,6 +238,148 @@ describe("AgentsViewMode", () => {
 			render: false,
 			tone: "warning",
 		});
+	});
+
+	it("deletes a scoped Inactive RLM child agent row via delete_rlm_subagent", async () => {
+		const child = summary({
+			id: "registry-child",
+			activeSessionId: undefined,
+			sessionId: "registry-child",
+			sessionFile: "/tmp/project/registry-child.jsonl",
+			runtimeKind: "subagent",
+			parentSessionId: "root-session",
+			parentActiveSessionId: "root-active",
+			rlmChildId: "passive-child",
+			rlmDepth: 1,
+		});
+		const request = vi.fn(async (command: { type: string }) => ({
+			success: true as const,
+			data: command.type === "delete_rlm_subagent" ? { deleted: true } : { sessions: [] },
+		}));
+		const client = { request, supportsServerCapability: vi.fn(() => true) };
+		const self = deleteSelectedHarness({
+			rows: [
+				{
+					kind: "agent",
+					section: "inactive",
+					summary: child,
+					selectable: true,
+					identity: "child-row",
+					depth: 0,
+				},
+			],
+			selectedIndex: 0,
+			requireClient: () => client,
+		});
+
+		await invoke("handleDeleteSelected", self);
+		expect(request).not.toHaveBeenCalled();
+		expect(self.pendingKillSubagent).toMatchObject({
+			childId: "passive-child",
+			rootActiveSessionId: "root-active",
+		});
+
+		await invoke("handleDeleteSelected", self);
+		expect(request).toHaveBeenCalledWith({
+			type: "delete_rlm_subagent",
+			activeSessionId: "root-active",
+			childId: "passive-child",
+		});
+		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_saved_session" }));
+		expect(self.setStatusMessage).toHaveBeenCalledWith("Subagent deleted", { render: false });
+	});
+
+	it("resolves a scoped Inactive child parent from the live list when parentActiveSessionId is absent", async () => {
+		const child = summary({
+			id: "registry-child",
+			activeSessionId: undefined,
+			sessionId: "registry-child",
+			sessionFile: "/tmp/project/registry-child.jsonl",
+			runtimeKind: "subagent",
+			parentSessionId: "root-session",
+			rlmChildId: "passive-child",
+			rlmDepth: 1,
+		});
+		const request = vi.fn(async () => ({ success: true as const, data: { deleted: true } }));
+		const self = deleteSelectedHarness({
+			rows: [
+				{
+					kind: "agent",
+					section: "inactive",
+					summary: child,
+					selectable: true,
+					identity: "child-row",
+					depth: 0,
+				},
+			],
+			selectedIndex: 0,
+			lastListedSummaries: [
+				summary({
+					id: "root-active",
+					activeSessionId: "root-active",
+					sessionId: "root-session",
+					sessionFile: "/tmp/project/root.jsonl",
+				}),
+			],
+			requireClient: () => ({ request, supportsServerCapability: () => true }),
+		});
+
+		await invoke("handleDeleteSelected", self);
+		await invoke("handleDeleteSelected", self);
+		expect(request).toHaveBeenCalledWith({
+			type: "delete_rlm_subagent",
+			activeSessionId: "root-active",
+			childId: "passive-child",
+		});
+	});
+
+	it("deletes a saved-only Inactive agent row with saved-session delete when RLM ids are unknown", async () => {
+		const saved = summary({
+			id: "saved-child",
+			activeSessionId: undefined,
+			sessionId: "saved-child",
+			sessionFile: "/tmp/project/saved-child.jsonl",
+			runtimeKind: "subagent",
+			parentSessionPath: "/tmp/project/root.jsonl",
+			rlmDepth: 1,
+		});
+		const request = vi.fn(async (command: { type: string }) => {
+			if (command.type === "list") {
+				return { success: true as const, data: { sessions: [saved] } };
+			}
+			if (command.type === "delete_saved_session") {
+				return { success: true as const, data: { ok: true, method: "unlink" as const } };
+			}
+			throw new Error(`unexpected command ${command.type}`);
+		});
+		const self = deleteSelectedHarness({
+			rows: [
+				{
+					kind: "agent",
+					section: "inactive",
+					summary: saved,
+					selectable: true,
+					identity: "saved-row",
+					depth: 0,
+				},
+			],
+			selectedIndex: 0,
+			requireClient: () => ({ request, supportsServerCapability: () => true }),
+			refreshSavedSessions: vi.fn(async () => true),
+			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+		});
+
+		await invoke("handleDeleteSelected", self);
+		expect(request).not.toHaveBeenCalled();
+
+		await invoke("handleDeleteSelected", self);
+		expect(request).toHaveBeenCalledWith({ type: "list" });
+		expect(request).toHaveBeenCalledWith({
+			type: "delete_saved_session",
+			sessionPath: "/tmp/project/saved-child.jsonl",
+		});
+		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_rlm_subagent" }));
+		expect(self.setStatusMessage).toHaveBeenCalledWith("Session deleted");
 	});
 
 	it("checks telemetry policy before replying from an opted-out agents view", async () => {
@@ -597,21 +748,22 @@ describe("AgentsViewMode", () => {
 				expect(rowsOf(self).some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(true);
 			}
 			// The runtime flushes the session file; the record identity flips to file:.
-			self.lastListedSummaries = [{ ...parent, sessionFile: "/tmp/root.jsonl" }, child];
+			const persistedParent = { ...parent, sessionFile: "/tmp/root.jsonl" };
+			self.lastListedSummaries = [persistedParent, child];
 			invoke("reconcileCatalogs", self);
-			return { self, expandedSubagentParents };
+			return { self, expandedSubagentParents, persistedIdentity: getAgentsViewSummaryIdentity(persistedParent) };
 		};
 
 		const expandedView = buildView(true);
 		const expandedRows = rowsOf(expandedView.self);
 		expect(
 			expandedRows.find((row) => row.kind === "agent" && row.summary.sessionId === "root-session")?.identity,
-		).toBe("file:/tmp/root.jsonl");
+		).toBe(expandedView.persistedIdentity);
 		expect(expandedRows.some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(true);
 		expect(expandedRows.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(
 			true,
 		);
-		expect([...expandedView.expandedSubagentParents]).toEqual(["file:/tmp/root.jsonl"]);
+		expect([...expandedView.expandedSubagentParents]).toEqual([expandedView.persistedIdentity]);
 
 		const collapsedView = buildView(false);
 		const collapsedRows = rowsOf(collapsedView.self);

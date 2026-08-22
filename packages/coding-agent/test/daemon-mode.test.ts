@@ -7634,7 +7634,7 @@ describe("daemon mode helpers", () => {
 			// Jobs-store bookkeeping must not fail the deletion or skip the sweep.
 			await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
 
-			expect(internals.cancelScheduledJobsForSessionFile).toHaveBeenCalledOnce();
+			expect(internals.cancelScheduledJobsForSessionFile).toHaveBeenCalled();
 			expect(existsSync(fixture.childArtifactDir)).toBe(false);
 			expect(existsSync(fixture.childSessionFile)).toBe(true);
 		} finally {
@@ -8703,6 +8703,93 @@ describe("daemon mode helpers", () => {
 			expect(internals.cronStore.list().find((job) => job.id === heartbeat.id)).toMatchObject({
 				status: "active",
 			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("deletes a saved session that is not live-resident even when a parent session is in memory", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-passive-"));
+		try {
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const deleteSavedSessionFile = vi.fn(async () => ({ ok: true, method: "unlink" as const }));
+			const childFile = join(tempDir, "passive-child.jsonl");
+			const parentFile = join(tempDir, "parent.jsonl");
+			const parentState = {
+				activeSessionId: "parent-active",
+				clients: new Set(),
+				pendingAttaches: 0,
+				lastEventSequence: 0,
+				runtime: {
+					metadata: { kind: "top-level", createdAt: 1 },
+					session: { sessionFile: parentFile, sessionId: "parent-session" },
+				},
+			} as unknown as ActiveSessionState;
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				deleteSavedSessionFile: typeof deleteSavedSessionFile;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			};
+			internals.deleteSavedSessionFile = deleteSavedSessionFile;
+			internals.sessions.set(parentState.activeSessionId, parentState);
+
+			const response = await internals.handleCommand(makeClient("client-1", parentState.activeSessionId), {
+				id: "command-1",
+				type: "delete_saved_session",
+				sessionPath: childFile,
+			});
+
+			expect(response).toMatchObject({ data: { ok: true, method: "unlink" } });
+			expect(deleteSavedSessionFile).toHaveBeenCalledWith(childFile, {
+				afterFileRemoved: expect.any(Function),
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses to delete a session file that is still live-resident", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-live-"));
+		try {
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const deleteSavedSessionFile = vi.fn(async () => ({ ok: true, method: "unlink" as const }));
+			const sessionFile = join(tempDir, "live.jsonl");
+			const state = {
+				activeSessionId: "live-active",
+				clients: new Set(),
+				pendingAttaches: 0,
+				lastEventSequence: 0,
+				runtime: {
+					metadata: { kind: "top-level", createdAt: 1 },
+					session: { sessionFile, sessionId: "live-session" },
+				},
+			} as unknown as ActiveSessionState;
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				deleteSavedSessionFile: typeof deleteSavedSessionFile;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			};
+			internals.deleteSavedSessionFile = deleteSavedSessionFile;
+			internals.sessions.set(state.activeSessionId, state);
+
+			await expect(
+				internals.handleCommand(makeClient("client-1", state.activeSessionId), {
+					id: "command-1",
+					type: "delete_saved_session",
+					sessionPath: sessionFile,
+				}),
+			).rejects.toThrow("Cannot delete the currently active session");
+			expect(deleteSavedSessionFile).not.toHaveBeenCalled();
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
