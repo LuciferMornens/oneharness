@@ -9343,6 +9343,49 @@ export class AgentSession {
 		return false;
 	}
 
+	private _hasActiveRlmHeartbeat(): boolean {
+		return this._rlmHeartbeatController?.listRlmHeartbeats().some((job) => job.status === "active") === true;
+	}
+
+	/** True when this session still has in-flight work, queued work, pending admission, an active heartbeat, or live descendants. */
+	hasLiveRlmSessionWork(): boolean {
+		return (
+			this.isSessionActive ||
+			this.hasPendingAdmissionWaiters ||
+			this.agent.hasQueuedMessages() ||
+			this.hasRunningRlmChildren() ||
+			this._hasActiveRlmHeartbeat()
+		);
+	}
+
+	private async _waitWhileRlmChildLive(child: AgentSession, run: RlmChildRun): Promise<void> {
+		if (run.status === "cancelled" || this._disposed || this._disposing || !child.hasLiveRlmSessionWork()) {
+			return;
+		}
+		await new Promise<void>((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearInterval(timer);
+				unsubscribe();
+				resolve();
+			};
+			const check = () => {
+				if (run.status === "cancelled" || this._disposed || this._disposing || !child.hasLiveRlmSessionWork()) {
+					finish();
+				}
+			};
+			const unsubscribe = child.subscribe(() => {
+				check();
+			});
+			const timer = setInterval(check, 20);
+			check();
+		});
+	}
+
 	getRlmChildSession(childId: string): AgentSession | undefined {
 		const direct = this._activeRlmChildRuns.get(childId)?.session ?? this._rlmChildSessions.get(childId);
 		if (direct) {
@@ -9708,6 +9751,9 @@ export class AgentSession {
 					source: "extension",
 					customMessage: spawnMessage,
 				});
+				// First spawn turn ending is not child death; leftover work can still be live.
+				await this._waitWhileRlmChildLive(child, run);
+				throwIfCancelled();
 				if (run.error) throw new Error(run.error);
 				run.status = "done";
 				durationMs = Date.now() - startedAt;

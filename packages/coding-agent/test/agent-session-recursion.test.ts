@@ -131,7 +131,9 @@ interface InspectableRlmSession {
 	_rlmChildCleanupFailures: Map<string, Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number]>;
 	_rlmChildSessions: Map<string, AgentSession>;
 	_rlmChildUnsubscribes: Map<string, () => void>;
+	_pendingSessionActionFenceWaiters: number;
 	_createKernelHostHandlers(): HostRequestHandlers;
+	_acquireDirectTurnAdmissionFence(signal?: AbortSignal): Promise<{ release(): void }>;
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
 
@@ -212,6 +214,23 @@ async function waitFor(condition: () => boolean): Promise<void> {
 	}
 }
 
+function completedWithoutReplyContents(root: AgentSession): string[] {
+	return root.messages
+		.map((message) => ("content" in message ? message.content : undefined))
+		.filter(
+			(content): content is string =>
+				typeof content === "string" && content.includes("completed without sending a reply"),
+		);
+}
+
+async function expectNoCompletedWithoutReply(root: AgentSession, durationMs = 100): Promise<void> {
+	const deadline = Date.now() + durationMs;
+	while (Date.now() < deadline) {
+		expect(completedWithoutReplyContents(root)).toEqual([]);
+		await sleep(10);
+	}
+}
+
 async function expectSettlesWithin(promise: Promise<void>, timeoutMs: number): Promise<void> {
 	const result = await Promise.race([
 		promise.then(() => "settled" as const),
@@ -254,6 +273,7 @@ describe("AgentSession rlm recursion", () => {
 			agentMessageController?: AgentSessionMessageController;
 			subagentRuntimeHost?: SubagentRuntimeHost;
 			customTools?: ConstructorParameters<typeof AgentSession>[0]["customTools"];
+			rlmHeartbeatController?: ConstructorParameters<typeof AgentSession>[0]["rlmHeartbeatController"];
 			rlmSessionDir?: string;
 			sessionManager?: SessionManager;
 			settingsManager?: SettingsManager;
@@ -305,6 +325,7 @@ describe("AgentSession rlm recursion", () => {
 					: undefined,
 			}),
 			agentMessageController: options.agentMessageController,
+			rlmHeartbeatController: options.rlmHeartbeatController,
 			subagentRuntimeHost: options.subagentRuntimeHost,
 			customTools: options.customTools,
 			rlmDepth: options.depth,
@@ -1241,6 +1262,350 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("does not notice a silent child while a nested descendant is still running", async () => {
+		let releaseChild = () => {};
+		const childGate = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let releaseNested = () => {};
+		const nestedGate = new Promise<void>((resolve) => {
+			releaseNested = resolve;
+		});
+		let childStarted = false;
+		let nestedStarted = false;
+		const nested = createSession({
+			depth: 2,
+			rlmSessionDir: join(tempDir, "live-nested"),
+			streamFn: () => {
+				nestedStarted = true;
+				const stream = createAssistantMessageEventStream();
+				void nestedGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("nested still working") });
+				});
+				return stream;
+			},
+		});
+		const child = createSession({
+			depth: 1,
+			maxDepth: 2,
+			rlmSessionDir: join(tempDir, "live-child"),
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				if (text === "silent parent") {
+					childStarted = true;
+					const stream = createAssistantMessageEventStream();
+					void childGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("child first turn") });
+					});
+					return stream;
+				}
+				return streamAnswer(`later: ${text}`);
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: nested }),
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+		const completeRlmSubagentRuntime = vi.fn(() => true);
+		const root = createSession({
+			maxDepth: 2,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				completeRlmSubagentRuntime,
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		const spawned = await root.runRlmChild("silent parent", { name: "silent-parent" });
+		await waitFor(() => childStarted);
+		await child.runRlmChild("nested worker", { name: "nested-worker" });
+		await waitFor(() => nestedStarted);
+		releaseChild();
+		await waitFor(() => child.getLastAssistantText() !== undefined);
+		await expectNoCompletedWithoutReply(root);
+		expect(root.getRlmChildRunStatus(spawned.rlm_child_id)).toBe("running");
+		expect(completeRlmSubagentRuntime).not.toHaveBeenCalled();
+		expect(child.hasLiveRlmSessionWork()).toBe(true);
+		expect((await root.listRlmSubagents()).subagents).toContainEqual(
+			expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "running" }),
+		);
+
+		releaseNested();
+		await vi.waitFor(() => {
+			expect(completedWithoutReplyContents(root)).toHaveLength(1);
+		});
+		expect(completedWithoutReplyContents(root)[0]).toContain(
+			`RLM child silent-parent (${spawned.rlm_child_id}) completed without sending a reply`,
+		);
+		expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, child);
+		expect((await root.listRlmSubagents()).subagents).toContainEqual(
+			expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "completed" }),
+		);
+	});
+
+	it("does not notice a silent child while a follow-up turn remains", async () => {
+		let releaseFirst = () => {};
+		const firstGate = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		let releaseFollowUp = () => {};
+		const followUpGate = new Promise<void>((resolve) => {
+			releaseFollowUp = resolve;
+		});
+		let firstStarted = false;
+		let followUpStarted = false;
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "follow-up-child"),
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				if (text === "silent with follow-up") {
+					firstStarted = true;
+					const stream = createAssistantMessageEventStream();
+					void firstGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("first turn") });
+					});
+					return stream;
+				}
+				followUpStarted = true;
+				const stream = createAssistantMessageEventStream();
+				void followUpGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage(`follow-up: ${text}`) });
+				});
+				return stream;
+			},
+		});
+		const completeRlmSubagentRuntime = vi.fn(() => true);
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				completeRlmSubagentRuntime,
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		const spawned = await root.runRlmChild("silent with follow-up", { name: "follow-up-worker" });
+		await waitFor(() => firstStarted);
+		await child.promptUntilAccepted("keep going", { streamingBehavior: "followUp" });
+		releaseFirst();
+		await waitFor(() => followUpStarted);
+		await expectNoCompletedWithoutReply(root);
+		expect(root.getRlmChildRunStatus(spawned.rlm_child_id)).toBe("running");
+		expect(completeRlmSubagentRuntime).not.toHaveBeenCalled();
+		expect(child.hasLiveRlmSessionWork()).toBe(true);
+
+		releaseFollowUp();
+		await vi.waitFor(() => {
+			expect(completedWithoutReplyContents(root)).toHaveLength(1);
+		});
+		expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, child);
+	});
+
+	it("does not notice a silent child while a follow-up waits on the admission fence", async () => {
+		let releaseFirst = () => {};
+		const firstGate = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		let releaseFollowUp = () => {};
+		const followUpGate = new Promise<void>((resolve) => {
+			releaseFollowUp = resolve;
+		});
+		let firstStarted = false;
+		let followUpStarted = false;
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "admission-fence-child"),
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				if (text === "silent with fenced follow-up") {
+					firstStarted = true;
+					const stream = createAssistantMessageEventStream();
+					void firstGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("first turn") });
+					});
+					return stream;
+				}
+				followUpStarted = true;
+				const stream = createAssistantMessageEventStream();
+				void followUpGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage(`follow-up: ${text}`) });
+				});
+				return stream;
+			},
+		});
+		const completeRlmSubagentRuntime = vi.fn(() => true);
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				completeRlmSubagentRuntime,
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+		const internals = child as unknown as InspectableRlmSession;
+
+		const spawned = await root.runRlmChild("silent with fenced follow-up", { name: "fenced-worker" });
+		await waitFor(() => firstStarted);
+		const heldFence = await internals._acquireDirectTurnAdmissionFence();
+		try {
+			releaseFirst();
+			await waitFor(() => child.getLastAssistantText() !== undefined && !child.isSessionActive);
+			await expectNoCompletedWithoutReply(root);
+			expect(child.hasPendingAdmissionWaiters).toBe(true);
+			expect(child.hasLiveRlmSessionWork()).toBe(true);
+			expect(root.getRlmChildRunStatus(spawned.rlm_child_id)).toBe("running");
+			expect(completeRlmSubagentRuntime).not.toHaveBeenCalled();
+
+			const followUp = child.promptUntilAccepted("keep going");
+			await vi.waitFor(() => expect(internals._pendingSessionActionFenceWaiters).toBe(1));
+			await expectNoCompletedWithoutReply(root);
+			expect(followUpStarted).toBe(false);
+
+			heldFence.release();
+			await waitFor(() => followUpStarted);
+			await expectNoCompletedWithoutReply(root);
+			expect(completeRlmSubagentRuntime).not.toHaveBeenCalled();
+
+			releaseFollowUp();
+			await followUp;
+			await vi.waitFor(() => {
+				expect(completedWithoutReplyContents(root)).toHaveLength(1);
+			});
+			expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, child);
+		} finally {
+			heldFence.release();
+		}
+	});
+
+	it("does not notice a silent child while an active heartbeat remains", async () => {
+		const heartbeats: Array<{ status: "active" | "paused" }> = [{ status: "active" }];
+		const child = createSession({
+			depth: 1,
+			rlmSessionDir: join(tempDir, "heartbeat-child"),
+			rlmHeartbeatController: {
+				listRlmHeartbeats: () => heartbeats as never,
+				createRlmHeartbeat: () => {
+					throw new Error("unused");
+				},
+				updateRlmHeartbeat: () => undefined,
+				deleteRlmHeartbeat: () => undefined,
+			},
+		});
+		const completeRlmSubagentRuntime = vi.fn(() => true);
+		const root = createSession({
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				completeRlmSubagentRuntime,
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		const spawned = await root.runRlmChild("silent heartbeat child", { name: "heartbeat-worker" });
+		await waitFor(() => child.getLastAssistantText() !== undefined);
+		await expectNoCompletedWithoutReply(root);
+		expect(root.getRlmChildRunStatus(spawned.rlm_child_id)).toBe("running");
+		expect(completeRlmSubagentRuntime).not.toHaveBeenCalled();
+		expect(child.hasLiveRlmSessionWork()).toBe(true);
+
+		heartbeats.length = 0;
+		await vi.waitFor(() => {
+			expect(completedWithoutReplyContents(root)).toHaveLength(1);
+		});
+		expect(completeRlmSubagentRuntime).toHaveBeenCalledWith(spawned.rlm_child_id, child);
+	});
+
+	it("does not notice a child that replied while leftover nested work was still live", async () => {
+		let releaseChild = () => {};
+		const childGate = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let releaseNested = () => {};
+		const nestedGate = new Promise<void>((resolve) => {
+			releaseNested = resolve;
+		});
+		let childStarted = false;
+		let nestedStarted = false;
+		const nested = createSession({
+			depth: 2,
+			rlmSessionDir: join(tempDir, "replied-nested"),
+			streamFn: () => {
+				nestedStarted = true;
+				const stream = createAssistantMessageEventStream();
+				void nestedGate.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("nested done") });
+				});
+				return stream;
+			},
+		});
+		const child = createSession({
+			depth: 1,
+			maxDepth: 2,
+			rlmSessionDir: join(tempDir, "replied-live-child"),
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				roster: () => ({
+					current: { name: "reply-live-worker", id: child.sessionId, depth: 1 },
+					entries: [
+						{
+							relationship: "parent",
+							name: "parent",
+							id: "parent-session",
+							depth: 0,
+							status: "idle",
+						},
+					],
+				}),
+				sendAgentMessage: async () => ({
+					id: "agentmsg-reply-while-live",
+					source: "agent_message",
+					target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+					message: "still working",
+					deliveryStatus: "delivered",
+				}),
+			},
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				if (text === "reply while live") {
+					childStarted = true;
+					const stream = createAssistantMessageEventStream();
+					void childGate.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage("child first turn") });
+					});
+					return stream;
+				}
+				return streamAnswer(`later: ${text}`);
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: nested }),
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+		const root = createSession({
+			maxDepth: 2,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child }),
+				completeRlmSubagentRuntime: () => true,
+				deleteRlmSubagentRuntime: async () => {},
+			},
+		});
+
+		const spawned = await root.runRlmChild("reply while live", { name: "reply-live-worker" });
+		await waitFor(() => childStarted);
+		await child.runRlmChild("nested worker");
+		await waitFor(() => nestedStarted);
+		const send = (child as unknown as InspectableRlmSession)._createKernelHostHandlers()["agent_message.send"];
+		if (!send) throw new Error("Missing agent_message.send host handler");
+		await send({ message: "still working", receiver_role: "parent" });
+		releaseChild();
+		await expectNoCompletedWithoutReply(root);
+		releaseNested();
+		await vi.waitFor(async () => {
+			expect((await root.listRlmSubagents()).subagents).toContainEqual(
+				expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "completed" }),
+			);
+		});
+		expect(completedWithoutReplyContents(root)).toHaveLength(0);
+	});
+
 	it("does not inject a terminal notice when a parent follow-up resets reply state after a reply", async () => {
 		const child = createSession({
 			depth: 1,
@@ -1281,12 +1646,8 @@ describe("AgentSession rlm recursion", () => {
 			},
 		});
 
-		const spawned = await root.runRlmChild("reply first", { name: "reply-worker" });
-		await vi.waitFor(async () => {
-			expect((await root.listRlmSubagents()).subagents).toContainEqual(
-				expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "completed" }),
-			);
-		});
+		await root.runRlmChild("reply first", { name: "reply-worker" });
+		await expectNoCompletedWithoutReply(root);
 		expect(
 			root.messages.filter(
 				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
@@ -2139,6 +2500,9 @@ describe("AgentSession rlm recursion", () => {
 	it("lets a stale kernel depth cap defer to the live host gate", () => {
 		const python =
 			process.env.PRIME_AGENT_KERNEL_PYTHON ?? join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
+		if (!existsSync(python)) {
+			return;
+		}
 		const runtime = join(process.cwd(), "..", "..", "prime-agent-runtime", "src");
 		const probe = spawnSync(
 			python,
@@ -2868,6 +3232,10 @@ describe("AgentSession rlm recursion", () => {
 				} else if (text === "nested shard") {
 					nestedStarted = true;
 					void nestedRelease.then(() => {
+						stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
+					});
+				} else {
+					queueMicrotask(() => {
 						stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
 					});
 				}
