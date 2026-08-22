@@ -196,6 +196,102 @@ describe("daemon mode helpers", () => {
 		expect(secondClient.attachedActiveSessionIds.has("active")).toBe(false);
 	});
 
+	it("releases owner-scoped ACP MCP config when its daemon client detaches", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-acp-owner.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const owner = makeClient("owner", "active");
+		const other = makeClient("other", "active");
+		const replaceAcpMcpServers = vi.fn();
+		const releaseAcpMcpServers = vi.fn(async () => {});
+		const state = makeState("active");
+		state.clientEnv = {};
+		state.clients.add(owner);
+		state.clients.add(other);
+		state.extensionUiRequests = new Map();
+		state.runtime = {
+			...state.runtime,
+			session: {
+				isStreaming: false,
+				replaceAcpMcpServers,
+				releaseAcpMcpServers,
+				acquireSessionInputPause: () => ({ release: vi.fn() }),
+			},
+		} as never;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
+			detachClientFromSession(client: DaemonSocketClient, state: ActiveSessionState): void;
+			write: ReturnType<typeof vi.fn>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.write = vi.fn();
+
+		replaceAcpMcpServers.mockImplementationOnce(() => {
+			throw new Error("replacement failed");
+		});
+		await expect(
+			internals.handleCommand(owner, {
+				type: "replace_acp_mcp_servers",
+				activeSessionId: state.activeSessionId,
+				ownerId: "owner-token",
+				servers: [{ name: "failed", type: "http", url: "https://failed.example/mcp", headers: {} }],
+			}),
+		).rejects.toThrow("replacement failed");
+		expect(releaseAcpMcpServers).toHaveBeenLastCalledWith("owner-token", ["failed"]);
+
+		await internals.handleCommand(owner, {
+			type: "replace_acp_mcp_servers",
+			activeSessionId: state.activeSessionId,
+			ownerId: "owner-token",
+			servers: [{ name: "task", type: "http", url: "https://task.example/mcp", headers: {} }],
+		});
+		const releaseCount = releaseAcpMcpServers.mock.calls.length;
+		(state.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		await expect(
+			internals.handleCommand(owner, {
+				type: "replace_acp_mcp_servers",
+				activeSessionId: state.activeSessionId,
+				ownerId: "owner-token",
+				servers: [{ name: "next", type: "http", url: "https://next.example/mcp", headers: {} }],
+			}),
+		).rejects.toThrow("while the agent is running");
+		expect(releaseAcpMcpServers).toHaveBeenCalledTimes(releaseCount);
+		(state.runtime.session as unknown as { isStreaming: boolean }).isStreaming = false;
+
+		await expect(
+			internals.handleCommand(other, {
+				type: "replace_acp_mcp_servers",
+				activeSessionId: state.activeSessionId,
+				ownerId: "other-token",
+				servers: [{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+			}),
+		).rejects.toThrow("owned by another daemon client");
+
+		internals.detachClientFromSession(owner, state);
+		expect(releaseAcpMcpServers).toHaveBeenCalledWith("owner-token", ["task"]);
+
+		await internals.handleCommand(other, {
+			type: "replace_acp_mcp_servers",
+			activeSessionId: state.activeSessionId,
+			ownerId: "other-token",
+			servers: [{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+		});
+		expect(replaceAcpMcpServers).toHaveBeenLastCalledWith(
+			[{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+			"other-token",
+		);
+
+		await internals.handleCommand(other, {
+			type: "replace_acp_mcp_servers",
+			activeSessionId: state.activeSessionId,
+			ownerId: "other-token",
+			servers: [],
+		});
+		expect(releaseAcpMcpServers).toHaveBeenLastCalledWith("other-token", ["other"]);
+	});
+
 	it("cancels pending extension UI requests directly", () => {
 		const resolve = vi.fn();
 		const state = {
@@ -9103,7 +9199,7 @@ describe("daemon mode helpers", () => {
 		},
 	);
 
-	it("cancels only pre-ownership prompt admission and cleans up its controller", async () => {
+	it("capability-gates cancellation after prompt ownership", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -9162,7 +9258,7 @@ describe("daemon mode helpers", () => {
 		).resolves.toMatchObject({ success: true, data: { status: "cancelled" } });
 		await vi.waitFor(() => expect(internals.promptAdmissions.size).toBe(0));
 
-		// Once ownership commits the same cancellation is a no-op.
+		// Old clients retain the pre-ownership-only behavior.
 		internals.parseCommandAndRegisterPromptAdmission(
 			client,
 			JSON.stringify({
@@ -9189,6 +9285,19 @@ describe("daemon mode helpers", () => {
 				admissionId: "admission-2",
 			}),
 		).resolves.toMatchObject({ success: true, data: { status: "owned" } });
+		expect(promptOptions?.signal?.aborted).toBe(false);
+
+		// New clients request the capability-gated session-owned cancellation.
+		await expect(
+			internals.handleCommand(client, {
+				id: "cancel-3",
+				type: "cancel_prompt_admission",
+				activeSessionId: state.activeSessionId,
+				admissionId: "admission-2",
+				cancelOwned: true,
+			}),
+		).resolves.toMatchObject({ success: true, data: { status: "owned" } });
+		expect(promptOptions?.signal?.aborted).toBe(true);
 		rejectPrompt?.(new Error("test cleanup"));
 	});
 

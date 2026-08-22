@@ -471,7 +471,7 @@ describe("InteractiveMode /effort", () => {
 
 			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
 			expect(context.showStatus).toHaveBeenCalledWith(
-				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT authentication, or Grok 4.5/4.6 with an xAI Grok subscription",
+				"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication, or Grok 4.5/4.6 with an xAI Grok subscription",
 			);
 		});
 
