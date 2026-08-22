@@ -32,6 +32,60 @@ interface ResolvedIntegration {
 	userDeclared?: boolean;
 }
 
+/**
+ * Same enablement predicate the kernel uses. User-declared OAuth tokens must be
+ * bound to the configured URL; leftover or unbound credentials are not connected.
+ */
+export function isMcpIntegrationConnected(
+	integration: Pick<ResolvedIntegration, "server" | "config" | "usesOAuth" | "userDeclared">,
+	authStorage: { get(provider: string): unknown },
+): boolean {
+	if (integration.config.enabled === false) return false;
+	if (integration.userDeclared && getCatalogEntry(integration.server)) return false;
+	if (integration.config.type === "stdio") return true;
+	const { bearerTokenEnvVar } = integration.config;
+	if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
+	if (bearerTokenEnvVar && process.env[bearerTokenEnvVar]?.trim()) {
+		return true;
+	}
+	const cred = authStorage.get(`mcp:${integration.server}`);
+	if (cred === undefined) return false;
+	if (!integration.userDeclared) return true;
+	const endpoint = (cred as { endpoint?: string }).endpoint;
+	return typeof endpoint === "string" && endpoint === integration.config.url;
+}
+
+/** Resolve a catalog or user-declared server and apply {@link isMcpIntegrationConnected}. */
+export function isMcpServerConnected(
+	server: string,
+	authStorage: { get(provider: string): unknown },
+	userServers?: Record<string, McpServerConfig>,
+): boolean {
+	const userConfig = userServers?.[server];
+	if (userConfig) {
+		return isMcpIntegrationConnected(
+			{
+				server,
+				config: userConfig,
+				usesOAuth: userConfig.type === "http" && userConfig.oauth === true,
+				userDeclared: true,
+			},
+			authStorage,
+		);
+	}
+	const catalog = getCatalogEntry(server);
+	if (!catalog) return authStorage.get(`mcp:${server}`) !== undefined;
+	return isMcpIntegrationConnected(
+		{
+			server,
+			config: { type: "http", url: catalog.url, oauth: catalog.oauth?.kind === "oauth" },
+			usesOAuth: catalog.oauth?.kind === "oauth",
+			userDeclared: false,
+		},
+		authStorage,
+	);
+}
+
 export class McpManager {
 	private readonly authStorage: AuthStorage;
 	private readonly getUserServers: () => Record<string, McpServerConfig> | undefined;
@@ -146,21 +200,7 @@ export class McpManager {
 
 	/** True when valid credentials exist for the integration (drives enablement). */
 	private isAuthed(integration: ResolvedIntegration): boolean {
-		if (integration.config.enabled === false) return false;
-		if (integration.userDeclared && getCatalogEntry(integration.server)) return false;
-		if (integration.config.type === "stdio") return true;
-		const { bearerTokenEnvVar } = integration.config;
-		if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
-		if (bearerTokenEnvVar && process.env[bearerTokenEnvVar]?.trim()) {
-			return true;
-		}
-		const cred = this.authStorage.get(this.providerId(integration.server));
-		if (cred === undefined) return false;
-		// Builtin URLs are code-constant; only user-declared endpoints can be retargeted, so only their
-		// tokens must prove where they belong. Mismatched or unbound tokens require re-login.
-		if (!integration.userDeclared) return true;
-		const endpoint = (cred as { endpoint?: string }).endpoint;
-		return typeof endpoint === "string" && endpoint === integration.config.url;
+		return isMcpIntegrationConnected(integration, this.authStorage);
 	}
 
 	/** `-<server>/SKILL.md` overrides for every built-in integration the user isn't logged into. */

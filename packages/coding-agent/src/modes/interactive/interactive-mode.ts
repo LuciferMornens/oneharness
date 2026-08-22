@@ -96,7 +96,8 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
-import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
+import { formatMcpServerList, runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
+import { isMcpServerConnected } from "../../core/mcp/mcp-manager.js";
 import {
 	bashOutputToText,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
@@ -8660,7 +8661,8 @@ export class InteractiveMode {
 		}
 
 		const authStorage = this.modelRegistry.authStorage;
-		const isAuthed = (name: string) => authStorage.get(`mcp:${name}`) !== undefined;
+		const userServers = this.settingsManager.getGlobalMcpServers();
+		const isAuthed = (name: string) => isMcpServerConnected(name, authStorage, userServers);
 		if (sub === "login") {
 			if (!server || argv.length !== 2) {
 				this.showError("Usage: /mcp login <name> (e.g. /mcp login linear)");
@@ -8714,7 +8716,7 @@ export class InteractiveMode {
 					(entry) => `${entry.label} (${entry.server}): ${isAuthed(entry.server) ? "connected" : "not connected"}`,
 				).join("\n");
 				this.showStatus(
-					`Built-in MCP integrations:\n${builtins}\n\nUser-configured MCP servers:\n${result.message}`,
+					`Built-in MCP integrations:\n${builtins}\n\nUser-configured MCP servers:\n${formatMcpServerList(userServers, isAuthed)}`,
 				);
 			} else {
 				this.showStatus(result.message);

@@ -1100,6 +1100,41 @@ describe("InteractiveMode MCP command", () => {
 		expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("mcp-connections");
 	});
 
+	test("treats leftover and unbound OAuth credentials as not connected", async () => {
+		const creds = new Map<string, { type: string; endpoint?: string }>([
+			["mcp:remote", { type: "oauth", endpoint: "https://old.test/mcp" }],
+			["mcp:unbound", { type: "oauth" }],
+		]);
+		const logout = vi.fn();
+		const showStatus = vi.fn();
+		const fakeThis = {
+			modelRegistry: {
+				authStorage: {
+					get: (id: string) => creds.get(id),
+					logout,
+				},
+			},
+			settingsManager: SettingsManager.inMemory({
+				mcpServers: {
+					remote: { type: "http", url: "https://new.test/mcp", oauth: true },
+					unbound: { type: "http", url: "https://srv.test/mcp", oauth: true },
+				},
+			}),
+			showStatus,
+			showError: vi.fn(),
+		} as unknown as McpCommandHarness;
+
+		await handleMcpCommand.call(fakeThis, "logout remote");
+		expect(showStatus).toHaveBeenCalledWith("remote is not connected.");
+		expect(logout).not.toHaveBeenCalled();
+
+		showStatus.mockClear();
+		await handleMcpCommand.call(fakeThis, "list");
+		const listed = String(showStatus.mock.calls[0]?.[0]);
+		expect(listed).toContain("remote: http (not connected)");
+		expect(listed).toContain("unbound: http (not connected)");
+	});
+
 	test("preserves the explicit /mcp list status output", async () => {
 		const fakeThis = {
 			modelRegistry: { authStorage: { get: vi.fn(() => undefined) } },
@@ -1244,7 +1279,7 @@ describe("InteractiveMode MCP command", () => {
 		await handleMcpCommand.call(fakeThis, "list");
 		const listOutput = normalizeRenderedOutput(fakeThis.chatContainer);
 		expect(listOutput).toContain("User-configured MCP servers:");
-		expect(listOutput).toContain("fetch: stdio");
+		expect(listOutput).toContain("fetch: stdio (connected)");
 
 		fakeThis.chatContainer.clear();
 		await handleMcpCommand.call(fakeThis, "get fetch");

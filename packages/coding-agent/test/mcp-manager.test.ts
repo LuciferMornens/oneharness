@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { McpManager } from "../src/core/mcp/mcp-manager.js";
+import { isMcpServerConnected, McpManager } from "../src/core/mcp/mcp-manager.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import type { McpServerConfig } from "../src/core/settings-manager.js";
 
@@ -120,6 +120,38 @@ describe("McpManager", () => {
 			getUserServers: () => ({ linear: { type: "http", url: "https://proxy.test/mcp", oauth: true } }),
 		});
 		expect(manager.listStatus().find((s) => s.server === "linear")?.enabled).toBe(false);
+	});
+
+	it("treats leftover and unbound OAuth credentials as disconnected for UI status", () => {
+		authStorage.set("mcp:unbound", {
+			type: "oauth",
+			access: "unbound-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		authStorage.set("mcp:remote", {
+			type: "oauth",
+			access: "old-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://old.test/mcp",
+		} as never);
+		authStorage.set("mcp:bound", {
+			type: "oauth",
+			access: "ok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://ok.test/mcp",
+		} as never);
+		const userServers = {
+			remote: { type: "http" as const, url: "https://new.test/mcp", oauth: true as const },
+			unbound: { type: "http" as const, url: "https://srv.test/mcp", oauth: true as const },
+			bound: { type: "http" as const, url: "https://ok.test/mcp", oauth: true as const },
+		};
+		expect(isMcpServerConnected("remote", authStorage, userServers)).toBe(false);
+		expect(isMcpServerConnected("unbound", authStorage, userServers)).toBe(false);
+		expect(isMcpServerConnected("bound", authStorage, userServers)).toBe(true);
+		expect(isMcpServerConnected("linear", authStorage)).toBe(false);
 	});
 
 	it("does not enable a server from a credential bound to a different endpoint or unbound", () => {

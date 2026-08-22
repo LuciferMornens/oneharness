@@ -1,0 +1,1 @@
+- Fixed `/mcp list` and `/mcp logout` treating leftover or unbound generic MCP OAuth credentials as connected after the server URL changed.

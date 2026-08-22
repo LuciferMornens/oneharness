@@ -170,10 +170,19 @@ export function parseMcpAddArgs(args: readonly string[]): {
 	};
 }
 
-export function formatMcpServerList(servers: Record<string, McpServerConfig> | undefined): string {
+export function formatMcpServerList(
+	servers: Record<string, McpServerConfig> | undefined,
+	isConnected?: (name: string) => boolean,
+): string {
 	const entries = Object.entries(servers ?? {}).sort(([left], [right]) => left.localeCompare(right));
 	if (entries.length === 0) return "No user-configured MCP servers.";
-	return entries.map(([name, config]) => formatMcpServerSummary(name, config)).join("\n");
+	return entries
+		.map(([name, config]) => {
+			const line = formatMcpServerSummary(name, config);
+			if (!isConnected) return line;
+			return `${line} (${isConnected(name) ? "connected" : "not connected"})`;
+		})
+		.join("\n");
 }
 
 export function formatMcpServer(name: string, config: McpServerConfig): string {
