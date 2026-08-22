@@ -1217,7 +1217,7 @@ export class SettingsManager {
 	}
 
 	setGlobalMcpServer(name: string, config: McpServerConfig, force = false): void {
-		if (this.globalSettings.mcpServers?.[name] && !force) {
+		if (this.globalSettings.mcpServers && Object.hasOwn(this.globalSettings.mcpServers, name) && !force) {
 			throw new Error(`MCP server "${name}" already exists. Use --force to replace it.`);
 		}
 		this.globalSettings.mcpServers = { ...(this.globalSettings.mcpServers ?? {}), [name]: structuredClone(config) };
@@ -1226,7 +1226,7 @@ export class SettingsManager {
 	}
 
 	removeGlobalMcpServer(name: string): boolean {
-		if (!this.globalSettings.mcpServers?.[name]) return false;
+		if (!this.globalSettings.mcpServers || !Object.hasOwn(this.globalSettings.mcpServers, name)) return false;
 		const servers = { ...this.globalSettings.mcpServers };
 		delete servers[name];
 		this.globalSettings.mcpServers = servers;

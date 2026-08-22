@@ -36,19 +36,20 @@ export async function runMcpManagementCommand(
 	if (action === "get") {
 		requireCount(args, 2, "mcp get <name>");
 		const name = validateName(args[1]!);
-		const config = settingsManager.getGlobalMcpServers()?.[name];
+		const config = ownMcpServer(settingsManager.getGlobalMcpServers(), name);
 		if (!config) throw new Error(`MCP server "${name}" was not found.`);
 		return { action, message: formatMcpServer(name, config), changed: false };
 	}
 	if (action === "remove") {
 		requireCount(args, 2, "mcp remove <name>");
 		const name = validateName(args[1]!);
-		const config = settingsManager.getGlobalMcpServers()?.[name];
-		if (!config || !settingsManager.removeGlobalMcpServer(name)) {
+		const config = ownMcpServer(settingsManager.getGlobalMcpServers(), name);
+		if (!config) throw new Error(`MCP server "${name}" was not found.`);
+		dropServerCredentials(name, authStorage);
+		if (!settingsManager.removeGlobalMcpServer(name)) {
 			throw new Error(`MCP server "${name}" was not found.`);
 		}
 		await flushGlobalSettings(settingsManager);
-		dropServerCredentials(name, authStorage);
 		return {
 			action,
 			message: `Removed MCP server "${name}".`,
@@ -63,7 +64,7 @@ export async function runMcpManagementCommand(
 	}
 	if (action === "add") {
 		const { name, config, force } = parseMcpAddArgs(args.slice(1));
-		const replaced = settingsManager.getGlobalMcpServers()?.[name] !== undefined;
+		const replaced = ownMcpServer(settingsManager.getGlobalMcpServers(), name) !== undefined;
 		if (replaced && !force) {
 			throw new Error(`MCP server "${name}" already exists. Use --force to replace it.`);
 		}
@@ -224,6 +225,11 @@ async function flushGlobalSettings(settingsManager: SettingsManager): Promise<vo
 	await settingsManager.flush();
 	const error = settingsManager.drainErrors("global")[0];
 	if (error) throw error.error;
+}
+
+function ownMcpServer(servers: Record<string, McpServerConfig> | undefined, name: string): McpServerConfig | undefined {
+	if (!servers || !Object.hasOwn(servers, name)) return undefined;
+	return servers[name];
 }
 
 function dropServerCredentials(name: string, authStorage: McpCredentialStore | undefined): void {

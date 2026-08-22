@@ -165,6 +165,12 @@ describe("ACP MCP servers", () => {
 		});
 	});
 
+	it("rejects a whitespace-only stdio command", () => {
+		expect(() => resolveAcpMcpServers([{ name: "LocalTools", command: "   ", args: [], env: [] }], "/tmp")).toThrow(
+			"Invalid params",
+		);
+	});
+
 	it("rejects names that could inject prompt code and ambiguous credentials", () => {
 		expect(() =>
 			resolveAcpMcpServers(

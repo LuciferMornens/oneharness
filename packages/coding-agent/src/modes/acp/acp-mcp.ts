@@ -16,7 +16,7 @@ function entries(
 		if (!entry.name) {
 			throw RequestError.invalidParams({ reason: `MCP server ${server} has an empty ${label} name` });
 		}
-		const identity = label === "header" ? entry.name.toLowerCase() : entry.name;
+		const identity = label === "header" || process.platform === "win32" ? entry.name.toLowerCase() : entry.name;
 		if (seen.has(identity)) {
 			throw RequestError.invalidParams({
 				reason: `MCP server ${server} has duplicate ${label} ${entry.name}`,
@@ -53,7 +53,7 @@ export function resolveAcpMcpServers(servers: readonly McpServer[], cwd: string)
 		names.add(server.name);
 
 		if ("command" in server) {
-			if (!server.command) {
+			if (!server.command?.trim()) {
 				throw RequestError.invalidParams({ reason: `MCP server ${server.name} has no stdio command` });
 			}
 			if (server.command.includes("\0") || server.args.some((argument) => argument.includes("\0"))) {

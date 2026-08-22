@@ -3227,7 +3227,9 @@ export class DaemonSupervisor {
 							`Cannot safely replace live session worker ${worker.descriptor.workerId} without a verified process identity`,
 						);
 					}
-					const recoveryCommand = worker.descriptor.ownerClientId ? worker.transientCreateCommand : undefined;
+					const recoveryCommand = worker.descriptor.ownerClientId
+						? worker.transientCreateCommand
+						: worker.descriptor.createCommand;
 					if (!recoveryCommand || !worker.launchEnv) {
 						await this.recoverUncertainWorkerOperations(worker, false);
 						worker.descriptor.lifecycle = "failed";

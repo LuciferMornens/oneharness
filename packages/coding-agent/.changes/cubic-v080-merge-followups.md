@@ -1,0 +1,3 @@
+- Fixed IPython kernel stderr growing without bound for the lifetime of a session.
+- Fixed `mcp remove` leaving a stored credential when auth.json could not be updated.
+- Fixed resident daemon session workers failing recovery after a crash instead of relaunching from the saved create command.

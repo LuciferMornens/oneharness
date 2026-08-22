@@ -1,12 +1,21 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
+import { AGENT_MESSAGE_CUSTOM_TYPE, createAgentSessionMessage } from "../../../src/core/agent-messages.js";
+import { RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE } from "../../../src/core/messages.js";
 import { createHarness, type Harness } from "../harness.js";
 
 function completedWithoutReplyMessages(messages: readonly unknown[]): unknown[] {
 	return messages.filter((message) => {
-		const content = (message as { content?: unknown }).content;
-		return typeof content === "string" && content.includes("completed without sending a reply");
+		if (typeof message !== "object" || message === null) return false;
+		const content = "content" in message ? (message as { content?: unknown }).content : undefined;
+		const customType = "customType" in message ? (message as { customType?: unknown }).customType : undefined;
+		return (
+			"role" in message &&
+			(message as { role?: unknown }).role === "custom" &&
+			(customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE || customType === AGENT_MESSAGE_CUSTOM_TYPE) &&
+			typeof content === "string" &&
+			content.includes("completed without sending a reply")
+		);
 	});
 }
 

@@ -36,6 +36,7 @@ const READY_TIMEOUT_MS = 30_000;
 // Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
 const IOPUB_SUBSCRIBE_DELAY_MS = 50;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
+const KERNEL_STDERR_TAIL_MAX_CHARS = 65536;
 const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
 const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
@@ -648,8 +649,12 @@ export class KernelManager {
 		return this.options.sessionId;
 	}
 
+	private appendKernelStderr(message: string): void {
+		this.kernelStderr = `${this.kernelStderr}${message}`.slice(-KERNEL_STDERR_TAIL_MAX_CHARS);
+	}
+
 	private appendKernelDiagnostic(message: string): void {
-		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
+		this.appendKernelStderr(`[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`);
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
@@ -755,8 +760,7 @@ export class KernelManager {
 			if (kernel.pid !== undefined) recordOrphanProcessState(kernel.pid, true);
 
 			kernel.stderr?.on("data", (buf: Buffer) => {
-				const s = buf.toString();
-				this.kernelStderr += s;
+				this.appendKernelStderr(buf.toString());
 			});
 
 			kernel.on("error", (err) => {

@@ -43,10 +43,9 @@ describe("MCP management commands", () => {
 			"--",
 			"node",
 		]);
-		expect(config).toMatchObject({
-			type: "stdio",
-			env: { __proto__: { env: "PROTO_SOURCE" }, constructor: { env: "CONSTRUCTOR_SOURCE" } },
-		});
+		if (config.type !== "stdio") throw new Error("expected stdio config");
+		expect(config.env?.constructor).toEqual({ env: "CONSTRUCTOR_SOURCE" });
+		expect(Object.getOwnPropertyDescriptor(config.env ?? {}, "__proto__")?.value).toEqual({ env: "PROTO_SOURCE" });
 	});
 
 	it("validates transport, URL, names, auth, and stdio environment syntax", () => {
@@ -125,6 +124,33 @@ describe("MCP management commands", () => {
 			runMcpManagementCommand(["add", "remote", "--url", "https://two.example/mcp"], manager, authStorage),
 		).rejects.toThrow('Could not remove stored credentials for "remote"');
 		expect(manager.getGlobalMcpServers()?.remote).toBeUndefined();
+	});
+
+	it("aborts a remove when the credential drop fails, leaving settings untouched", async () => {
+		const manager = SettingsManager.inMemory({});
+		await runMcpManagementCommand(["add", "remote", "--url", "https://one.example/mcp", "--oauth"], manager);
+		const authStorage = {
+			removeVerified: () => {
+				throw new Error("auth.json write failed");
+			},
+		};
+		await expect(runMcpManagementCommand(["remove", "remote"], manager, authStorage)).rejects.toThrow(
+			'Could not remove stored credentials for "remote"',
+		);
+		expect(manager.getGlobalMcpServers()?.remote).toEqual({
+			type: "http",
+			url: "https://one.example/mcp",
+			oauth: true,
+		});
+	});
+
+	it("does not treat Object.prototype names as existing MCP servers", async () => {
+		const manager = SettingsManager.inMemory({});
+		await runMcpManagementCommand(["add", "constructor", "--url", "https://example.com/mcp"], manager);
+		expect(manager.getGlobalMcpServers()?.constructor).toEqual({
+			type: "http",
+			url: "https://example.com/mcp",
+		});
 	});
 
 	it("keeps the built-in integration login when removing a catalog-named shadow entry", async () => {

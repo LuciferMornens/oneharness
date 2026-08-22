@@ -35,5 +35,8 @@ export function buildReleaseSection(changelogContent, fragments, version, date) 
 
 	// No [Unreleased] header but fragments exist: insert the section after the title.
 	const content = changelogContent.replace(/^(# Changelog\n\n)/, (title) => `${title}${section}\n`);
+	if (content === changelogContent) {
+		throw new Error("Changelog must start with '# Changelog' so fragments can be folded into a release section.");
+	}
 	return { content, changed: true };
 }
