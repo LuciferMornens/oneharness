@@ -52,7 +52,7 @@ export async function removeTempRoot(root: string): Promise<void> {
 			return;
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
-			if (code !== "ENOTEMPTY" && code !== "EBUSY") {
+			if (code !== "ENOTEMPTY" && code !== "EBUSY" && code !== "EPERM") {
 				throw error;
 			}
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));

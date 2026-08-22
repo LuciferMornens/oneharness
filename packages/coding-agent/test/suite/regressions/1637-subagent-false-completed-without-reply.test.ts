@@ -1,10 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	AGENT_MESSAGE_CUSTOM_TYPE,
-	type AgentSessionMessage,
-	createAgentSessionMessage,
-} from "../../../src/core/agent-messages.js";
+import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
 import { createHarness, type Harness } from "../harness.js";
 
 function completedWithoutReplyMessages(messages: readonly unknown[]): unknown[] {
@@ -14,19 +10,10 @@ function completedWithoutReplyMessages(messages: readonly unknown[]): unknown[] 
 	});
 }
 
-function attributedTerminalMessage(messages: readonly unknown[]): AgentSessionMessage | undefined {
-	return messages.find((message): message is AgentSessionMessage => {
-		if (typeof message !== "object" || message === null) return false;
-		const content = "content" in message ? (message as { content?: unknown }).content : undefined;
-		return (
-			"role" in message &&
-			"customType" in message &&
-			(message as { role?: unknown }).role === "custom" &&
-			(message as { customType?: unknown }).customType === AGENT_MESSAGE_CUSTOM_TYPE &&
-			typeof content === "string" &&
-			content.includes("completed without sending a reply")
-		);
-	});
+function noticeContent(messages: readonly unknown[]): string {
+	const notices = completedWithoutReplyMessages(messages);
+	const content = (notices[0] as { content?: unknown } | undefined)?.content;
+	return typeof content === "string" ? content : "";
 }
 
 describe("#1637 still-live RLM children are not marked completed without reply", () => {
@@ -115,7 +102,7 @@ describe("#1637 still-live RLM children are not marked completed without reply",
 
 		releaseNested(fauxAssistantMessage("nested finished"));
 		await expect.poll(() => completedWithoutReplyMessages(parent!.session.messages)).toHaveLength(1);
-		expect(attributedTerminalMessage(parent.session.messages)?.content).toContain(spawned.rlm_child_id);
+		expect(noticeContent(parent.session.messages)).toContain(spawned.rlm_child_id);
 		expect(completeChild).toHaveBeenCalledWith(spawned.rlm_child_id, child.session);
 	});
 
@@ -160,6 +147,6 @@ describe("#1637 still-live RLM children are not marked completed without reply",
 		const spawned = await parent.session.runRlmChild("finish without replying", { name: "one-turn-worker" });
 		await expect.poll(() => completedWithoutReplyMessages(parent!.session.messages).length).toBeGreaterThan(0);
 		expect(completedWithoutReplyMessages(parent.session.messages)).toHaveLength(1);
-		expect(attributedTerminalMessage(parent.session.messages)?.content).toContain(spawned.rlm_child_id);
+		expect(noticeContent(parent.session.messages)).toContain(spawned.rlm_child_id);
 	});
 });

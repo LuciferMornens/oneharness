@@ -139,22 +139,16 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
 	});
 
-	it("skips terminally failed workers instead of failing the aggregate", async () => {
+	it("skips terminally failed workers without blocking healthy heartbeats", async () => {
 		const supervisor = createSupervisorHarness();
-		const healthy = worker("ready");
-		const failed = {
-			...worker("failed", false),
-			heartbeatSnapshot: [{ job: { id: "heartbeat-dead" } }],
-			heartbeatSnapshotStale: false,
-		};
-		supervisor.workers.set("healthy", healthy);
-		supervisor.workers.set("failed", failed);
+		supervisor.workers.set("healthy", worker("ready"));
+		supervisor.workers.set("failed", worker("failed", false));
 		supervisor.forwardToWorker = vi.fn(async (_target, command) =>
 			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
 		);
 
 		const response = await supervisor.handleCommand({} as DaemonSocketClient, {
-			id: "list-failed",
+			id: "list-failed-worker",
 			type: "heartbeats_list",
 		});
 

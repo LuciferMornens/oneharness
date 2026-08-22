@@ -60,7 +60,11 @@ import {
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
 	VERSION,
 } from "../../config.js";
-import { AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL, isAgentSessionMessage } from "../../core/agent-messages.js";
+import {
+	AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
+	isAgentSessionMessage,
+	startsAgentRun,
+} from "../../core/agent-messages.js";
 import {
 	type AgentTracePreviewResult,
 	type AgentTraceUploadAllResult,
@@ -92,15 +96,18 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { emptyGoalState, formatGoalUsage, GOAL_CONTEXT_PREVIEW_LABEL, type GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
+import { runMcpManagementCommand } from "../../core/mcp/mcp-command.js";
 import {
 	bashOutputToText,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	type CustomMessage,
 	createHeartbeatPromptMessage,
-	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	isCompactionOutcomeMessage,
+	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
 	isSessionSlashCommandResultMessage,
+	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 } from "../../core/messages.js";
@@ -201,6 +208,10 @@ import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./compo
 import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
+import {
+	MalformedRefinementOutcomeMessageComponent,
+	RefinementOutcomeMessageComponent,
+} from "./components/refinement-outcome-message.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
 import { SideQuestionComponent } from "./components/side-question.js";
@@ -888,6 +899,8 @@ export class InteractiveMode {
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private workingStartedAt: number | undefined = undefined;
+	// Start of the in-flight run; survives loader teardown so the elapsed display doesn't reset on re-entry.
+	private turnStartedAt: number | undefined = undefined;
 	private workingTimer: NodeJS.Timeout | undefined = undefined;
 	private readonly featureHintDeck = new FeatureHintDeck();
 	private currentFeatureHint: string | undefined;
@@ -999,6 +1012,7 @@ export class InteractiveMode {
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	private autoCompactionLoader: Loader | undefined = undefined;
+	private refineLoader: Loader | undefined = undefined;
 
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
@@ -2846,6 +2860,8 @@ export class InteractiveMode {
 		// bash_end will reach it once the reference is dropped.
 		this.activeBashComponent?.setComplete(undefined, true);
 		this.activeBashComponent = undefined;
+		// Likewise: the next session's view may never see this refine settle.
+		this.discardRefineLoader();
 		this.pendingBashComponents = [];
 		this.activityTracker.reset();
 		this.contextUsageTokenBaseline = 0;
@@ -2891,6 +2907,7 @@ export class InteractiveMode {
 	private async renderResyncedSession(snapshot: AgentConnectionSnapshot): Promise<void> {
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
 		this.applyConnectionStateSnapshot(snapshot.state);
+		this.restoreTurnStartFromMessages(this.getSessionContextFromConnectionSnapshot(snapshot).messages);
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.rlmNodeId = snapshot.parent?.childId;
@@ -3179,9 +3196,27 @@ export class InteractiveMode {
 		this.workingTimer.unref?.();
 	}
 
+	// Recover the in-flight run's start from a restored transcript so the elapsed timer survives re-attach.
+	private restoreTurnStartFromMessages(messages: readonly AgentMessage[]): void {
+		this.turnStartedAt = undefined;
+		if (!this.isAgentStreaming()) return;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i]!;
+			if (startsAgentRun(message)) {
+				this.turnStartedAt = message.timestamp;
+			} else if (message.role === "assistant" && message.stopReason !== "toolUse") {
+				break;
+			}
+		}
+		if (this.turnStartedAt !== undefined && this.workingStartedAt !== undefined) {
+			this.workingStartedAt = this.turnStartedAt;
+			this.updateWorkingLoaderMessage();
+		}
+	}
+
 	private startWorkingLoader(): void {
 		this.stopWorkingLoader();
-		this.workingStartedAt = Date.now();
+		this.workingStartedAt = this.turnStartedAt ?? Date.now();
 		this.loadingAnimation = this.createWorkingLoader();
 		this.statusContainer.addChild(this.loadingAnimation);
 		this.startWorkingTimer();
@@ -3300,11 +3335,7 @@ export class InteractiveMode {
 			this.featureHintRunPending = false;
 			return;
 		}
-		const startsNewRun =
-			message.role === "user" ||
-			isAgentSessionMessage(message) ||
-			(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE);
-		if (!startsNewRun) return;
+		if (!startsAgentRun(message)) return;
 
 		this.endFeatureHintRun();
 		if (this.shouldShowWorkingLoader()) {
@@ -3375,6 +3406,35 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/** Live status for a user-issued /refine, mirroring the compaction loader. */
+	private startRefineLoader(): void {
+		this.stopWorkingLoader();
+		this.statusContainer.clear();
+		this.refineLoader = new Loader(
+			this.ui,
+			(spinner) => theme.fg("muted", spinner),
+			(text) => theme.fg("muted", text),
+			"Refining continual harness state...",
+		);
+		this.statusContainer.addChild(this.refineLoader);
+		this.ui.requestRender();
+	}
+
+	private stopRefineLoader(): void {
+		if (!this.refineLoader) return;
+		this.discardRefineLoader();
+		this.statusContainer.clear();
+		this.syncWorkingLoader();
+	}
+
+	/** Stops and removes the loader without remounting old-session state. */
+	private discardRefineLoader(): void {
+		if (!this.refineLoader) return;
+		this.refineLoader.stop();
+		this.statusContainer.removeChild(this.refineLoader);
+		this.refineLoader = undefined;
+	}
+
 	private syncWorkingLoader(): void {
 		// A compaction that started before this client attached (or while another
 		// view was open) has no start-event edge; restore its loader from state.
@@ -3384,6 +3444,14 @@ export class InteractiveMode {
 		}
 		// Compaction/retry own the status container while active; don't fight them.
 		if (this.autoCompactionLoader || this.retryLoader) {
+			return;
+		}
+		// Remount the refine loader if another owner (e.g. a compaction) cleared it.
+		if (this.refineLoader) {
+			if (!this.statusContainer.children.includes(this.refineLoader)) {
+				this.statusContainer.clear();
+				this.statusContainer.addChild(this.refineLoader);
+			}
 			return;
 		}
 		if (this.shouldShowWorkingLoader()) {
@@ -5404,7 +5472,26 @@ export class InteractiveMode {
 			}
 
 			case "message_start":
+				// The run's first starter anchors the elapsed display; mid-turn steering must not restart it.
+				if (this.turnStartedAt === undefined && startsAgentRun(event.message)) {
+					this.turnStartedAt = event.message.timestamp;
+					if (this.workingStartedAt !== undefined) {
+						this.workingStartedAt = event.message.timestamp;
+						this.updateWorkingLoaderMessage();
+					}
+				}
 				if (event.message.role === "custom") {
+					if (isSessionSlashCommandMessage(event.message) && event.message.details.command.name === "refine") {
+						this.startRefineLoader();
+					}
+					// The /refine result row is the user refine's settle edge; refine_complete
+					// alone can belong to an agent/auto refinement the queued /refine waited on.
+					if (
+						isSessionSlashCommandResultMessage(event.message) &&
+						event.message.details.command.name === "refine"
+					) {
+						this.stopRefineLoader();
+					}
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
@@ -5529,6 +5616,7 @@ export class InteractiveMode {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
+				this.turnStartedAt = undefined;
 				// Drops the loader; background subagents are shown by the tree, not the loader.
 				this.syncWorkingLoader();
 				if (this.streamingComponent) {
@@ -5651,6 +5739,7 @@ export class InteractiveMode {
 				break;
 
 			case "refine_failed":
+				// This event has no request identity; the matching command result settles its loader.
 				this.showError(`Refinement failed: ${event.error}`);
 				break;
 
@@ -6175,6 +6264,40 @@ export class InteractiveMode {
 		}
 	}
 
+	private createDisplayedCustomMessageComponent(message: CustomMessage): Component {
+		if (isSessionSlashCommandMessage(message)) return new SlashCommandMessageComponent(message.content);
+		if (isSessionSlashCommandResultMessage(message)) return new SlashCommandResultMessageComponent(message);
+		if (
+			message.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE ||
+			message.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE
+		) {
+			return new UserMessageComponent("[Malformed session command message]", this.getMarkdownThemeWithSettings());
+		}
+		if (isCompactionOutcomeMessage(message)) return new CompactionOutcomeMessageComponent(message);
+		if (message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) {
+			return new MalformedCompactionOutcomeMessageComponent();
+		}
+		if (isRefinementOutcomeMessage(message)) return new RefinementOutcomeMessageComponent(message);
+		if (message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE) {
+			return new MalformedRefinementOutcomeMessageComponent();
+		}
+		if (isAgentSessionMessage(message)) {
+			return new AgentMessageComponent(message, this.getMarkdownThemeWithSettings(), {
+				suppressLeadingSpace: isCompactAgentMessageNeighbor(this.chatContainer.children.at(-1)),
+			});
+		}
+		if (isInjectedPromptMessage(message)) {
+			return new InjectedPromptMessageComponent(message, this.getMarkdownThemeWithSettings());
+		}
+		return new CustomMessageComponent(
+			message,
+			this.bindLocalSessionExtensions
+				? this.getLocalSessionHost().getExtensionRunner().getMessageRenderer(message.customType)
+				: undefined,
+			this.getMarkdownThemeWithSettings(),
+		);
+	}
+
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
@@ -6195,41 +6318,12 @@ export class InteractiveMode {
 			}
 			case "custom": {
 				if (message.display) {
-					const reservedSessionCommand =
-						message.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE ||
-						message.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE;
-					const component = isSessionSlashCommandMessage(message)
-						? new SlashCommandMessageComponent(message.content)
-						: isSessionSlashCommandResultMessage(message)
-							? new SlashCommandResultMessageComponent(message)
-							: reservedSessionCommand
-								? new UserMessageComponent(
-										"[Malformed session command message]",
-										this.getMarkdownThemeWithSettings(),
-									)
-								: isCompactionOutcomeMessage(message)
-									? new CompactionOutcomeMessageComponent(message)
-									: message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE
-										? new MalformedCompactionOutcomeMessageComponent()
-										: isAgentSessionMessage(message)
-											? new AgentMessageComponent(message, this.getMarkdownThemeWithSettings(), {
-													suppressLeadingSpace: isCompactAgentMessageNeighbor(
-														this.chatContainer.children.at(-1),
-													),
-												})
-											: isInjectedPromptMessage(message)
-												? new InjectedPromptMessageComponent(message, this.getMarkdownThemeWithSettings())
-												: new CustomMessageComponent(
-														message,
-														this.bindLocalSessionExtensions
-															? this.getLocalSessionHost()
-																	.getExtensionRunner()
-																	.getMessageRenderer(message.customType)
-															: undefined,
-														this.getMarkdownThemeWithSettings(),
-													);
-					if (!(component instanceof UserMessageComponent)) {
+					const component = this.createDisplayedCustomMessageComponent(message);
+					if (isExpandable(component)) {
 						component.setExpanded(this.expansionStateFor(component));
+					}
+					if (hasEditDiffsExpansion(component)) {
+						component.setEditDiffsExpanded(this.editDiffsExpanded);
 					}
 					if (isSessionSlashCommandMessage(message) && this.chatContainer.children.length > 0) {
 						this.chatContainer.addChild(new Spacer(1));
@@ -6488,6 +6582,7 @@ export class InteractiveMode {
 		this.seedSubagentSummary(snapshot.children);
 		this.setSessionHasMessages(context.messages.length > 0);
 		this.applyConnectionStateSnapshot(state);
+		this.restoreTurnStartFromMessages(context.messages);
 		await this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
@@ -7114,7 +7209,10 @@ export class InteractiveMode {
 		const earlier = this.getAppKeyDisplay("app.message.moveEarlier");
 		const later = this.getAppKeyDisplay("app.message.moveLater");
 		const queue = this.getAppKeyDisplay("app.message.followUp");
-		return `${lane} ${selected.index + 1} · ${older}/${newer} browse · ${earlier}/${later} reorder · enter steers · ${queue} queues · empty deletes`;
+		return theme.fg(
+			"dim",
+			`${lane} ${selected.index + 1} · ${older}/${newer} browse · ${earlier}/${later} reorder · enter steers · ${queue} queues · empty deletes`,
+		);
 	}
 
 	private updateEditorBorderColor(): void {
@@ -7851,7 +7949,7 @@ export class InteractiveMode {
 
 	private handleFastCommand(): void {
 		const unavailableMessage =
-			"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT authentication, or Grok 4.5/4.6 with an xAI Grok subscription";
+			"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication, or Grok 4.5/4.6 with an xAI Grok subscription";
 		if (!this.currentModelSupportsFastMode()) {
 			this.showStatus(unavailableMessage);
 			return;
@@ -8554,7 +8652,8 @@ export class InteractiveMode {
 	}
 
 	private async handleMcpCommand(args: string | undefined): Promise<void> {
-		const [sub, server] = (args ?? "").trim().split(/\s+/);
+		const argv = parseCommandArgs((args ?? "").trim());
+		const [sub, server] = argv;
 		if (!sub) {
 			await this.showConfigurationMenu("mcp-connections");
 			return;
@@ -8562,22 +8661,8 @@ export class InteractiveMode {
 
 		const authStorage = this.modelRegistry.authStorage;
 		const isAuthed = (name: string) => authStorage.get(`mcp:${name}`) !== undefined;
-
-		if (sub === "list") {
-			const labels = new Map(BUILTIN_MCP_CATALOG.map((e) => [e.server, e.label]));
-			const names = new Set([...labels.keys(), ...Object.keys(this.settingsManager.getMcpServers() ?? {})]);
-			const lines = [...names].map((name) => {
-				const status = isAuthed(name) ? "connected" : "not connected";
-				return `  ${labels.get(name) ?? name} (${name}) — ${status}`;
-			});
-			this.showStatus(
-				`MCP integrations:\n${lines.join("\n")}\n\nUse /mcp login <name> to connect, /mcp logout <name> to disconnect.`,
-			);
-			return;
-		}
-
 		if (sub === "login") {
-			if (!server) {
+			if (!server || argv.length !== 2) {
 				this.showError("Usage: /mcp login <name> (e.g. /mcp login linear)");
 				return;
 			}
@@ -8587,20 +8672,13 @@ export class InteractiveMode {
 					this.showStatus(`Connected ${server}. Reload after the agent connection is available to activate it.`);
 					return;
 				}
-				// Enabling the skill needs a reload, which is refused mid-turn; tell the
-				// user to /reload rather than silently leaving creds saved but inactive.
-				if (this.isAgentStreaming() || this.isAgentCompacting()) {
-					this.showStatus(`Connected ${server}. Run /reload (after the current turn) to activate it.`);
-				} else {
-					this.showStatus(`Connected ${server}. Reloading so the integration becomes available…`);
-					await this.handleReloadCommand();
-				}
+				await this.reloadAfterMcpChange(`Connected ${server}.`);
 			}
 			return;
 		}
 
 		if (sub === "logout") {
-			if (!server) {
+			if (!server || argv.length !== 2) {
 				this.showError("Usage: /mcp logout <name>");
 				return;
 			}
@@ -8614,16 +8692,49 @@ export class InteractiveMode {
 				this.showError(`Failed to disconnect ${server}: ${error instanceof Error ? error.message : String(error)}`);
 				return;
 			}
-			if (this.isAgentStreaming() || this.isAgentCompacting()) {
-				this.showStatus(`Disconnected ${server}. Run /reload (after the current turn) to fully unload it.`);
-			} else {
-				this.showStatus(`Disconnected ${server}. Reloading…`);
-				await this.handleReloadCommand();
-			}
+			await this.reloadAfterMcpChange(`Disconnected ${server}.`);
 			return;
 		}
 
-		this.showError(`Unknown /mcp subcommand: ${sub}. Use list, login, or logout.`);
+		try {
+			const result = await runMcpManagementCommand(argv, this.settingsManager, this.modelRegistry.authStorage);
+			if (result.changed && result.serverChange) {
+				const { name, transport, verb, usesOAuth } = result.serverChange;
+				const hasMcpProviderRefresh = this.uiServices.refreshMcpProviders !== undefined;
+				this.uiServices.refreshMcpProviders?.();
+				const successMessage =
+					verb === "removed"
+						? `Removed MCP server "${name}" (${transport}). It is no longer available through mcp.`
+						: usesOAuth
+							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). ${hasMcpProviderRefresh ? "Run" : "Restart Prime Agent, then run"} /mcp login ${name} to connect.`
+							: `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). Available next turn through mcp.`;
+				await this.reloadAfterMcpChange(usesOAuth ? successMessage : result.message, successMessage);
+			} else if (result.action === "list") {
+				const builtins = BUILTIN_MCP_CATALOG.map(
+					(entry) => `${entry.label} (${entry.server}): ${isAuthed(entry.server) ? "connected" : "not connected"}`,
+				).join("\n");
+				this.showStatus(
+					`Built-in MCP integrations:\n${builtins}\n\nUser-configured MCP servers:\n${result.message}`,
+				);
+			} else {
+				this.showStatus(result.message);
+			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async reloadAfterMcpChange(message: string, successMessage = message): Promise<void> {
+		if (this.isAgentStreaming() || this.isAgentCompacting()) {
+			this.showStatus(`${message} The change was saved. Run /reload after the current turn to activate it.`);
+			return;
+		}
+		const reloaded = await this.handleReloadCommand();
+		if (reloaded) {
+			this.showStatus(successMessage);
+		} else {
+			this.showWarning(`${message} The change remains saved, but it is not active in this session.`);
+		}
 	}
 
 	private async showLogoutSelector(): Promise<void> {
@@ -8751,14 +8862,14 @@ export class InteractiveMode {
 		await this.handleReloadCommand();
 	}
 
-	private async handleReloadCommand(): Promise<void> {
+	private async handleReloadCommand(): Promise<boolean> {
 		if (this.isAgentStreaming()) {
 			this.showWarning("Wait for the current response to finish before reloading.");
-			return;
+			return false;
 		}
 		if (this.isAgentCompacting()) {
 			this.showWarning("Wait for compaction to finish before reloading.");
-			return;
+			return false;
 		}
 
 		this.resetExtensionUI();
@@ -8829,9 +8940,11 @@ export class InteractiveMode {
 				this.showError(`models.json error: ${modelsJsonError}`);
 			}
 			this.showStatus("Reloaded keybindings, extensions, skills, prompts, themes");
+			return true;
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		}
 	}
 
@@ -9933,6 +10046,7 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 			this.ui.terminal.setProgress(false);
 		}
 		this.stopWorkingLoader();
+		this.discardRefineLoader();
 		this.endFeatureHintRun();
 		this.stopWorkingPulse();
 		this.stopGoalTrayTimer();
