@@ -622,6 +622,26 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.AUDN_API_KEY)("audn.ai Provider (pingu-unchained-10 via OpenAI Completions)", () => {
+		const llm = getModel("audn", "pingu-unchained-10");
+
+		it("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm);
+		});
+
+		it("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm);
+		});
+
+		it("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm);
+		});
+
+		it("should handle multi-turn with tools", { retry: 3 }, async () => {
+			await multiTurn(llm);
+		});
+	});
+
 	describe.skipIf(!hasCloudflareWorkersAICredentials())(
 		"Cloudflare Workers AI Provider (Kimi K2.6 via OpenAI Completions)",
 		() => {

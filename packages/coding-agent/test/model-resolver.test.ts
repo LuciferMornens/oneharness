@@ -428,6 +428,10 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider.cerebras).toBe("gpt-oss-120b");
 	});
 
+	test("audn defaults to necromicon", () => {
+		expect(defaultModelPerProvider.audn).toBe("necromicon");
+	});
+
 	test("ai-gateway default tracks current model", () => {
 		expect(defaultModelPerProvider["vercel-ai-gateway"]).toBe("zai/glm-5.1");
 	});

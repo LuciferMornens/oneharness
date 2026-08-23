@@ -25,6 +25,7 @@ if [[ "$NO_ENV" == "true" ]]; then
   # Unset API keys (see packages/ai/src/env-api-keys.ts)
   unset ANTHROPIC_API_KEY
   unset ANTHROPIC_OAUTH_TOKEN
+  unset AUDN_API_KEY
   unset OPENAI_API_KEY
   unset PRIME_API_KEY
   unset DEEPSEEK_API_KEY

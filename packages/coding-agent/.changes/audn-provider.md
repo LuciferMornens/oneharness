@@ -1,0 +1,2 @@
+- Added audn.ai API-key login and the built-in audn catalog, defaulting to Necromicon.
+- Changed Necromicon and K3-Thinker-Qwen38 to Kimi K3 reasoning effort, with selectable `low` / `high` / `max`.

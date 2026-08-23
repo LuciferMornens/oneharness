@@ -571,6 +571,14 @@ function isNativeMoonshotModel(model: Model<any>): boolean {
 	);
 }
 
+function isAudnK3EffortModel(model: Model<any>): boolean {
+	return (
+		model.api === "openai-completions" &&
+		model.provider === "audn" &&
+		(model.id === "necromicon" || model.id === "k3-thinker-qwen38")
+	);
+}
+
 function applyProviderSpecificReasoningMetadata(model: Model<any>): boolean {
 	let control: "fixed" | "toggle" | "effort" | "budget" | undefined;
 	let levels: ThinkingLevelMap | ReasoningBudgetLevelMap | undefined;
@@ -594,6 +602,14 @@ function applyProviderSpecificReasoningMetadata(model: Model<any>): boolean {
 			thinkingFormat: "moonshot",
 		};
 	} else if (isNativeMoonshotModel(model) && /^kimi-k3(?:-|$)/.test(model.id.toLowerCase())) {
+		control = "effort";
+		levels = { ...MOONSHOT_K3_EFFORT_LEVEL_MAP };
+		model.compat = {
+			...model.compat,
+			supportsReasoningEffort: true,
+			thinkingFormat: "openai",
+		};
+	} else if (isAudnK3EffortModel(model)) {
 		control = "effort";
 		levels = { ...MOONSHOT_K3_EFFORT_LEVEL_MAP };
 		model.compat = {
@@ -2535,14 +2551,133 @@ function getGrokSubscriptionModels(): Model<"grok-responses">[] {
 	return models;
 }
 
+const AUDN_BASE_URL = "https://platform.audn.ai/api/v1";
+const AUDN_COMPAT: OpenAICompletionsCompat = {
+	supportsStore: false,
+	supportsDeveloperRole: true,
+	supportsReasoningEffort: false,
+	maxTokensField: "max_tokens",
+	supportsStrictMode: false,
+};
+const AUDN_REASONING_COMPAT: OpenAICompletionsCompat = {
+	...AUDN_COMPAT,
+	requiresReasoningContentOnAssistantMessages: true,
+};
+
+/**
+ * audn.ai OpenAI-compatible catalog. Not on models.dev; sourced from
+ * https://platform.audn.ai/docs. Reasoning models always think server-side and
+ * return `reasoning_content`; there is no client reasoning-effort control.
+ */
+function getAudnModels(): Model<"openai-completions">[] {
+	return [
+		{
+			id: "pingu-unchained-10",
+			name: "Pingu Unchained 10",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: AUDN_BASE_URL,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 2, output: 8, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 16384,
+			compat: { ...AUDN_COMPAT },
+		},
+		{
+			id: "kong",
+			name: "Kong",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: AUDN_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 2, output: 8, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 8192,
+			compat: { ...AUDN_REASONING_COMPAT },
+		},
+		{
+			id: "godzilla",
+			name: "GODZILLA",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: AUDN_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 7, output: 18, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131072,
+			maxTokens: 8192,
+			compat: { ...AUDN_REASONING_COMPAT },
+		},
+		{
+			id: "necromicon",
+			name: "Necromicon",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: AUDN_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "effort", levels: { ...MOONSHOT_K3_EFFORT_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 4, output: 21, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 8192,
+			featured: true,
+			compat: {
+				...AUDN_REASONING_COMPAT,
+				supportsReasoningEffort: true,
+				thinkingFormat: "openai",
+			},
+		},
+		{
+			id: "stealth-ox-alpha",
+			name: "Stealth Ox Alpha",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: AUDN_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 4, output: 21, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 8192,
+			compat: { ...AUDN_REASONING_COMPAT },
+		},
+		{
+			id: "k3-thinker-qwen38",
+			name: "K3-Thinker-Qwen38",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: AUDN_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "effort", levels: { ...MOONSHOT_K3_EFFORT_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 4, output: 21, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 8192,
+			compat: {
+				...AUDN_REASONING_COMPAT,
+				supportsReasoningEffort: true,
+				thinkingFormat: "openai",
+			},
+		},
+	];
+}
+
+function mergeStaticCatalogModels(allModels: Model<any>[]): void {
+	for (const model of [...getGrokSubscriptionModels(), ...getAudnModels()]) {
+		if (!allModels.some((existing) => existing.provider === model.provider && existing.id === model.id)) {
+			allModels.push(model);
+		}
+	}
+}
+
 async function generateModels() {
 	if (process.argv.includes("--preserve-catalog")) {
 		const preservedModels = getExistingCatalogModels();
-		for (const model of getGrokSubscriptionModels()) {
-			if (!preservedModels.some((m) => m.provider === model.provider && m.id === model.id)) {
-				preservedModels.push(model);
-			}
-		}
+		mergeStaticCatalogModels(preservedModels);
 		writeGeneratedModels(preservedModels, true);
 		return;
 	}
@@ -3088,6 +3223,7 @@ async function generateModels() {
 
 	// xAI Grok subscription models (OAuth via the Grok CLI proxy)
 	allModels.push(...getGrokSubscriptionModels());
+	allModels.push(...getAudnModels());
 
 	// Add missing Grok models
 	if (!allModels.some(m => m.provider === "xai" && m.id === "grok-code-fast-1")) {

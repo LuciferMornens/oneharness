@@ -1175,6 +1175,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
 	const isPrimeInference = provider === "prime-inference" || baseUrl.includes("api.pinference.ai");
+	const isAudn = provider === "audn" || baseUrl.includes("platform.audn.ai");
 
 	const isNonStandard =
 		provider === "cerebras" ||
@@ -1200,15 +1201,15 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isAnthropicModel && (provider === "openrouter" || isPrimeInference) ? "anthropic" : undefined;
 
 	return {
-		supportsStore: !isNonStandard,
-		supportsDeveloperRole: !isNonStandard,
-		supportsReasoningEffort: !isGrok && !isZai && !isMoonshot && !isCloudflareAiGateway,
+		supportsStore: !isNonStandard && !isAudn,
+		supportsDeveloperRole: !isNonStandard || isAudn,
+		supportsReasoningEffort: !isGrok && !isZai && !isMoonshot && !isCloudflareAiGateway && !isAudn,
 		supportsUsageInStreaming: true,
-		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
+		maxTokensField: useMaxTokens || isAudn ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
 		requiresThinkingAsText: false,
-		requiresReasoningContentOnAssistantMessages: isDeepSeek,
+		requiresReasoningContentOnAssistantMessages: isDeepSeek || (isAudn && model.reasoning),
 		thinkingFormat: isDeepSeek
 			? "deepseek"
 			: isZai
@@ -1220,7 +1221,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		vercelGatewayRouting: {},
 		orcaRouterRouting: {},
 		zaiToolStream: false,
-		supportsStrictMode: !isMoonshot && !isCloudflareAiGateway && !isPrimeInference,
+		supportsStrictMode: !isMoonshot && !isCloudflareAiGateway && !isPrimeInference && !isAudn,
 		cacheControlFormat,
 		sendSessionAffinityHeaders: false,
 		supportsLongCacheRetention: !(isCloudflareWorkersAI || isCloudflareAiGateway),

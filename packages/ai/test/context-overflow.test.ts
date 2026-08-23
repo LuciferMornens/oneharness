@@ -215,6 +215,17 @@ describe("Context overflow error handling", () => {
 		}, 120000);
 	});
 
+	describe.skipIf(!process.env.AUDN_API_KEY)("audn.ai", () => {
+		it("pingu-unchained-10 - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("audn", "pingu-unchained-10");
+			const result = await testContextOverflow(model, process.env.AUDN_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
 	describe.skipIf(!process.env.GROQ_API_KEY)("Groq", () => {
 		it("llama-3.3-70b-versatile - should detect overflow via isContextOverflow", async () => {
 			const model = getModel("groq", "llama-3.3-70b-versatile");

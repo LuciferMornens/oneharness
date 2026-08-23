@@ -20,6 +20,7 @@ export const PRIME_INFERENCE_DEFAULT_MODEL_ID = "z-ai/glm-5.2";
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
 	anthropic: "claude-opus-4-7",
+	audn: "necromicon",
 	openai: "gpt-5.4",
 	"azure-openai-responses": "gpt-5.4",
 	"openai-codex": "gpt-5.5",
