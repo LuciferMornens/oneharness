@@ -59,6 +59,7 @@ prime-agent
 | Provider | Environment Variable | `auth.json` key |
 |----------|----------------------|------------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
+| audn.ai | `AUDN_API_KEY` | `audn` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
 | Prime Inference | `PRIME_API_KEY` | `prime-inference` |
@@ -97,6 +98,7 @@ Store credentials in `~/.prime/agent/auth.json`:
 ```json
 {
   "anthropic": { "type": "api_key", "key": "sk-ant-..." },
+  "audn": { "type": "api_key", "key": "sk_live_..." },
   "openai": { "type": "api_key", "key": "sk-..." },
   "prime-inference": { "type": "api_key", "key": "..." },
   "deepseek": { "type": "api_key", "key": "sk-..." },
@@ -135,6 +137,12 @@ OAuth credentials are also stored here after `/login` and managed automatically.
 ### Prime Inference
 
 Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.
+
+### audn.ai
+
+audn.ai is an OpenAI-compatible API at `https://platform.audn.ai/api/v1`. Set `AUDN_API_KEY` or store a key under `audn` via `/login`. Keys start with `sk_live_`; get one at [https://platform.audn.ai](https://platform.audn.ai). The default model is `necromicon`. Necromicon and K3-Thinker-Qwen38 use Kimi K3 reasoning effort (`low` / `high` / `max`; `/effort max` sends `reasoning_effort: "max"`). Reasoning models can take tens of seconds to minutes; `pingu-unchained-10` is the function-calling model and answers in about a second.
+
+See [https://platform.audn.ai/docs](https://platform.audn.ai/docs).
 
 ### OrcaRouter
 

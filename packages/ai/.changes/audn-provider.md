@@ -1,0 +1,2 @@
+- Added the audn.ai OpenAI-compatible provider, including Necromicon and the rest of the platform roster, with `AUDN_API_KEY` auth.
+- Changed Necromicon and K3-Thinker-Qwen38 to Kimi K3 reasoning effort, with selectable `low` / `high` / `max`.

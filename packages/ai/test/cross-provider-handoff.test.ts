@@ -71,6 +71,8 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 		upstreamApiKeyEnv: "OPENAI_API_KEY",
 	},
 	{ provider: "groq", model: "openai/gpt-oss-120b", label: "groq-gpt-oss-120b" },
+	{ provider: "audn", model: "pingu-unchained-10", label: "audn-pingu-unchained-10" },
+	{ provider: "audn", model: "necromicon", label: "audn-necromicon" },
 	{ provider: "orcarouter", model: "orcarouter/auto", label: "orcarouter-auto" },
 	{ provider: "huggingface", model: "moonshotai/Kimi-K2.5", label: "huggingface-kimi-k2.5" },
 	{ provider: "kimi-coding", model: getKimiCodingTestModel().id, label: "kimi-coding" },

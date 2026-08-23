@@ -33,6 +33,7 @@ if ($noEnvironment) {
 	$credentialVariables = @(
 		"ANTHROPIC_API_KEY",
 		"ANTHROPIC_OAUTH_TOKEN",
+		"AUDN_API_KEY",
 		"OPENAI_API_KEY",
 		"PRIME_API_KEY",
 		"DEEPSEEK_API_KEY",

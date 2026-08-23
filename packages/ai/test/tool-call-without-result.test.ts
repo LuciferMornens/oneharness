@@ -135,6 +135,14 @@ describe("Tool Call Without Result Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.AUDN_API_KEY)("audn.ai Provider", () => {
+		const model = getModel("audn", "pingu-unchained-10");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model);
+		});
+	});
+
 	describe.skipIf(!process.env.GROQ_API_KEY)("Groq Provider", () => {
 		const model = getModel("groq", "openai/gpt-oss-20b");
 

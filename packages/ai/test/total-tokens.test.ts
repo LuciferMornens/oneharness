@@ -217,6 +217,24 @@ describe("totalTokens field", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.AUDN_API_KEY)("audn.ai", () => {
+		it("pingu-unchained-10 - should return totalTokens equal to sum of components", {
+			retry: 3,
+			timeout: 60000,
+		}, async () => {
+			const llm = getModel("audn", "pingu-unchained-10");
+
+			console.log(`\naudn.ai / ${llm.id}:`);
+			const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.AUDN_API_KEY });
+
+			logUsage("First request", first);
+			logUsage("Second request", second);
+
+			assertTotalTokensEqualsComponents(first);
+			assertTotalTokensEqualsComponents(second);
+		});
+	});
+
 	describe.skipIf(!process.env.GROQ_API_KEY)("Groq", () => {
 		it("openai/gpt-oss-120b - should return totalTokens equal to sum of components", {
 			retry: 3,
