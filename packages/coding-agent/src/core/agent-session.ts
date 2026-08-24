@@ -379,6 +379,17 @@ export type AgentSessionEvent =
 
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
+function isInactivityProgressEvent(event: AgentSessionEvent): boolean {
+	return (
+		event.type === "tool_execution_start" ||
+		event.type === "tool_execution_update" ||
+		event.type === "tool_execution_end" ||
+		event.type === "bash_start" ||
+		event.type === "bash_output" ||
+		event.type === "bash_end"
+	);
+}
+
 type UserBashEndDetails = {
 	exitCode: number | undefined;
 	cancelled: boolean;
@@ -8985,6 +8996,7 @@ export class AgentSession {
 					provisioner: this._ipythonKernelProvisioner,
 					commandPrefix: this.settingsManager.getShellCommandPrefix(),
 					shellPath: this.settingsManager.getShellPath(),
+					stallTimeoutMs: () => this.settingsManager.getInactivityTimeoutMs(),
 					onLateSentAgentMessage: (toolCallId, message) =>
 						this._recordLateIpythonSentAgentMessage(toolCallId, message),
 				},
@@ -10023,10 +10035,21 @@ export class AgentSession {
 		);
 	}
 
+	private _hasStallableInactivityWork(): boolean {
+		return this.isBashRunning || this.unfinishedActionCount > 0;
+	}
+
+	private _failOpenInactivity(): void {
+		if (this.isBashRunning) this.abortBash();
+		this.agent.abort();
+	}
+
 	private async _waitWhileRlmChildLive(child: AgentSession, run: RlmChildRun): Promise<void> {
 		if (run.status === "cancelled" || this._disposed || this._disposing || !child.hasLiveRlmSessionWork()) {
 			return;
 		}
+		const timeoutMs = this.settingsManager.getInactivityTimeoutMs();
+		let lastProgress = Date.now();
 		await new Promise<void>((resolve) => {
 			let settled = false;
 			const finish = () => {
@@ -10041,9 +10064,18 @@ export class AgentSession {
 			const check = () => {
 				if (run.status === "cancelled" || this._disposed || this._disposing || !child.hasLiveRlmSessionWork()) {
 					finish();
+					return;
+				}
+				if (timeoutMs > 0 && child._hasStallableInactivityWork() && Date.now() - lastProgress >= timeoutMs) {
+					this._cancelRlmChildRun(
+						run,
+						`RLM child stalled for ${Math.max(1, Math.round(timeoutMs / 1000))}s with no activity`,
+					);
+					finish();
 				}
 			};
-			const unsubscribe = child.subscribe(() => {
+			const unsubscribe = child.subscribe((event) => {
+				if (isInactivityProgressEvent(event)) lastProgress = Date.now();
 				check();
 			});
 			const timer = setInterval(check, 20);
@@ -10081,6 +10113,11 @@ export class AgentSession {
 		if (externalSignal?.aborted) cancellation.abort();
 		else externalSignal?.addEventListener("abort", cancelFromParent, { once: true });
 		this._rlmQuiescenceWaitAborts.add(cancellation);
+		const timeoutMs = this.settingsManager.getInactivityTimeoutMs();
+		let lastProgress = Date.now();
+		const unsubscribeProgress = this.subscribe((event) => {
+			if (isInactivityProgressEvent(event)) lastProgress = Date.now();
+		});
 		let rejectCancelled = (_error: Error) => {};
 		const cancelled = new Promise<never>((_resolve, reject) => {
 			rejectCancelled = reject;
@@ -10097,6 +10134,9 @@ export class AgentSession {
 				// intentionally ignores. Yield a macrotask while such work is active so
 				// recursive parent/child barriers cannot form a microtask busy-loop.
 				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices()) {
+					if (timeoutMs > 0 && this._hasStallableInactivityWork() && Date.now() - lastProgress >= timeoutMs) {
+						this._failOpenInactivity();
+					}
 					await wait(new Promise<void>((resolve) => setTimeout(resolve, 0)));
 					continue;
 				}
@@ -10113,6 +10153,7 @@ export class AgentSession {
 				// start at the child-settlement boundary.
 			}
 		} finally {
+			unsubscribeProgress();
 			// A local descendant error must cancel sibling recursive waits owned by
 			// this barrier before their propagation listeners are removed.
 			cancellation.abort();

@@ -19,7 +19,7 @@ import { KernelManager } from "../src/core/kernel/index.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
+import { type Settings, SettingsManager } from "../src/core/settings-manager.js";
 import { createLocalBashOperations } from "../src/core/tools/bash.js";
 import { createIpythonTool, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import { waitForHeadlessCompletion } from "../src/modes/headless-completion.js";
@@ -159,6 +159,7 @@ function createSession(
 		maxDepth?: number;
 		rlmSessionDir?: string;
 		streamFn?: StreamFn;
+		settingsOverrides?: Partial<Settings>;
 		subagentRuntimeHost?: ConstructorParameters<typeof AgentSession>[0]["subagentRuntimeHost"];
 	} = {},
 ): AgentSession {
@@ -170,10 +171,12 @@ function createSession(
 		initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
 		streamFn: options.streamFn ?? ((_model, context) => streamAnswer(`child answer: ${userText(context)}`)),
 	});
+	const settingsManager = SettingsManager.create(tempDir, tempDir);
+	if (options.settingsOverrides) settingsManager.applyOverrides(options.settingsOverrides);
 	return new AgentSession({
 		agent,
 		sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
-		settingsManager: SettingsManager.create(tempDir, tempDir),
+		settingsManager,
 		cwd: tempDir,
 		modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
 		resourceLoader: createTestResourceLoader(),
@@ -235,7 +238,9 @@ describe("subagent timeout hang", () => {
 
 		it("ipython tool execute does not wrap the kernel cell in a timeout", async () => {
 			const provisioner = new IpythonKernelProvisioner(process.cwd());
-			const execute = vi.fn((_code: string, _opts?: { signal?: AbortSignal }) => new Promise<never>(() => {}));
+			const execute = vi.fn(
+				(_code: string, _opts?: { signal?: AbortSignal; stallTimeoutMs?: number }) => new Promise<never>(() => {}),
+			);
 			vi.spyOn(provisioner, "ensure").mockResolvedValue({ execute } as unknown as KernelManager);
 			const tool = createIpythonTool(process.cwd(), { provisioner });
 			const signal = new AbortController().signal;
@@ -247,8 +252,19 @@ describe("subagent timeout hang", () => {
 			const executeOpts = execute.mock.calls[0]?.[1];
 			expect(executeOpts).toMatchObject({ signal });
 			expect(executeOpts).not.toHaveProperty("executionTimeoutMs");
+			expect(executeOpts?.stallTimeoutMs).toBeUndefined();
 			expect(await outcomeWithin(toolPromise, 200)).toBe("pending");
 			expect(state.settled).toBe(false);
+		});
+
+		it("ipython tool forwards stallTimeoutMs to kernel execute", async () => {
+			const provisioner = new IpythonKernelProvisioner(process.cwd());
+			const execute = vi.fn((_code: string, _opts?: { stallTimeoutMs?: number }) => new Promise<never>(() => {}));
+			vi.spyOn(provisioner, "ensure").mockResolvedValue({ execute } as unknown as KernelManager);
+			const tool = createIpythonTool(process.cwd(), { provisioner, stallTimeoutMs: () => 12_000 });
+			void tool.execute("tool-stall", { code: "pass" });
+			await vi.waitFor(() => expect(execute).toHaveBeenCalled());
+			expect(execute.mock.calls[0]?.[1]?.stallTimeoutMs).toBe(12_000);
 		});
 	});
 
@@ -454,6 +470,91 @@ describe("subagent timeout hang", () => {
 			await bash;
 			await expect(quiescence).resolves.toBeUndefined();
 			await expect(headless).resolves.toBeDefined();
+		});
+
+		it("fail-opens a silent RLM child tool wait and delivers a parent-visible cancelled result", async () => {
+			const childDir = join(tempDir, "child-fail-open");
+			mkdirSync(childDir, { recursive: true });
+			const settingsOverrides = { inactivityTimeoutMs: 100 };
+			let childStarted = false;
+			let releaseChild = () => {};
+			const childGate = new Promise<void>((resolve) => {
+				releaseChild = resolve;
+			});
+			const child = createSession(childDir, {
+				depth: 1,
+				rlmSessionDir: join(childDir, "rlm"),
+				settingsOverrides,
+				streamFn: () => {
+					childStarted = true;
+					const stream = createAssistantMessageEventStream();
+					void childGate.then(() => {
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: {
+								role: "assistant",
+								content: [{ type: "text", text: "first turn" }],
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: usage(),
+								stopReason: "stop",
+								timestamp: Date.now(),
+							},
+						});
+					});
+					return stream;
+				},
+			});
+			sessions.push(child);
+
+			const rootDir = join(tempDir, "root-fail-open");
+			mkdirSync(rootDir, { recursive: true });
+			const root = createSession(rootDir, {
+				maxDepth: 1,
+				rlmSessionDir: join(rootDir, "rlm"),
+				settingsOverrides,
+				subagentRuntimeHost: {
+					createRlmSubagentRuntime: async () => ({ session: child }),
+					deleteRlmSubagentRuntime: async () => {},
+				},
+			});
+			sessions.push(root);
+
+			await root.runRlmChild("do work that times out", { name: "fail-open-worker" });
+			await vi.waitFor(() => expect(childStarted).toBe(true));
+
+			const bash = child.executeBash("silent-hang", undefined, {
+				operations: {
+					exec: async (_command, _cwd, { signal }) => {
+						await new Promise<void>((_resolve, reject) => {
+							if (signal?.aborted) {
+								reject(new Error("aborted"));
+								return;
+							}
+							signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+						});
+						return { exitCode: 0 };
+					},
+				},
+			});
+			await vi.waitFor(() => expect(child.isBashRunning).toBe(true));
+			releaseChild();
+			await vi.waitFor(() => expect(child.getLastAssistantText()).toBe("first turn"));
+
+			await vi.waitFor(() => {
+				expect(
+					root.messages.some(
+						(message) =>
+							message.role === "custom" &&
+							typeof message.content === "string" &&
+							message.content.includes("stalled"),
+					),
+				).toBe(true);
+			});
+			await expect(bash).resolves.toMatchObject({ cancelled: true });
+			await expect(root.waitForRlmQuiescence()).resolves.toBeUndefined();
 		});
 	});
 });

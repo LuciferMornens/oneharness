@@ -50,6 +50,8 @@ npm run check
 
 Each `%%bash` cell is a temporary subshell, while Python state and `%cd` changes persist in the kernel. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
+A cell or child tool wait that produces no stream, tool, or bash activity for `inactivityTimeoutMs` (default 15 minutes) is aborted and the parent receives a timeout/cancelled result. Output resets the timer. Set `inactivityTimeoutMs` to `0` to disable. LLM turns with no in-flight tools are not stalled.
+
 ### 2. Subagents are native RLM calls
 
 The callable `rlm` object is preloaded in the kernel. Spawn a child with a direct call:

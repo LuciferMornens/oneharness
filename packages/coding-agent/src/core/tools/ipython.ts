@@ -193,6 +193,12 @@ function createAbortError(): Error {
 	return new Error("IPython execution aborted");
 }
 
+function resolveStallTimeoutMs(value: number | (() => number) | undefined): number | undefined {
+	const resolved = typeof value === "function" ? value() : value;
+	if (resolved === undefined || !Number.isFinite(resolved) || resolved <= 0) return undefined;
+	return resolved;
+}
+
 function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, onAbort?: () => void): Promise<T> {
 	if (!signal) {
 		return promise;
@@ -323,6 +329,12 @@ export interface IpythonToolOptions {
 	onLateSentAgentMessage?: (toolCallId: string, message: KernelSentAgentMessage) => void;
 	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
 	provisioner?: IpythonKernelProvisioner;
+	/**
+	 * Abort a user cell that produces no kernel output for this many milliseconds.
+	 * A function is resolved at each execute so session settings can change live.
+	 * 0 or omitted disables the stall watchdog.
+	 */
+	stallTimeoutMs?: number | (() => number);
 }
 
 function quoteScriptMagicArgument(value: string): string {
@@ -640,6 +652,7 @@ async function executeWithBusyKernelChoice(
 	onWorkingMessage: (message?: string) => void,
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
 	ctx: ExtensionContext | undefined,
+	stallTimeoutMs: number | undefined,
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
 	let kernelRestarted = false;
 	while (true) {
@@ -648,6 +661,7 @@ async function executeWithBusyKernelChoice(
 			return {
 				result: await m.execute(code, {
 					signal,
+					stallTimeoutMs,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
@@ -734,6 +748,7 @@ export function createIpythonToolDefinition(
 					setToolWorkingMessage,
 					options?.onLateSentAgentMessage,
 					ctx,
+					resolveStallTimeoutMs(options?.stallTimeoutMs),
 				);
 
 				let text = r.stdout;

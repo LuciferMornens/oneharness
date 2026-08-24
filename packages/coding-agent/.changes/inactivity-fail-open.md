@@ -1,0 +1,1 @@
+- Added `inactivityTimeoutMs` (default 15 minutes) so a silent IPython cell or stuck RLM child fail-opens with a timeout result instead of hanging indefinitely.

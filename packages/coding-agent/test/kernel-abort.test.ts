@@ -318,6 +318,144 @@ describe("KernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
+	it("aborts a silent user cell after stallTimeoutMs with no kernel output", async () => {
+		vi.useFakeTimers();
+		const manager = new KernelManager({ cwd: process.cwd() });
+		const shellSend = vi.fn(async (_frames: Buffer[]) => {});
+		const controlSend = vi.fn(async (_frames: Buffer[]) => {});
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				connection: {
+					ip: "127.0.0.1";
+					transport: "tcp";
+					shell_port: number;
+					iopub_port: number;
+					stdin_port: number;
+					control_port: number;
+					hb_port: number;
+					signature_scheme: "hmac-sha256";
+					key: string;
+					kernel_name: string;
+				};
+				shell: { send: (frames: Buffer[]) => Promise<void>; close: () => void };
+				control: { send: (frames: Buffer[]) => Promise<void>; close: () => void };
+				start: () => Promise<void>;
+			},
+			{
+				state: "running",
+				connection: {
+					ip: "127.0.0.1",
+					transport: "tcp",
+					shell_port: 1,
+					iopub_port: 2,
+					stdin_port: 3,
+					control_port: 4,
+					hb_port: 5,
+					signature_scheme: "hmac-sha256",
+					key: "test-key",
+					kernel_name: "python3",
+				},
+				shell: { send: shellSend, close: vi.fn() },
+				control: { send: controlSend, close: vi.fn() },
+				start: async () => {},
+			},
+		);
+
+		const executePromise = manager.execute("while True: pass", { stallTimeoutMs: 100 });
+		await waitForCalls(shellSend, 1);
+		await vi.advanceTimersByTimeAsync(99);
+		await Promise.resolve();
+		const stillPending = await Promise.race([
+			executePromise.then(() => "settled" as const),
+			Promise.resolve("pending" as const),
+		]);
+		expect(stillPending).toBe("pending");
+
+		await vi.advanceTimersByTimeAsync(1 + 1000);
+		await expect(executePromise).resolves.toMatchObject({ status: "aborted" });
+		const result = await executePromise;
+		expect(result.stderr).toContain("IPython cell aborted after 1s with no kernel output");
+		expect(controlSend).toHaveBeenCalled();
+		manager.disposeSync();
+	});
+
+	it("resets the cell stall timer on kernel stream output", async () => {
+		vi.useFakeTimers();
+		const manager = new KernelManager({ cwd: process.cwd() });
+		const shellSend = vi.fn(async (_frames: Buffer[]) => {});
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				connection: {
+					ip: "127.0.0.1";
+					transport: "tcp";
+					shell_port: number;
+					iopub_port: number;
+					stdin_port: number;
+					control_port: number;
+					hb_port: number;
+					signature_scheme: "hmac-sha256";
+					key: string;
+					kernel_name: string;
+				};
+				shell: { send: (frames: Buffer[]) => Promise<void>; close: () => void };
+				control: { send: (frames: Buffer[]) => Promise<void>; close: () => void };
+				start: () => Promise<void>;
+			},
+			{
+				state: "running",
+				connection: {
+					ip: "127.0.0.1",
+					transport: "tcp",
+					shell_port: 1,
+					iopub_port: 2,
+					stdin_port: 3,
+					control_port: 4,
+					hb_port: 5,
+					signature_scheme: "hmac-sha256",
+					key: "test-key",
+					kernel_name: "python3",
+				},
+				shell: { send: shellSend, close: vi.fn() },
+				control: { send: vi.fn(async () => {}), close: vi.fn() },
+				start: async () => {},
+			},
+		);
+
+		const executePromise = manager.execute("print('tick')", { stallTimeoutMs: 500 });
+		await waitForCalls(shellSend, 1);
+		const internals = manager as unknown as {
+			activeExecution?: { requestMsgId: string };
+			handleExecutionMessage: (incoming: {
+				header: { msg_type: string };
+				parent_header: Record<string, unknown>;
+				metadata: Record<string, unknown>;
+				content: Record<string, unknown>;
+			}) => void;
+		};
+		const requestMsgId = internals.activeExecution?.requestMsgId;
+		expect(requestMsgId).toBeDefined();
+
+		await vi.advanceTimersByTimeAsync(400);
+		internals.handleExecutionMessage({
+			header: { msg_type: "stream" },
+			parent_header: { msg_id: requestMsgId },
+			metadata: {},
+			content: { name: "stdout", text: "tick\n" },
+		});
+		await vi.advanceTimersByTimeAsync(400);
+		const stillPending = await Promise.race([
+			executePromise.then(() => "settled" as const),
+			Promise.resolve("pending" as const),
+		]);
+		expect(stillPending).toBe("pending");
+
+		await vi.advanceTimersByTimeAsync(100 + 1000);
+		await expect(executePromise).resolves.toMatchObject({ status: "aborted" });
+		manager.disposeSync();
+	});
+
 	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
 		vi.useFakeTimers();
 		const manager = new KernelManager({
