@@ -192,6 +192,12 @@ export interface ExecuteOptions {
 	maxOutputChars?: number;
 	/** Synthetic host cell (snapshot/restore/list); excluded from lastCellCode attribution. */
 	internal?: boolean;
+	/**
+	 * Abort the cell if no kernel activity arrives for this many milliseconds.
+	 * Stream, execute_result, display, and host-request comm traffic reset the timer.
+	 * 0 or omitted disables the stall watchdog.
+	 */
+	stallTimeoutMs?: number;
 }
 
 /** MIME tag the `edit` skill emits diff payloads under, via `display_data`. */
@@ -408,6 +414,7 @@ interface ActiveExecution {
 	settled: boolean;
 	resolve: (result: ExecuteResult) => void;
 	reject: (error: Error) => void;
+	bumpStall?: () => void;
 }
 
 interface Deferred<T> {
@@ -1066,10 +1073,25 @@ export class KernelManager {
 			reject: result.reject,
 		};
 		let abortTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		let stallTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		const stallTimeoutMs =
+			opts.stallTimeoutMs !== undefined && Number.isFinite(opts.stallTimeoutMs) && opts.stallTimeoutMs > 0
+				? opts.stallTimeoutMs
+				: undefined;
+		const stallController = stallTimeoutMs !== undefined ? new AbortController() : undefined;
+		const abortSources = [opts.signal, stallController?.signal].filter((signal): signal is AbortSignal =>
+			Boolean(signal),
+		);
 		const clearAbortTimer = () => {
 			if (abortTimer) {
 				globalThis.clearTimeout(abortTimer);
 				abortTimer = undefined;
+			}
+		};
+		const clearStallTimer = () => {
+			if (stallTimer) {
+				globalThis.clearTimeout(stallTimer);
+				stallTimer = undefined;
 			}
 		};
 		const forceAbort = () => {
@@ -1087,12 +1109,30 @@ export class KernelManager {
 				abortTimer.unref();
 			}
 		};
+		const onAbortFromSource = () => onAbort();
+		if (stallTimeoutMs !== undefined && stallController) {
+			execution.bumpStall = () => {
+				if (execution.settled || stallController.signal.aborted) return;
+				clearStallTimer();
+				stallTimer = globalThis.setTimeout(() => {
+					if (execution.settled || stallController.signal.aborted) return;
+					const seconds = Math.max(1, Math.round(stallTimeoutMs / 1000));
+					execution.stderr += `${execution.stderr ? "\n" : ""}IPython cell aborted after ${seconds}s with no kernel output`;
+					stallController.abort();
+				}, stallTimeoutMs);
+				stallTimer.unref?.();
+			};
+		}
 
 		try {
 			this.activeExecution = execution;
-			opts.signal?.addEventListener("abort", onAbort, { once: true });
-			if (opts.signal?.aborted) {
+			for (const source of abortSources) {
+				source.addEventListener("abort", onAbortFromSource, { once: true });
+			}
+			if (abortSources.some((source) => source.aborted)) {
 				onAbort();
+			} else {
+				execution.bumpStall?.();
 			}
 			if (!opts.internal) {
 				this.lastCellCode = code;
@@ -1113,7 +1153,11 @@ export class KernelManager {
 			return await result.promise;
 		} finally {
 			clearAbortTimer();
-			opts.signal?.removeEventListener("abort", onAbort);
+			clearStallTimer();
+			execution.bumpStall = undefined;
+			for (const source of abortSources) {
+				source.removeEventListener("abort", onAbortFromSource);
+			}
 		}
 	}
 
@@ -1227,6 +1271,9 @@ export class KernelManager {
 		}
 
 		const t = incoming.header.msg_type;
+		if (!execution.settled) {
+			execution.bumpStall?.();
+		}
 		if (execution.settled && (t === "display_data" || t === "update_display_data")) {
 			const content = incoming.content as { data?: Record<string, unknown> };
 			if (this.dispatchLateSentAgentMessage(parentMessageId, content.data?.[AGENT_MESSAGE_DISPLAY_MIME])) {
@@ -1426,6 +1473,10 @@ export class KernelManager {
 	}
 
 	private handleCommMessage(incoming: JupyterMessage): void {
+		const execution = this.activeExecution;
+		if (execution && !execution.settled) {
+			execution.bumpStall?.();
+		}
 		const msgType = incoming.header.msg_type;
 		const content = incoming.content;
 		const commId = content.comm_id;

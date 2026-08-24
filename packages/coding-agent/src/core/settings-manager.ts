@@ -7,6 +7,8 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
+/** Fail-open if an IPython cell or RLM child tool wait produces no activity. 0 disables. */
+export const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -134,6 +136,13 @@ export interface Settings {
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 1
+	/**
+	 * Abort a silent IPython cell or stuck RLM child tool wait after this many
+	 * milliseconds with no activity (stream, tool update, bash output, host
+	 * request). Streaming LLM turns without tools are not stalled. 0 disables.
+	 * Default: 15 minutes.
+	 */
+	inactivityTimeoutMs?: number;
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
@@ -780,6 +789,13 @@ export class SettingsManager {
 		this.globalSettings.rlmMaxDepth = maxDepth;
 		this.markModified("rlmMaxDepth");
 		this.save();
+	}
+
+	getInactivityTimeoutMs(): number {
+		const value = this.settings.inactivityTimeoutMs;
+		if (value === 0) return 0;
+		if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+		return DEFAULT_INACTIVITY_TIMEOUT_MS;
 	}
 
 	getIdleEvictionMinutes(): number | "off" {

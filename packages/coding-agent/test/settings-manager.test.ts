@@ -479,6 +479,22 @@ describe("SettingsManager", () => {
 			});
 		});
 	});
+	describe("inactivity fail-open", () => {
+		it("defaults to 15 minutes and treats 0 as disabled", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getInactivityTimeoutMs()).toBe(15 * 60 * 1000);
+
+			manager.applyOverrides({ inactivityTimeoutMs: 0 });
+			expect(manager.getInactivityTimeoutMs()).toBe(0);
+		});
+
+		it("reads a positive override", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ inactivityTimeoutMs: 30_000 }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getInactivityTimeoutMs()).toBe(30_000);
+		});
+	});
+
 	describe("idle worker eviction", () => {
 		it("defaults to 90 minutes and treats none as off", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

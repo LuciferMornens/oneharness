@@ -209,6 +209,7 @@ Normally the package manager's global modules location is queried using `root -g
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
+| `inactivityTimeoutMs` | number | `900000` (15 minutes) | Fail-open if an IPython cell or RLM child tool/bash wait produces no activity for this long. Stream output, tool updates, and bash output reset the timer. LLM turns with no in-flight tools are not stalled. `0` disables. |
 
 ```json
 { "sessionDir": ".prime/agent/sessions" }
