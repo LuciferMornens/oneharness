@@ -168,9 +168,7 @@ describe("getSupportedThinkingLevels", () => {
 		expect(
 			getReasoningCapabilities(getModel("cloudflare-workers-ai", "@cf/google/gemma-4-26b-a4b-it"))?.control,
 		).toBe("fixed");
-		expect(
-			getReasoningCapabilities(getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6"))?.control,
-		).toBe("fixed");
+		expect(getReasoningCapabilities(getModel("cloudflare-ai-gateway", "claude-sonnet-4.5"))?.control).toBe("budget");
 		expect(getSupportedThinkingLevels(getModel("zai", "glm-4.7"))).toEqual(["off", "high"]);
 		expect(getSupportedThinkingLevels(getModel("zai", "glm-5.2"))).toEqual(["off", "high", "max"]);
 		expect(getSupportedThinkingLevels(getModel("google", "gemini-2.5-pro"))).toEqual([

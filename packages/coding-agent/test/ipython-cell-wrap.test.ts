@@ -1,7 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
 import { IPythonCellComponent } from "../src/modes/interactive/components/ipython-cell.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { highlightCode, initTheme, preloadCodeHighlighter } from "../src/modes/interactive/theme/theme.js";
 
 type CellState = ConstructorParameters<typeof IPythonCellComponent>[0];
 
@@ -48,8 +49,9 @@ const WRAPPING_STATE: CellState = {
 };
 
 describe("IPythonCellComponent wrapping", () => {
-	beforeAll(() => {
+	beforeAll(async () => {
 		initTheme("dark");
+		await preloadCodeHighlighter();
 	});
 
 	it("never leaves a foreground color open at a wrapped line end", () => {
@@ -84,5 +86,29 @@ describe("IPythonCellComponent wrapping", () => {
 		const lines = new IPythonCellComponent(WRAPPING_STATE).render(100);
 		expect(lines.some(foregroundLeftOpen)).toBe(false);
 		expect(lines.every((line) => visibleWidth(line) <= 100)).toBe(true);
+	});
+
+	it("highlights an expanded python cell as a whole so a triple-quoted string is one highlight unit", () => {
+		const code = 'doc = """first line\nsecond line stays a string\nthird line"""';
+		const lines = new IPythonCellComponent({
+			code,
+			content: [],
+			details: { status: "ok", durationMs: 1 },
+			executionStarted: true,
+			argsComplete: true,
+			expanded: true,
+		}).render(120);
+
+		const firstCodeLine = lines.find((line) => {
+			const visible = stripAnsi(line);
+			return visible.includes('"""first line') && visible.includes("›");
+		});
+		expect(firstCodeLine).toBeDefined();
+
+		const wholeCellFirst = highlightCode(code, "python")[0];
+		const perLineFirst = highlightCode('doc = """first line', "python")[0];
+		expect(wholeCellFirst).not.toBe(perLineFirst);
+		expect(firstCodeLine).toContain(wholeCellFirst);
+		expect(firstCodeLine).not.toContain(perLineFirst);
 	});
 });
