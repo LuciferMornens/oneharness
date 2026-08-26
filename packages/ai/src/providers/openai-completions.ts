@@ -92,6 +92,8 @@ interface ReasoningRouteIdentity {
 	api: string;
 	id: string;
 	baseUrl: string;
+	/** Canonical JSON of gateway backend-selection settings actually sent on the request. */
+	routing: string;
 }
 
 interface ReasoningDetailsSignature {
@@ -100,12 +102,55 @@ interface ReasoningDetailsSignature {
 	route: ReasoningRouteIdentity;
 }
 
+function canonicalizeJsonValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalizeJsonValue);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, nested]) => [key, canonicalizeJsonValue(nested)]),
+		);
+	}
+	return value;
+}
+
+/**
+ * Backend-selection settings that `buildParams` actually forwards to gateways.
+ * Changing these can send the same provider/model/baseUrl to a different backend.
+ */
+function effectiveBackendRouting(model: Model<"openai-completions">): Record<string, unknown> {
+	const routing: Record<string, unknown> = {};
+	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
+		routing.openRouter = model.compat.openRouterRouting;
+	}
+	if (model.baseUrl.includes("ai-gateway.vercel.sh") && model.compat?.vercelGatewayRouting) {
+		const vercel = model.compat.vercelGatewayRouting;
+		if (vercel.only || vercel.order) {
+			routing.vercel = {
+				...(vercel.only ? { only: vercel.only } : {}),
+				...(vercel.order ? { order: vercel.order } : {}),
+			};
+		}
+	}
+	if (
+		(model.provider === "orcarouter" || model.baseUrl.includes("orcarouter.ai")) &&
+		model.compat?.orcaRouterRouting
+	) {
+		const orca = model.compat.orcaRouterRouting;
+		if (orca.route === "fallback" && Array.isArray(orca.models) && orca.models.length > 0) {
+			routing.orca = { models: orca.models.slice(0, 5), route: "fallback" };
+		}
+	}
+	return routing;
+}
+
 function reasoningRouteIdentity(model: Model<"openai-completions">): ReasoningRouteIdentity {
 	return {
 		provider: model.provider,
 		api: model.api,
 		id: model.id,
 		baseUrl: model.baseUrl,
+		routing: JSON.stringify(canonicalizeJsonValue(effectiveBackendRouting(model))),
 	};
 }
 
@@ -114,7 +159,8 @@ function routesMatch(left: ReasoningRouteIdentity, right: ReasoningRouteIdentity
 		left.provider === right.provider &&
 		left.api === right.api &&
 		left.id === right.id &&
-		left.baseUrl === right.baseUrl
+		left.baseUrl === right.baseUrl &&
+		left.routing === right.routing
 	);
 }
 
@@ -147,7 +193,8 @@ function decodeReasoningDetails(
 			typeof routeRecord.provider !== "string" ||
 			typeof routeRecord.api !== "string" ||
 			typeof routeRecord.id !== "string" ||
-			typeof routeRecord.baseUrl !== "string"
+			typeof routeRecord.baseUrl !== "string" ||
+			typeof routeRecord.routing !== "string"
 		) {
 			return undefined;
 		}
@@ -158,6 +205,7 @@ function decodeReasoningDetails(
 					api: routeRecord.api,
 					id: routeRecord.id,
 					baseUrl: routeRecord.baseUrl,
+					routing: routeRecord.routing,
 				},
 				reasoningRouteIdentity(model),
 			)

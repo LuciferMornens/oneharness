@@ -869,6 +869,72 @@ describe("openai-completions tool_choice", () => {
 		expect(params.messages[1]?.reasoning_details).toBeUndefined();
 	});
 
+	it("does not forward origin reasoning_details when OrcaRouter fallback backends change", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const origin = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "orcarouter",
+			baseUrl: "https://api.orcarouter.ai/v1",
+			compat: { ...originCompat, orcaRouterRouting: { route: "fallback" as const, models: ["openai/gpt-4o"] } },
+		};
+		const first = await streamSimple(
+			origin,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+		const opaque = first.content.find((block) => block.type === "thinking" && block.redacted);
+		expect(opaque?.type).toBe("thinking");
+		if (opaque?.type !== "thinking") throw new Error("expected redacted thinking");
+		expect(opaque.thinkingSignature).toContain("openai/gpt-4o");
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		const replacement = {
+			...origin,
+			compat: {
+				...origin.compat,
+				orcaRouterRouting: { route: "fallback" as const, models: ["anthropic/claude-sonnet-4.6"] },
+			},
+		};
+		await streamSimple(
+			replacement,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
 	it("stores matching tool-call reasoning details as a route-bound signature", async () => {
 		mockState.chunks = [
 			{
