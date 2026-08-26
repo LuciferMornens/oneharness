@@ -588,7 +588,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 									(b) => b.type === "toolCall" && b.id === detailRecord.id,
 								) as ToolCall | undefined;
 								if (matchingToolCall) {
-									matchingToolCall.thoughtSignature = JSON.stringify(detailRecord);
+									matchingToolCall.thoughtSignature = encodeReasoningDetails(model, [detailRecord]);
 								}
 							}
 						}

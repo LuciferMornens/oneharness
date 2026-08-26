@@ -869,6 +869,66 @@ describe("openai-completions tool_choice", () => {
 		expect(params.messages[1]?.reasoning_details).toBeUndefined();
 	});
 
+	it("stores matching tool-call reasoning details as a route-bound signature", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-tool-reasoning",
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call-1",
+									function: { name: "search", arguments: '{"q":"x"}' },
+								},
+							],
+							reasoning_details: [
+								{
+									type: "reasoning.encrypted",
+									index: 0,
+									format: "unknown",
+									id: "call-1",
+									data: "opaque-tool-token",
+								},
+							],
+						},
+						finish_reason: "stop",
+					},
+				],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const origin = { ...baseModel, api: "openai-completions" } as const;
+		const first = await streamSimple(
+			origin,
+			{
+				messages: [{ role: "user", content: "Search.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+		const toolCall = first.content.find((block) => block.type === "toolCall");
+		expect(toolCall?.type).toBe("toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("expected tool call");
+		const parsed = JSON.parse(toolCall.thoughtSignature ?? "") as {
+			type?: string;
+			route?: { baseUrl?: string };
+			details?: unknown;
+		};
+		expect(parsed.type).toBe("openai-completions.reasoning_details.v2");
+		expect(parsed.route?.baseUrl).toBe(origin.baseUrl);
+		expect(parsed.details).toEqual([
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "call-1",
+				data: "opaque-tool-token",
+			},
+		]);
+	});
+
 	it("keeps index-less reasoning details after explicitly indexed details", async () => {
 		const explicitDetail = {
 			type: "reasoning.summary",
