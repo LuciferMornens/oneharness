@@ -1,0 +1,1 @@
+- Fixed OpenAI-compatible reasoning_details replay so opaque continuation state stays bound to the originating route and is not sent to a replacement endpoint.

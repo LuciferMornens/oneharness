@@ -84,26 +84,91 @@ function isImageContentBlock(block: { type: string }): block is ImageContent {
 	return block.type === "image";
 }
 
-const REASONING_DETAILS_SIGNATURE_TYPE = "openai-completions.reasoning_details.v1";
+const REASONING_DETAILS_SIGNATURE_TYPE_V1 = "openai-completions.reasoning_details.v1";
+const REASONING_DETAILS_SIGNATURE_TYPE = "openai-completions.reasoning_details.v2";
+
+interface ReasoningRouteIdentity {
+	provider: string;
+	api: string;
+	id: string;
+	baseUrl: string;
+}
 
 interface ReasoningDetailsSignature {
 	type: typeof REASONING_DETAILS_SIGNATURE_TYPE;
 	details: Record<string, unknown>[];
+	route: ReasoningRouteIdentity;
 }
 
-function encodeReasoningDetails(details: Record<string, unknown>[]): string {
-	return JSON.stringify({ type: REASONING_DETAILS_SIGNATURE_TYPE, details } satisfies ReasoningDetailsSignature);
+function reasoningRouteIdentity(model: Model<"openai-completions">): ReasoningRouteIdentity {
+	return {
+		provider: model.provider,
+		api: model.api,
+		id: model.id,
+		baseUrl: model.baseUrl,
+	};
 }
 
-function decodeReasoningDetails(signature?: string): Record<string, unknown>[] | undefined {
+function routesMatch(left: ReasoningRouteIdentity, right: ReasoningRouteIdentity): boolean {
+	return (
+		left.provider === right.provider &&
+		left.api === right.api &&
+		left.id === right.id &&
+		left.baseUrl === right.baseUrl
+	);
+}
+
+function encodeReasoningDetails(model: Model<"openai-completions">, details: Record<string, unknown>[]): string {
+	return JSON.stringify({
+		type: REASONING_DETAILS_SIGNATURE_TYPE,
+		details,
+		route: reasoningRouteIdentity(model),
+	} satisfies ReasoningDetailsSignature);
+}
+
+function decodeReasoningDetails(
+	model: Model<"openai-completions">,
+	signature?: string,
+): Record<string, unknown>[] | undefined {
 	if (!signature?.startsWith("{")) return undefined;
 	try {
-		const parsed = JSON.parse(signature) as Partial<ReasoningDetailsSignature>;
+		const parsed = JSON.parse(signature) as {
+			type?: unknown;
+			details?: unknown;
+			route?: unknown;
+		};
+		// v1 signatures are not bound to a route; never replay them.
+		if (parsed.type === REASONING_DETAILS_SIGNATURE_TYPE_V1) return undefined;
 		if (parsed.type !== REASONING_DETAILS_SIGNATURE_TYPE || !Array.isArray(parsed.details)) return undefined;
-		if (parsed.details.some((detail) => !detail || typeof detail !== "object" || Array.isArray(detail))) {
+		const route = parsed.route;
+		if (!route || typeof route !== "object" || Array.isArray(route)) return undefined;
+		const routeRecord = route as Record<string, unknown>;
+		if (
+			typeof routeRecord.provider !== "string" ||
+			typeof routeRecord.api !== "string" ||
+			typeof routeRecord.id !== "string" ||
+			typeof routeRecord.baseUrl !== "string"
+		) {
 			return undefined;
 		}
-		return parsed.details as Record<string, unknown>[];
+		if (
+			!routesMatch(
+				{
+					provider: routeRecord.provider,
+					api: routeRecord.api,
+					id: routeRecord.id,
+					baseUrl: routeRecord.baseUrl,
+				},
+				reasoningRouteIdentity(model),
+			)
+		) {
+			return undefined;
+		}
+		const details = parsed.details as unknown[];
+		if (details.some((detail) => !detail || typeof detail !== "object" || Array.isArray(detail))) {
+			return undefined;
+		}
+		return details as Record<string, unknown>[];
 	} catch {
 		return undefined;
 	}
@@ -538,6 +603,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 								});
 							}
 							reasoningDetailsBlock.thinkingSignature = encodeReasoningDetails(
+								model,
 								[...reasoningDetailsByIndex.entries()]
 									.sort(([left], [right]) => left - right)
 									.map(([, detail]) => detail),
@@ -1075,14 +1141,14 @@ export function convertMessages(
 
 			const replayReasoningDetails = msg.content
 				.filter(isThinkingContentBlock)
-				.flatMap((block) => decodeReasoningDetails(block.thinkingSignature) ?? []);
+				.flatMap((block) => decodeReasoningDetails(model, block.thinkingSignature) ?? []);
 			if (replayReasoningDetails.length > 0) {
 				(assistantMsg as any).reasoning_details = replayReasoningDetails;
 			}
 
 			const nonEmptyThinkingBlocks = msg.content
 				.filter(isThinkingContentBlock)
-				.filter((block) => decodeReasoningDetails(block.thinkingSignature) === undefined)
+				.filter((block) => decodeReasoningDetails(model, block.thinkingSignature) === undefined)
 				.filter((block) => block.thinking.trim().length > 0);
 			if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
@@ -1139,16 +1205,9 @@ export function convertMessages(
 						arguments: JSON.stringify(tc.arguments),
 					},
 				}));
-				const reasoningDetails = toolCalls
-					.filter((tc) => tc.thoughtSignature)
-					.map((tc) => {
-						try {
-							return JSON.parse(tc.thoughtSignature!);
-						} catch {
-							return null;
-						}
-					})
-					.filter(Boolean);
+				const reasoningDetails = toolCalls.flatMap(
+					(tc) => decodeReasoningDetails(model, tc.thoughtSignature) ?? [],
+				);
 				if (reasoningDetails.length > 0 && replayReasoningDetails.length === 0) {
 					(assistantMsg as any).reasoning_details = reasoningDetails;
 				}

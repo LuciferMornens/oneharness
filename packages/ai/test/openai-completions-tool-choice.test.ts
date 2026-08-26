@@ -818,6 +818,57 @@ describe("openai-completions tool_choice", () => {
 		expect(params.messages[1]?.content).toBe("");
 	});
 
+	it("does not forward origin reasoning_details to a replacement baseUrl", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const origin = { ...baseModel, api: "openai-completions" } as const;
+		const first = await streamSimple(
+			origin,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+		expect(first.content.some((block) => block.type === "thinking" && block.redacted)).toBe(true);
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		const replacement = { ...origin, baseUrl: "https://replacement.example/v1" };
+		await streamSimple(
+			replacement,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
 	it("keeps index-less reasoning details after explicitly indexed details", async () => {
 		const explicitDetail = {
 			type: "reasoning.summary",

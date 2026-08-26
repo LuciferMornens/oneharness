@@ -160,4 +160,66 @@ describe("openai-completions reasoning replay", () => {
 		expect(assistant.reasoning).toBe("deciding to call a tool");
 		expect(Array.isArray(assistant.tool_calls)).toBe(true);
 	});
+
+	it("replays bound opaque reasoning_details only on the originating route", () => {
+		const origin = buildModel();
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_origin",
+				data: "opaque-origin-token",
+			},
+		];
+		const signature = JSON.stringify({
+			type: "openai-completions.reasoning_details.v2",
+			details,
+			route: {
+				provider: origin.provider,
+				api: origin.api,
+				id: origin.id,
+				baseUrl: origin.baseUrl,
+			},
+		});
+		const thinking = {
+			type: "thinking" as const,
+			thinking: "",
+			redacted: true,
+			thinkingSignature: signature,
+		};
+
+		const sameRoute = convertMessages(origin, buildContext([thinking]), compat);
+		expect((sameRoute[1] as unknown as { reasoning_details?: unknown }).reasoning_details).toEqual(details);
+
+		const replacement = { ...origin, baseUrl: "http://127.0.0.1:2" };
+		const crossed = convertMessages(replacement, buildContext([thinking]), compat);
+		expect(crossed.some((message) => "reasoning_details" in message)).toBe(false);
+	});
+
+	it("does not replay legacy unbound reasoning_details signatures", () => {
+		const signature = JSON.stringify({
+			type: "openai-completions.reasoning_details.v1",
+			details: [
+				{
+					type: "reasoning.encrypted",
+					index: 0,
+					data: "legacy-unbound-token",
+				},
+			],
+		});
+		const messages = convertMessages(
+			buildModel(),
+			buildContext([
+				{
+					type: "thinking",
+					thinking: "",
+					redacted: true,
+					thinkingSignature: signature,
+				},
+			]),
+			compat,
+		);
+		expect(messages.some((message) => "reasoning_details" in message)).toBe(false);
+	});
 });
