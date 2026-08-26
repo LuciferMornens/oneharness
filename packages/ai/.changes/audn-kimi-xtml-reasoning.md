@@ -1,0 +1,1 @@
+- Fixed Kimi XTML tool serialization leaking into visible reasoning for audn.ai models.

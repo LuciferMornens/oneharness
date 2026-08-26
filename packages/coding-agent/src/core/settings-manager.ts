@@ -135,7 +135,7 @@ export interface Settings {
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
-	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 1
+	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 2
 	/**
 	 * Abort a silent IPython cell or stuck RLM child tool wait after this many
 	 * milliseconds with no activity (stream, tool update, bash output, host

@@ -50,16 +50,19 @@ function buildModel(): Model<"openai-completions"> {
 	};
 }
 
-function buildContext(content: AssistantMessage["content"]): Context {
+function buildContext(
+	content: AssistantMessage["content"],
+	model: Model<"openai-completions"> = buildModel(),
+): Context {
 	return {
 		messages: [
 			{ role: "user", content: "hello", timestamp: 1 },
 			{
 				role: "assistant",
 				content,
-				api: "openai-completions",
-				provider: "repro-provider",
-				model: "repro-model",
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
 				usage: emptyUsage,
 				stopReason: "stop",
 				timestamp: 2,
@@ -159,5 +162,241 @@ describe("openai-completions reasoning replay", () => {
 		const assistant = messages[1] as unknown as Record<string, unknown>;
 		expect(assistant.reasoning).toBe("deciding to call a tool");
 		expect(Array.isArray(assistant.tool_calls)).toBe(true);
+	});
+
+	it("replays bound opaque reasoning_details only on the originating route", () => {
+		const origin = buildModel();
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_origin",
+				data: "opaque-origin-token",
+			},
+		];
+		const signature = JSON.stringify({
+			type: "openai-completions.reasoning_details.v2",
+			details,
+			route: {
+				provider: origin.provider,
+				api: origin.api,
+				id: origin.id,
+				baseUrl: origin.baseUrl,
+				routing: "{}",
+			},
+		});
+		const thinking = {
+			type: "thinking" as const,
+			thinking: "",
+			redacted: true,
+			thinkingSignature: signature,
+		};
+
+		const sameRoute = convertMessages(origin, buildContext([thinking]), compat);
+		expect((sameRoute[1] as unknown as { reasoning_details?: unknown }).reasoning_details).toEqual(details);
+
+		const replacement = { ...origin, baseUrl: "http://127.0.0.1:2" };
+		const crossed = convertMessages(replacement, buildContext([thinking]), compat);
+		expect(crossed.some((message) => "reasoning_details" in message)).toBe(false);
+	});
+
+	it("replays bound tool-call thoughtSignature details only on the originating route", () => {
+		const origin = buildModel();
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "call-1",
+				data: "opaque-tool-token",
+			},
+		];
+		const signature = JSON.stringify({
+			type: "openai-completions.reasoning_details.v2",
+			details,
+			route: {
+				provider: origin.provider,
+				api: origin.api,
+				id: origin.id,
+				baseUrl: origin.baseUrl,
+				routing: "{}",
+			},
+		});
+		const content: AssistantMessage["content"] = [
+			{ type: "text", text: "calling" },
+			{ type: "toolCall", id: "call-1", name: "search", arguments: { q: "x" }, thoughtSignature: signature },
+		];
+
+		const sameRoute = convertMessages(origin, buildContext(content), compat);
+		expect((sameRoute[1] as unknown as { reasoning_details?: unknown }).reasoning_details).toEqual(details);
+
+		const replacement = { ...origin, baseUrl: "http://127.0.0.1:2" };
+		const crossed = convertMessages(replacement, buildContext(content), compat);
+		expect(crossed.some((message) => "reasoning_details" in message)).toBe(false);
+	});
+
+	it("does not replay opaque reasoning_details when gateway backend routing changes", () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_origin",
+				data: "opaque-origin-token",
+			},
+		];
+		const origin = {
+			...buildModel(),
+			provider: "orcarouter",
+			baseUrl: "https://api.orcarouter.ai/v1",
+			compat: { ...compat, orcaRouterRouting: { route: "fallback" as const, models: ["openai/gpt-4o"] } },
+		};
+		const replacement = {
+			...origin,
+			compat: {
+				...compat,
+				orcaRouterRouting: { route: "fallback" as const, models: ["anthropic/claude-sonnet-4.6"] },
+			},
+		};
+		const thinking = {
+			type: "thinking" as const,
+			thinking: "",
+			redacted: true,
+			thinkingSignature: JSON.stringify({
+				type: "openai-completions.reasoning_details.v2",
+				details,
+				route: {
+					provider: origin.provider,
+					api: origin.api,
+					id: origin.id,
+					baseUrl: origin.baseUrl,
+					routing: '{"orca":{"models":["openai/gpt-4o"],"route":"fallback"}}',
+				},
+			}),
+		};
+
+		const sameRoute = convertMessages(origin, buildContext([thinking], origin), compat);
+		expect((sameRoute[1] as unknown as { reasoning_details?: unknown }).reasoning_details).toEqual(details);
+
+		const crossed = convertMessages(replacement, buildContext([thinking], replacement), compat);
+		expect(crossed.some((message) => "reasoning_details" in message)).toBe(false);
+	});
+
+	it("does not replay opaque reasoning_details when OpenRouter or Vercel backend routing changes", () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				data: "opaque-origin-token",
+			},
+		];
+		const openRouterOrigin = {
+			...buildModel(),
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { ...compat, openRouterRouting: { order: ["openai"] } },
+		};
+		const openRouterReplacement = {
+			...openRouterOrigin,
+			compat: { ...compat, openRouterRouting: { order: ["anthropic"] } },
+		};
+		const openRouterThinking = {
+			type: "thinking" as const,
+			thinking: "",
+			redacted: true,
+			thinkingSignature: JSON.stringify({
+				type: "openai-completions.reasoning_details.v2",
+				details,
+				route: {
+					provider: openRouterOrigin.provider,
+					api: openRouterOrigin.api,
+					id: openRouterOrigin.id,
+					baseUrl: openRouterOrigin.baseUrl,
+					routing: '{"openRouter":{"order":["openai"]}}',
+				},
+			}),
+		};
+		expect(
+			(
+				convertMessages(
+					openRouterOrigin,
+					buildContext([openRouterThinking], openRouterOrigin),
+					compat,
+				)[1] as unknown as {
+					reasoning_details?: unknown;
+				}
+			).reasoning_details,
+		).toEqual(details);
+		expect(
+			convertMessages(openRouterReplacement, buildContext([openRouterThinking], openRouterReplacement), compat).some(
+				(message) => "reasoning_details" in message,
+			),
+		).toBe(false);
+
+		const vercelOrigin = {
+			...buildModel(),
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			compat: { ...compat, vercelGatewayRouting: { only: ["openai"] } },
+		};
+		const vercelReplacement = {
+			...vercelOrigin,
+			compat: { ...compat, vercelGatewayRouting: { only: ["anthropic"] } },
+		};
+		const vercelThinking = {
+			type: "thinking" as const,
+			thinking: "",
+			redacted: true,
+			thinkingSignature: JSON.stringify({
+				type: "openai-completions.reasoning_details.v2",
+				details,
+				route: {
+					provider: vercelOrigin.provider,
+					api: vercelOrigin.api,
+					id: vercelOrigin.id,
+					baseUrl: vercelOrigin.baseUrl,
+					routing: '{"vercel":{"only":["openai"]}}',
+				},
+			}),
+		};
+		expect(
+			(
+				convertMessages(vercelOrigin, buildContext([vercelThinking], vercelOrigin), compat)[1] as unknown as {
+					reasoning_details?: unknown;
+				}
+			).reasoning_details,
+		).toEqual(details);
+		expect(
+			convertMessages(vercelReplacement, buildContext([vercelThinking], vercelReplacement), compat).some(
+				(message) => "reasoning_details" in message,
+			),
+		).toBe(false);
+	});
+
+	it("does not replay legacy unbound reasoning_details signatures", () => {
+		const signature = JSON.stringify({
+			type: "openai-completions.reasoning_details.v1",
+			details: [
+				{
+					type: "reasoning.encrypted",
+					index: 0,
+					data: "legacy-unbound-token",
+				},
+			],
+		});
+		const messages = convertMessages(
+			buildModel(),
+			buildContext([
+				{
+					type: "thinking",
+					thinking: "",
+					redacted: true,
+					thinkingSignature: signature,
+				},
+			]),
+			compat,
+		);
+		expect(messages.some((message) => "reasoning_details" in message)).toBe(false);
 	});
 });

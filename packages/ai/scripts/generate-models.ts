@@ -258,6 +258,9 @@ const PRIME_INFERENCE_MODEL_METADATA: Record<string, PrimeInferenceModelMetadata
 	"qwen/qwen3-30b-a3b-instruct-2507": { contextWindow: 262144 },
 	// OpenRouter has no max_completion_tokens for the rest of these.
 	"moonshotai/kimi-k2.5": { maxTokens: 65535 },
+	"minimax/minimax-m2.7": { maxTokens: 131072 },
+	// models.dev (moonshotai + openrouter) both list output = context for k2.6.
+	"moonshotai/kimi-k2.6": { maxTokens: 262144 },
 	"moonshotai/kimi-k3": { maxTokens: 1048576 },
 	"openai/gpt-4.1": { maxTokens: 32768 },
 	"openai/gpt-5-nano": { maxTokens: 128000 },
@@ -2666,12 +2669,32 @@ function getAudnModels(): Model<"openai-completions">[] {
 	];
 }
 
-function mergeStaticCatalogModels(allModels: Model<any>[]): void {
-	for (const model of [...getGrokSubscriptionModels(), ...getAudnModels()]) {
+function getOrcaRouterAutoModel(): Model<"openai-completions"> {
+	return {
+		id: "orcarouter/auto",
+		name: "OrcaRouter Auto",
+		featured: true,
+		api: "openai-completions",
+		provider: "orcarouter",
+		baseUrl: "https://api.orcarouter.ai/v1",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 16384,
+	};
+}
+
+function mergeCatalogModels(allModels: Model<any>[], extra: Model<any>[]): void {
+	for (const model of extra) {
 		if (!allModels.some((existing) => existing.provider === model.provider && existing.id === model.id)) {
 			allModels.push(model);
 		}
 	}
+}
+
+function mergeStaticCatalogModels(allModels: Model<any>[]): void {
+	mergeCatalogModels(allModels, [...getGrokSubscriptionModels(), ...getAudnModels(), getOrcaRouterAutoModel()]);
 }
 
 async function generateModels() {
@@ -3291,19 +3314,7 @@ async function generateModels() {
 	}
 
 	if (!allModels.some(m => m.provider === "orcarouter" && m.id === "orcarouter/auto")) {
-		allModels.push({
-			id: "orcarouter/auto",
-			name: "OrcaRouter Auto",
-			featured: true,
-			api: "openai-completions",
-			provider: "orcarouter",
-			baseUrl: "https://api.orcarouter.ai/v1",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128000,
-			maxTokens: 16384,
-		});
+		allModels.push(getOrcaRouterAutoModel());
 	}
 
 	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";

@@ -84,6 +84,225 @@ function isImageContentBlock(block: { type: string }): block is ImageContent {
 	return block.type === "image";
 }
 
+const REASONING_DETAILS_SIGNATURE_TYPE_V1 = "openai-completions.reasoning_details.v1";
+const REASONING_DETAILS_SIGNATURE_TYPE = "openai-completions.reasoning_details.v2";
+
+interface ReasoningRouteIdentity {
+	provider: string;
+	api: string;
+	id: string;
+	baseUrl: string;
+	/** Canonical JSON of gateway backend-selection settings actually sent on the request. */
+	routing: string;
+}
+
+interface ReasoningDetailsSignature {
+	type: typeof REASONING_DETAILS_SIGNATURE_TYPE;
+	details: Record<string, unknown>[];
+	route: ReasoningRouteIdentity;
+}
+
+function canonicalizeJsonValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalizeJsonValue);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, nested]) => [key, canonicalizeJsonValue(nested)]),
+		);
+	}
+	return value;
+}
+
+type BackendRoutingFields = {
+	openRouter?: unknown;
+	vercel?: { only?: string[]; order?: string[] };
+	orca?: { models?: unknown; route?: unknown };
+};
+
+/**
+ * Backend-selection settings that `buildParams` actually forwards to gateways.
+ * Changing these can send the same provider/model/baseUrl to a different backend.
+ */
+function backendRoutingFromFields(
+	identity: Pick<ReasoningRouteIdentity, "provider" | "baseUrl">,
+	fields: BackendRoutingFields,
+): Record<string, unknown> {
+	const routing: Record<string, unknown> = {};
+	if (identity.baseUrl.includes("openrouter.ai") && fields.openRouter) {
+		routing.openRouter = fields.openRouter;
+	}
+	if (identity.baseUrl.includes("ai-gateway.vercel.sh") && fields.vercel) {
+		const vercel = fields.vercel;
+		if (vercel.only || vercel.order) {
+			routing.vercel = {
+				...(vercel.only ? { only: vercel.only } : {}),
+				...(vercel.order ? { order: vercel.order } : {}),
+			};
+		}
+	}
+	if (
+		(identity.provider === "orcarouter" || identity.baseUrl.includes("orcarouter.ai")) &&
+		fields.orca?.route === "fallback" &&
+		Array.isArray(fields.orca.models) &&
+		fields.orca.models.length > 0
+	) {
+		routing.orca = { models: fields.orca.models.slice(0, 5), route: "fallback" };
+	}
+	return routing;
+}
+
+function effectiveBackendRouting(model: Model<"openai-completions">): Record<string, unknown> {
+	return backendRoutingFromFields(model, {
+		openRouter: model.compat?.openRouterRouting,
+		vercel: model.compat?.vercelGatewayRouting,
+		orca: model.compat?.orcaRouterRouting,
+	});
+}
+
+function payloadBackendRouting(
+	params: unknown,
+	route: Pick<ReasoningRouteIdentity, "provider" | "baseUrl">,
+): Record<string, unknown> {
+	if (!params || typeof params !== "object" || Array.isArray(params)) {
+		return {};
+	}
+	const payload = params as Record<string, unknown>;
+	const providerOptions = payload.providerOptions;
+	const gateway =
+		providerOptions && typeof providerOptions === "object" && !Array.isArray(providerOptions)
+			? (providerOptions as Record<string, unknown>).gateway
+			: undefined;
+	const gatewayRecord =
+		gateway && typeof gateway === "object" && !Array.isArray(gateway)
+			? (gateway as Record<string, unknown>)
+			: undefined;
+	return backendRoutingFromFields(route, {
+		openRouter: payload.provider,
+		vercel: gatewayRecord
+			? {
+					only: Array.isArray(gatewayRecord.only) ? (gatewayRecord.only as string[]) : undefined,
+					order: Array.isArray(gatewayRecord.order) ? (gatewayRecord.order as string[]) : undefined,
+				}
+			: undefined,
+		orca: {
+			models: payload.models,
+			route: payload.route,
+		},
+	});
+}
+
+function stripOpaqueReasoningDetails(params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming): void {
+	if (!Array.isArray(params.messages)) return;
+	for (const message of params.messages) {
+		if (message && typeof message === "object" && "reasoning_details" in message) {
+			delete (message as { reasoning_details?: unknown }).reasoning_details;
+		}
+	}
+}
+
+function payloadMatchesSignedRoute(
+	params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
+	signedRoute: ReasoningRouteIdentity,
+): boolean {
+	const payload = params as unknown as Record<string, unknown>;
+	if (typeof payload.model !== "string" || payload.model !== signedRoute.id) {
+		return false;
+	}
+	return JSON.stringify(canonicalizeJsonValue(payloadBackendRouting(params, signedRoute))) === signedRoute.routing;
+}
+
+/**
+ * Drop replayed opaque details when `onPayload` changes backend-selection fields
+ * after `buildParams` already attached them.
+ */
+function enforceReasoningDetailsPayloadRoute(
+	params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
+	signedRoute: ReasoningRouteIdentity,
+): void {
+	if (!payloadMatchesSignedRoute(params, signedRoute)) {
+		stripOpaqueReasoningDetails(params);
+	}
+}
+
+function reasoningRouteIdentity(model: Model<"openai-completions">): ReasoningRouteIdentity {
+	return {
+		provider: model.provider,
+		api: model.api,
+		id: model.id,
+		baseUrl: model.baseUrl,
+		routing: JSON.stringify(canonicalizeJsonValue(effectiveBackendRouting(model))),
+	};
+}
+
+function routesMatch(left: ReasoningRouteIdentity, right: ReasoningRouteIdentity): boolean {
+	return (
+		left.provider === right.provider &&
+		left.api === right.api &&
+		left.id === right.id &&
+		left.baseUrl === right.baseUrl &&
+		left.routing === right.routing
+	);
+}
+
+function encodeReasoningDetails(model: Model<"openai-completions">, details: Record<string, unknown>[]): string {
+	return JSON.stringify({
+		type: REASONING_DETAILS_SIGNATURE_TYPE,
+		details,
+		route: reasoningRouteIdentity(model),
+	} satisfies ReasoningDetailsSignature);
+}
+
+function decodeReasoningDetails(
+	model: Model<"openai-completions">,
+	signature?: string,
+): Record<string, unknown>[] | undefined {
+	if (!signature?.startsWith("{")) return undefined;
+	try {
+		const parsed = JSON.parse(signature) as {
+			type?: unknown;
+			details?: unknown;
+			route?: unknown;
+		};
+		// v1 signatures are not bound to a route; never replay them.
+		if (parsed.type === REASONING_DETAILS_SIGNATURE_TYPE_V1) return undefined;
+		if (parsed.type !== REASONING_DETAILS_SIGNATURE_TYPE || !Array.isArray(parsed.details)) return undefined;
+		const route = parsed.route;
+		if (!route || typeof route !== "object" || Array.isArray(route)) return undefined;
+		const routeRecord = route as Record<string, unknown>;
+		if (
+			typeof routeRecord.provider !== "string" ||
+			typeof routeRecord.api !== "string" ||
+			typeof routeRecord.id !== "string" ||
+			typeof routeRecord.baseUrl !== "string" ||
+			typeof routeRecord.routing !== "string"
+		) {
+			return undefined;
+		}
+		if (
+			!routesMatch(
+				{
+					provider: routeRecord.provider,
+					api: routeRecord.api,
+					id: routeRecord.id,
+					baseUrl: routeRecord.baseUrl,
+					routing: routeRecord.routing,
+				},
+				reasoningRouteIdentity(model),
+			)
+		) {
+			return undefined;
+		}
+		const details = parsed.details as unknown[];
+		if (details.some((detail) => !detail || typeof detail !== "object" || Array.isArray(detail))) {
+			return undefined;
+		}
+		return details as Record<string, unknown>[];
+	} catch {
+		return undefined;
+	}
+}
+
 export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -111,6 +330,80 @@ type ChatCompletionTextPartWithCacheControl = ChatCompletionContentPartText & {
 type ChatCompletionToolWithCacheControl = OpenAI.Chat.Completions.ChatCompletionTool & {
 	cache_control?: OpenAICompatCacheControl;
 };
+
+const KIMI_XTML_REASONING_BOUNDARIES = [
+	"<|open|>tools<|sep|>",
+	"<|close|>think<|sep|>",
+	"◁open▷tools◁sep▷",
+	"◁close▷think◁sep▷",
+] as const;
+
+function usesKimiXtmlReasoning(model: Model<"openai-completions">): boolean {
+	const modelId = model.id.toLowerCase();
+	return modelId.includes("necromicon") || modelId.includes("kimi-k3") || modelId.includes("k3-thinker");
+}
+
+function firstKimiXtmlBoundaryIndex(text: string): number {
+	let firstIndex = -1;
+	for (const boundary of KIMI_XTML_REASONING_BOUNDARIES) {
+		const index = text.indexOf(boundary);
+		if (index !== -1 && (firstIndex === -1 || index < firstIndex)) {
+			firstIndex = index;
+		}
+	}
+	return firstIndex;
+}
+
+function trailingKimiXtmlBoundaryPrefixLength(text: string): number {
+	const longestBoundary = Math.max(...KIMI_XTML_REASONING_BOUNDARIES.map((boundary) => boundary.length));
+	const maxLength = Math.min(text.length, longestBoundary - 1);
+	for (let length = maxLength; length > 0; length--) {
+		const suffix = text.slice(-length);
+		if (KIMI_XTML_REASONING_BOUNDARIES.some((boundary) => boundary.startsWith(suffix))) {
+			return length;
+		}
+	}
+	return 0;
+}
+
+function createKimiXtmlReasoningFilter(model: Model<"openai-completions">): {
+	feed: (chunk: string) => string;
+	flush: () => string;
+} {
+	const enabled = usesKimiXtmlReasoning(model);
+	let pending = "";
+	let blocked = false;
+
+	return {
+		feed(chunk: string): string {
+			if (!enabled) return chunk;
+			if (blocked) return "";
+
+			pending += chunk;
+			const boundaryIndex = firstKimiXtmlBoundaryIndex(pending);
+			if (boundaryIndex !== -1) {
+				const visible = pending.slice(0, boundaryIndex).trimEnd();
+				pending = "";
+				blocked = true;
+				return visible;
+			}
+
+			const retainedLength = trailingKimiXtmlBoundaryPrefixLength(pending);
+			const visible = retainedLength > 0 ? pending.slice(0, -retainedLength) : pending;
+			pending = retainedLength > 0 ? pending.slice(-retainedLength) : "";
+			return visible;
+		},
+		flush(): string {
+			if (!enabled || blocked) {
+				pending = "";
+				return "";
+			}
+			const visible = pending;
+			pending = "";
+			return visible;
+		},
+	};
+}
 
 function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
 	if (cacheRetention) {
@@ -167,11 +460,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				compat,
 				options?.sessionId,
 			);
+			const signedRoute = reasoningRouteIdentity(model);
 			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
+			enforceReasoningDetailsPayloadRoute(params, signedRoute);
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -194,7 +489,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			let thinkingBlock: ThinkingContent | null = null;
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
+			const reasoningDetailsByIndex = new Map<number, Record<string, unknown>>();
+			let nextReasoningDetailsIndex = 0;
+			let reasoningDetailsBlock: ThinkingContent | null = null;
 			const blocks = output.content as StreamingBlock[];
+			const kimiXtmlReasoningFilter = createKimiXtmlReasoningFilter(model);
+			let reasoningSignature = "reasoning_content";
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
 			const finishBlock = (block: StreamingBlock) => {
 				const contentIndex = getContentIndex(block);
@@ -349,16 +649,20 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					}
 
 					if (foundReasoningField) {
-						const delta = deltaFields[foundReasoningField];
-						if (typeof delta === "string" && delta.length > 0) {
-							const block = ensureThinkingBlock(foundReasoningField);
-							block.thinking += delta;
-							stream.push({
-								type: "thinking_delta",
-								contentIndex: getContentIndex(block),
-								delta,
-								partial: output,
-							});
+						const rawDelta = deltaFields[foundReasoningField];
+						if (typeof rawDelta === "string" && rawDelta.length > 0) {
+							reasoningSignature = foundReasoningField;
+							const delta = kimiXtmlReasoningFilter.feed(rawDelta);
+							if (delta.length > 0) {
+								const block = ensureThinkingBlock(foundReasoningField);
+								block.thinking += delta;
+								stream.push({
+									type: "thinking_delta",
+									contentIndex: getContentIndex(block),
+									delta,
+									partial: output,
+								});
+							}
 						}
 					}
 
@@ -391,17 +695,65 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					const reasoningDetails = (choice.delta as any).reasoning_details;
 					if (reasoningDetails && Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {
-							if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
+							if (!detail || typeof detail !== "object" || Array.isArray(detail)) continue;
+							const detailRecord = detail as Record<string, unknown>;
+							const explicitIndex = typeof detailRecord.index === "number" ? detailRecord.index : undefined;
+							const index = explicitIndex ?? nextReasoningDetailsIndex;
+							nextReasoningDetailsIndex = Math.max(nextReasoningDetailsIndex, index + 1);
+							const previousDetail = reasoningDetailsByIndex.get(index);
+							const mergedDetail = { ...previousDetail, ...detailRecord };
+							for (const field of ["text", "summary"] as const) {
+								const previousFragment = previousDetail?.[field];
+								const fragment = detailRecord[field];
+								if (typeof previousFragment === "string" && typeof fragment === "string") {
+									mergedDetail[field] = previousFragment + fragment;
+								}
+							}
+							reasoningDetailsByIndex.set(index, mergedDetail);
+							if (
+								detailRecord.type === "reasoning.encrypted" &&
+								typeof detailRecord.id === "string" &&
+								detailRecord.data
+							) {
 								const matchingToolCall = output.content.find(
-									(b) => b.type === "toolCall" && b.id === detail.id,
+									(b) => b.type === "toolCall" && b.id === detailRecord.id,
 								) as ToolCall | undefined;
 								if (matchingToolCall) {
-									matchingToolCall.thoughtSignature = JSON.stringify(detail);
+									matchingToolCall.thoughtSignature = encodeReasoningDetails(model, [detailRecord]);
 								}
 							}
 						}
+						if (reasoningDetailsByIndex.size > 0) {
+							if (!reasoningDetailsBlock) {
+								reasoningDetailsBlock = { type: "thinking", thinking: "", redacted: true };
+								blocks.push(reasoningDetailsBlock);
+								stream.push({
+									type: "thinking_start",
+									contentIndex: getContentIndex(reasoningDetailsBlock),
+									partial: output,
+								});
+							}
+							reasoningDetailsBlock.thinkingSignature = encodeReasoningDetails(
+								model,
+								[...reasoningDetailsByIndex.entries()]
+									.sort(([left], [right]) => left - right)
+									.map(([, detail]) => detail),
+							);
+						}
 					}
 				}
+			}
+
+			const pendingReasoning = kimiXtmlReasoningFilter.flush();
+			if (pendingReasoning.length > 0) {
+				const block = ensureThinkingBlock(reasoningSignature);
+				block.thinking += pendingReasoning;
+				stream.push({
+					type: "thinking_delta",
+					contentIndex: getContentIndex(block),
+					delta: pendingReasoning,
+					partial: output,
+				});
 			}
 
 			for (const block of blocks) {
@@ -918,8 +1270,16 @@ export function convertMessages(
 				);
 			const assistantText = assistantTextParts.map((part) => part.text).join("");
 
+			const replayReasoningDetails = msg.content
+				.filter(isThinkingContentBlock)
+				.flatMap((block) => decodeReasoningDetails(model, block.thinkingSignature) ?? []);
+			if (replayReasoningDetails.length > 0) {
+				(assistantMsg as any).reasoning_details = replayReasoningDetails;
+			}
+
 			const nonEmptyThinkingBlocks = msg.content
 				.filter(isThinkingContentBlock)
+				.filter((block) => decodeReasoningDetails(model, block.thinkingSignature) === undefined)
 				.filter((block) => block.thinking.trim().length > 0);
 			if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
@@ -976,17 +1336,10 @@ export function convertMessages(
 						arguments: JSON.stringify(tc.arguments),
 					},
 				}));
-				const reasoningDetails = toolCalls
-					.filter((tc) => tc.thoughtSignature)
-					.map((tc) => {
-						try {
-							return JSON.parse(tc.thoughtSignature!);
-						} catch {
-							return null;
-						}
-					})
-					.filter(Boolean);
-				if (reasoningDetails.length > 0) {
+				const reasoningDetails = toolCalls.flatMap(
+					(tc) => decodeReasoningDetails(model, tc.thoughtSignature) ?? [],
+				);
+				if (reasoningDetails.length > 0 && replayReasoningDetails.length === 0) {
 					(assistantMsg as any).reasoning_details = reasoningDetails;
 				}
 			}
@@ -997,6 +1350,9 @@ export function convertMessages(
 			) {
 				(assistantMsg as { reasoning_content?: string }).reasoning_content = "";
 			}
+			if (replayReasoningDetails.length > 0 && assistantMsg.content === null && !assistantMsg.tool_calls) {
+				assistantMsg.content = "";
+			}
 			// Skip assistant messages that have no content and no tool calls.
 			// Some providers require "either content or tool_calls, but not none".
 			// Other providers also don't accept empty assistant messages.
@@ -1006,7 +1362,7 @@ export function convertMessages(
 				content !== null &&
 				content !== undefined &&
 				(typeof content === "string" ? content.length > 0 : content.length > 0);
-			if (!hasContent && !assistantMsg.tool_calls) {
+			if (!hasContent && !assistantMsg.tool_calls && replayReasoningDetails.length === 0) {
 				continue;
 			}
 			params.push(assistantMsg);

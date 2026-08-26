@@ -760,6 +760,566 @@ describe("openai-completions tool_choice", () => {
 		expect(writeCall).not.toHaveProperty("partialArgs");
 	});
 
+	it("round-trips opaque reasoning_details without a matching tool call id", async () => {
+		const details = [
+			{
+				type: "reasoning.summary",
+				index: 0,
+				format: "unknown",
+				summary: "brief plan",
+			},
+			{
+				type: "reasoning.encrypted",
+				index: 1,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const first = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+		const opaque = first.content.find((block) => block.type === "thinking" && block.redacted);
+		expect(opaque).toBeDefined();
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toEqual(details);
+		expect(params.messages[1]?.content).toBe("");
+	});
+
+	it("does not forward origin reasoning_details to a replacement baseUrl", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const origin = { ...baseModel, api: "openai-completions" } as const;
+		const first = await streamSimple(
+			origin,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+		expect(first.content.some((block) => block.type === "thinking" && block.redacted)).toBe(true);
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		const replacement = { ...origin, baseUrl: "https://replacement.example/v1" };
+		await streamSimple(
+			replacement,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
+	it("does not forward origin reasoning_details when OrcaRouter fallback backends change", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const origin = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "orcarouter",
+			baseUrl: "https://api.orcarouter.ai/v1",
+			compat: { ...originCompat, orcaRouterRouting: { route: "fallback" as const, models: ["openai/gpt-4o"] } },
+		};
+		const first = await streamSimple(
+			origin,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+		const opaque = first.content.find((block) => block.type === "thinking" && block.redacted);
+		expect(opaque?.type).toBe("thinking");
+		if (opaque?.type !== "thinking") throw new Error("expected redacted thinking");
+		expect(opaque.thinkingSignature).toContain("openai/gpt-4o");
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		const replacement = {
+			...origin,
+			compat: {
+				...origin.compat,
+				orcaRouterRouting: { route: "fallback" as const, models: ["anthropic/claude-sonnet-4.6"] },
+			},
+		};
+		await streamSimple(
+			replacement,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
+	it("does not forward origin reasoning_details when onPayload changes gateway routing", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+
+		const captureThenReplay = async (
+			model: Parameters<typeof streamSimple>[0],
+			onPayload: (payload: unknown) => unknown,
+		) => {
+			mockState.chunks = [
+				{
+					id: "chatcmpl-reasoning-details",
+					choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+				},
+			];
+			const first = await streamSimple(
+				model,
+				{
+					messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+				},
+				{ apiKey: "test" },
+			).result();
+			mockState.chunks = [
+				{
+					id: "chatcmpl-after-replay",
+					choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+				},
+			];
+			await streamSimple(
+				model,
+				{
+					messages: [
+						{ role: "user", content: "Think privately.", timestamp: 1 },
+						first,
+						{ role: "user", content: "Continue.", timestamp: 2 },
+					],
+				},
+				{ apiKey: "test", onPayload },
+			).result();
+			return mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		};
+
+		const openRouter = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { ...originCompat, openRouterRouting: { order: ["openai"] } },
+		};
+		const openRouterParams = await captureThenReplay(openRouter, (payload) => ({
+			...(payload as Record<string, unknown>),
+			provider: { order: ["anthropic"] },
+		}));
+		expect(openRouterParams.messages[1]?.reasoning_details).toBeUndefined();
+
+		const vercel = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			compat: { ...originCompat, vercelGatewayRouting: { only: ["openai"], order: ["openai"] } },
+		};
+		const vercelParams = await captureThenReplay(vercel, (payload) => ({
+			...(payload as Record<string, unknown>),
+			providerOptions: { gateway: { only: ["anthropic"], order: ["anthropic"] } },
+		}));
+		expect(vercelParams.messages[1]?.reasoning_details).toBeUndefined();
+
+		const orca = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "orcarouter",
+			baseUrl: "https://api.orcarouter.ai/v1",
+			compat: { ...originCompat, orcaRouterRouting: { route: "fallback" as const, models: ["openai/gpt-4o"] } },
+		};
+		const orcaParams = await captureThenReplay(orca, (payload) => ({
+			...(payload as Record<string, unknown>),
+			models: ["anthropic/claude-sonnet-4.6"],
+			route: "fallback",
+		}));
+		expect(orcaParams.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
+	it("still forwards origin reasoning_details when onPayload leaves gateway routing unchanged", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { ...originCompat, openRouterRouting: { order: ["openai"] } },
+		};
+		const first = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{
+				apiKey: "test",
+				onPayload: (payload) => payload,
+			},
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toEqual(details);
+	});
+
+	it("does not forward origin reasoning_details when onPayload mutates nested routing in place", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const routing = { order: ["openai"] };
+		const model = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { ...originCompat, openRouterRouting: routing },
+		};
+		const first = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{
+				apiKey: "test",
+				onPayload: (payload) => {
+					const next = payload as { provider?: { order?: string[] } };
+					if (next.provider) next.provider.order = ["anthropic"];
+				},
+			},
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
+	it("stores matching tool-call reasoning details as a route-bound signature", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-tool-reasoning",
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call-1",
+									function: { name: "search", arguments: '{"q":"x"}' },
+								},
+							],
+							reasoning_details: [
+								{
+									type: "reasoning.encrypted",
+									index: 0,
+									format: "unknown",
+									id: "call-1",
+									data: "opaque-tool-token",
+								},
+							],
+						},
+						finish_reason: "stop",
+					},
+				],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const origin = { ...baseModel, api: "openai-completions" } as const;
+		const first = await streamSimple(
+			origin,
+			{
+				messages: [{ role: "user", content: "Search.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+		const toolCall = first.content.find((block) => block.type === "toolCall");
+		expect(toolCall?.type).toBe("toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("expected tool call");
+		const parsed = JSON.parse(toolCall.thoughtSignature ?? "") as {
+			type?: string;
+			route?: { baseUrl?: string };
+			details?: unknown;
+		};
+		expect(parsed.type).toBe("openai-completions.reasoning_details.v2");
+		expect(parsed.route?.baseUrl).toBe(origin.baseUrl);
+		expect(parsed.details).toEqual([
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "call-1",
+				data: "opaque-tool-token",
+			},
+		]);
+	});
+
+	it("keeps index-less reasoning details after explicitly indexed details", async () => {
+		const explicitDetail = {
+			type: "reasoning.summary",
+			index: 0,
+			format: "unknown",
+			summary: "brief plan",
+		};
+		const indexlessDetail = {
+			type: "reasoning.encrypted",
+			format: "unknown",
+			id: "rs_indexless",
+			data: "opaque-continuation",
+		};
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-index-order",
+				choices: [{ delta: { reasoning_details: [explicitDetail, indexlessDetail] }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const first = await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "Think privately.", timestamp: 1 }] },
+			{ apiKey: "test" },
+		).result();
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-index-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toEqual([explicitDetail, indexlessDetail]);
+	});
+
+	it("concatenates same-index reasoning detail fragments", async () => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-fragments",
+				choices: [
+					{
+						delta: {
+							reasoning_details: [
+								{ type: "reasoning.text", index: 0, format: "unknown", text: "first " },
+								{ type: "reasoning.summary", index: 1, format: "unknown", summary: "brief " },
+							],
+						},
+						finish_reason: null,
+					},
+				],
+			},
+			{
+				id: "chatcmpl-reasoning-fragments",
+				choices: [
+					{
+						delta: {
+							reasoning_details: [
+								{ type: "reasoning.text", index: 0, text: "second" },
+								{ type: "reasoning.summary", index: 1, summary: "plan" },
+							],
+						},
+						finish_reason: "stop",
+					},
+				],
+			},
+		];
+
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const first = await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "Think privately.", timestamp: 1 }] },
+			{ apiKey: "test" },
+		).result();
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-fragment-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toEqual([
+			{ type: "reasoning.text", index: 0, format: "unknown", text: "first second" },
+			{ type: "reasoning.summary", index: 1, format: "unknown", summary: "brief plan" },
+		]);
+	});
+
 	it("does not double-count reasoning tokens in completion usage", async () => {
 		mockState.chunks = [
 			{
