@@ -114,17 +114,26 @@ function canonicalizeJsonValue(value: unknown): unknown {
 	return value;
 }
 
+type BackendRoutingFields = {
+	openRouter?: unknown;
+	vercel?: { only?: string[]; order?: string[] };
+	orca?: { models?: unknown; route?: unknown };
+};
+
 /**
  * Backend-selection settings that `buildParams` actually forwards to gateways.
  * Changing these can send the same provider/model/baseUrl to a different backend.
  */
-function effectiveBackendRouting(model: Model<"openai-completions">): Record<string, unknown> {
+function backendRoutingFromFields(
+	identity: Pick<ReasoningRouteIdentity, "provider" | "baseUrl">,
+	fields: BackendRoutingFields,
+): Record<string, unknown> {
 	const routing: Record<string, unknown> = {};
-	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
-		routing.openRouter = model.compat.openRouterRouting;
+	if (identity.baseUrl.includes("openrouter.ai") && fields.openRouter) {
+		routing.openRouter = fields.openRouter;
 	}
-	if (model.baseUrl.includes("ai-gateway.vercel.sh") && model.compat?.vercelGatewayRouting) {
-		const vercel = model.compat.vercelGatewayRouting;
+	if (identity.baseUrl.includes("ai-gateway.vercel.sh") && fields.vercel) {
+		const vercel = fields.vercel;
 		if (vercel.only || vercel.order) {
 			routing.vercel = {
 				...(vercel.only ? { only: vercel.only } : {}),
@@ -133,15 +142,87 @@ function effectiveBackendRouting(model: Model<"openai-completions">): Record<str
 		}
 	}
 	if (
-		(model.provider === "orcarouter" || model.baseUrl.includes("orcarouter.ai")) &&
-		model.compat?.orcaRouterRouting
+		(identity.provider === "orcarouter" || identity.baseUrl.includes("orcarouter.ai")) &&
+		fields.orca?.route === "fallback" &&
+		Array.isArray(fields.orca.models) &&
+		fields.orca.models.length > 0
 	) {
-		const orca = model.compat.orcaRouterRouting;
-		if (orca.route === "fallback" && Array.isArray(orca.models) && orca.models.length > 0) {
-			routing.orca = { models: orca.models.slice(0, 5), route: "fallback" };
-		}
+		routing.orca = { models: fields.orca.models.slice(0, 5), route: "fallback" };
 	}
 	return routing;
+}
+
+function effectiveBackendRouting(model: Model<"openai-completions">): Record<string, unknown> {
+	return backendRoutingFromFields(model, {
+		openRouter: model.compat?.openRouterRouting,
+		vercel: model.compat?.vercelGatewayRouting,
+		orca: model.compat?.orcaRouterRouting,
+	});
+}
+
+function payloadBackendRouting(
+	params: unknown,
+	route: Pick<ReasoningRouteIdentity, "provider" | "baseUrl">,
+): Record<string, unknown> {
+	if (!params || typeof params !== "object" || Array.isArray(params)) {
+		return {};
+	}
+	const payload = params as Record<string, unknown>;
+	const providerOptions = payload.providerOptions;
+	const gateway =
+		providerOptions && typeof providerOptions === "object" && !Array.isArray(providerOptions)
+			? (providerOptions as Record<string, unknown>).gateway
+			: undefined;
+	const gatewayRecord =
+		gateway && typeof gateway === "object" && !Array.isArray(gateway)
+			? (gateway as Record<string, unknown>)
+			: undefined;
+	return backendRoutingFromFields(route, {
+		openRouter: payload.provider,
+		vercel: gatewayRecord
+			? {
+					only: Array.isArray(gatewayRecord.only) ? (gatewayRecord.only as string[]) : undefined,
+					order: Array.isArray(gatewayRecord.order) ? (gatewayRecord.order as string[]) : undefined,
+				}
+			: undefined,
+		orca: {
+			models: payload.models,
+			route: payload.route,
+		},
+	});
+}
+
+function stripOpaqueReasoningDetails(params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming): void {
+	if (!Array.isArray(params.messages)) return;
+	for (const message of params.messages) {
+		if (message && typeof message === "object" && "reasoning_details" in message) {
+			delete (message as { reasoning_details?: unknown }).reasoning_details;
+		}
+	}
+}
+
+function payloadMatchesSignedRoute(
+	params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
+	signedRoute: ReasoningRouteIdentity,
+): boolean {
+	const payload = params as unknown as Record<string, unknown>;
+	if (typeof payload.model !== "string" || payload.model !== signedRoute.id) {
+		return false;
+	}
+	return JSON.stringify(canonicalizeJsonValue(payloadBackendRouting(params, signedRoute))) === signedRoute.routing;
+}
+
+/**
+ * Drop replayed opaque details when `onPayload` changes backend-selection fields
+ * after `buildParams` already attached them.
+ */
+function enforceReasoningDetailsPayloadRoute(
+	params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
+	signedRoute: ReasoningRouteIdentity,
+): void {
+	if (!payloadMatchesSignedRoute(params, signedRoute)) {
+		stripOpaqueReasoningDetails(params);
+	}
 }
 
 function reasoningRouteIdentity(model: Model<"openai-completions">): ReasoningRouteIdentity {
@@ -379,11 +460,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				compat,
 				options?.sessionId,
 			);
+			const signedRoute = reasoningRouteIdentity(model);
 			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
+			enforceReasoningDetailsPayloadRoute(params, signedRoute);
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),

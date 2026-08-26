@@ -935,6 +935,216 @@ describe("openai-completions tool_choice", () => {
 		expect(params.messages[1]?.reasoning_details).toBeUndefined();
 	});
 
+	it("does not forward origin reasoning_details when onPayload changes gateway routing", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+
+		const captureThenReplay = async (
+			model: Parameters<typeof streamSimple>[0],
+			onPayload: (payload: unknown) => unknown,
+		) => {
+			mockState.chunks = [
+				{
+					id: "chatcmpl-reasoning-details",
+					choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+				},
+			];
+			const first = await streamSimple(
+				model,
+				{
+					messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+				},
+				{ apiKey: "test" },
+			).result();
+			mockState.chunks = [
+				{
+					id: "chatcmpl-after-replay",
+					choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+				},
+			];
+			await streamSimple(
+				model,
+				{
+					messages: [
+						{ role: "user", content: "Think privately.", timestamp: 1 },
+						first,
+						{ role: "user", content: "Continue.", timestamp: 2 },
+					],
+				},
+				{ apiKey: "test", onPayload },
+			).result();
+			return mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		};
+
+		const openRouter = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { ...originCompat, openRouterRouting: { order: ["openai"] } },
+		};
+		const openRouterParams = await captureThenReplay(openRouter, (payload) => ({
+			...(payload as Record<string, unknown>),
+			provider: { order: ["anthropic"] },
+		}));
+		expect(openRouterParams.messages[1]?.reasoning_details).toBeUndefined();
+
+		const vercel = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			compat: { ...originCompat, vercelGatewayRouting: { only: ["openai"], order: ["openai"] } },
+		};
+		const vercelParams = await captureThenReplay(vercel, (payload) => ({
+			...(payload as Record<string, unknown>),
+			providerOptions: { gateway: { only: ["anthropic"], order: ["anthropic"] } },
+		}));
+		expect(vercelParams.messages[1]?.reasoning_details).toBeUndefined();
+
+		const orca = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "orcarouter",
+			baseUrl: "https://api.orcarouter.ai/v1",
+			compat: { ...originCompat, orcaRouterRouting: { route: "fallback" as const, models: ["openai/gpt-4o"] } },
+		};
+		const orcaParams = await captureThenReplay(orca, (payload) => ({
+			...(payload as Record<string, unknown>),
+			models: ["anthropic/claude-sonnet-4.6"],
+			route: "fallback",
+		}));
+		expect(orcaParams.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
+	it("still forwards origin reasoning_details when onPayload leaves gateway routing unchanged", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { ...originCompat, openRouterRouting: { order: ["openai"] } },
+		};
+		const first = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{
+				apiKey: "test",
+				onPayload: (payload) => payload,
+			},
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toEqual(details);
+	});
+
+	it("does not forward origin reasoning_details when onPayload mutates nested routing in place", async () => {
+		const details = [
+			{
+				type: "reasoning.encrypted",
+				index: 0,
+				format: "unknown",
+				id: "rs_not_a_tool_call",
+				data: "opaque-continuation",
+			},
+		];
+		mockState.chunks = [
+			{
+				id: "chatcmpl-reasoning-details",
+				choices: [{ delta: { reasoning_details: details }, finish_reason: "stop" }],
+			},
+		];
+
+		const { compat: originCompat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const routing = { order: ["openai"] };
+		const model = {
+			...baseModel,
+			api: "openai-completions" as const,
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { ...originCompat, openRouterRouting: routing },
+		};
+		const first = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Think privately.", timestamp: 1 }],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		mockState.chunks = [
+			{
+				id: "chatcmpl-after-replay",
+				choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
+			},
+		];
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Think privately.", timestamp: 1 },
+					first,
+					{ role: "user", content: "Continue.", timestamp: 2 },
+				],
+			},
+			{
+				apiKey: "test",
+				onPayload: (payload) => {
+					const next = payload as { provider?: { order?: string[] } };
+					if (next.provider) next.provider.order = ["anthropic"];
+				},
+			},
+		).result();
+
+		const params = mockState.lastParams as { messages: Array<Record<string, unknown>> };
+		expect(params.messages[1]?.reasoning_details).toBeUndefined();
+	});
+
 	it("stores matching tool-call reasoning details as a route-bound signature", async () => {
 		mockState.chunks = [
 			{
