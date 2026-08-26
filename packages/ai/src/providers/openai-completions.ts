@@ -112,6 +112,80 @@ type ChatCompletionToolWithCacheControl = OpenAI.Chat.Completions.ChatCompletion
 	cache_control?: OpenAICompatCacheControl;
 };
 
+const KIMI_XTML_REASONING_BOUNDARIES = [
+	"<|open|>tools<|sep|>",
+	"<|close|>think<|sep|>",
+	"◁open▷tools◁sep▷",
+	"◁close▷think◁sep▷",
+] as const;
+
+function usesKimiXtmlReasoning(model: Model<"openai-completions">): boolean {
+	const modelId = model.id.toLowerCase();
+	return modelId.includes("necromicon") || modelId.includes("kimi-k3") || modelId.includes("k3-thinker");
+}
+
+function firstKimiXtmlBoundaryIndex(text: string): number {
+	let firstIndex = -1;
+	for (const boundary of KIMI_XTML_REASONING_BOUNDARIES) {
+		const index = text.indexOf(boundary);
+		if (index !== -1 && (firstIndex === -1 || index < firstIndex)) {
+			firstIndex = index;
+		}
+	}
+	return firstIndex;
+}
+
+function trailingKimiXtmlBoundaryPrefixLength(text: string): number {
+	const longestBoundary = Math.max(...KIMI_XTML_REASONING_BOUNDARIES.map((boundary) => boundary.length));
+	const maxLength = Math.min(text.length, longestBoundary - 1);
+	for (let length = maxLength; length > 0; length--) {
+		const suffix = text.slice(-length);
+		if (KIMI_XTML_REASONING_BOUNDARIES.some((boundary) => boundary.startsWith(suffix))) {
+			return length;
+		}
+	}
+	return 0;
+}
+
+function createKimiXtmlReasoningFilter(model: Model<"openai-completions">): {
+	feed: (chunk: string) => string;
+	flush: () => string;
+} {
+	const enabled = usesKimiXtmlReasoning(model);
+	let pending = "";
+	let blocked = false;
+
+	return {
+		feed(chunk: string): string {
+			if (!enabled) return chunk;
+			if (blocked) return "";
+
+			pending += chunk;
+			const boundaryIndex = firstKimiXtmlBoundaryIndex(pending);
+			if (boundaryIndex !== -1) {
+				const visible = pending.slice(0, boundaryIndex).trimEnd();
+				pending = "";
+				blocked = true;
+				return visible;
+			}
+
+			const retainedLength = trailingKimiXtmlBoundaryPrefixLength(pending);
+			const visible = retainedLength > 0 ? pending.slice(0, -retainedLength) : pending;
+			pending = retainedLength > 0 ? pending.slice(-retainedLength) : "";
+			return visible;
+		},
+		flush(): string {
+			if (!enabled || blocked) {
+				pending = "";
+				return "";
+			}
+			const visible = pending;
+			pending = "";
+			return visible;
+		},
+	};
+}
+
 function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
 	if (cacheRetention) {
 		return cacheRetention;
@@ -195,6 +269,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
 			const blocks = output.content as StreamingBlock[];
+			const kimiXtmlReasoningFilter = createKimiXtmlReasoningFilter(model);
+			let reasoningSignature = "reasoning_content";
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
 			const finishBlock = (block: StreamingBlock) => {
 				const contentIndex = getContentIndex(block);
@@ -349,16 +425,20 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					}
 
 					if (foundReasoningField) {
-						const delta = deltaFields[foundReasoningField];
-						if (typeof delta === "string" && delta.length > 0) {
-							const block = ensureThinkingBlock(foundReasoningField);
-							block.thinking += delta;
-							stream.push({
-								type: "thinking_delta",
-								contentIndex: getContentIndex(block),
-								delta,
-								partial: output,
-							});
+						const rawDelta = deltaFields[foundReasoningField];
+						if (typeof rawDelta === "string" && rawDelta.length > 0) {
+							reasoningSignature = foundReasoningField;
+							const delta = kimiXtmlReasoningFilter.feed(rawDelta);
+							if (delta.length > 0) {
+								const block = ensureThinkingBlock(foundReasoningField);
+								block.thinking += delta;
+								stream.push({
+									type: "thinking_delta",
+									contentIndex: getContentIndex(block),
+									delta,
+									partial: output,
+								});
+							}
 						}
 					}
 
@@ -402,6 +482,18 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						}
 					}
 				}
+			}
+
+			const pendingReasoning = kimiXtmlReasoningFilter.flush();
+			if (pendingReasoning.length > 0) {
+				const block = ensureThinkingBlock(reasoningSignature);
+				block.thinking += pendingReasoning;
+				stream.push({
+					type: "thinking_delta",
+					contentIndex: getContentIndex(block),
+					delta: pendingReasoning,
+					partial: output,
+				});
 			}
 
 			for (const block of blocks) {
