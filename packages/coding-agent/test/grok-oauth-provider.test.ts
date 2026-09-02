@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { clearApiKeyCache, ModelRegistry } from "../src/core/model-registry.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import { defaultModelPerProvider } from "../src/core/model-resolver.js";
 
 describe("xAI Grok subscription provider wiring", () => {
@@ -20,7 +20,6 @@ describe("xAI Grok subscription provider wiring", () => {
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
-		clearApiKeyCache();
 	});
 
 	test("lists the grok OAuth provider for /login", () => {

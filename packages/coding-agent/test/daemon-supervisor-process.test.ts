@@ -1,6 +1,16 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,7 +26,12 @@ import { readSessionInfo, SessionManager } from "../src/core/session-manager.js"
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
-import type { DaemonWorkerDescriptor } from "../src/modes/daemon/daemon-worker-protocol.js";
+import {
+	type DaemonWorkerDescriptor,
+	type DaemonWorkerFrameHeader,
+	isDaemonWorkerFrameHeader,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
+import { encodePrivateFrame, PrivateFrameDecoder } from "../src/modes/session-worker/private-framing.js";
 import { isolatedDaemonProcessEnv, removeTempRoot } from "./isolated-daemon-env.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
@@ -42,14 +57,14 @@ afterEach(async () => {
 		}
 	}
 	daemonSockets.clear();
-	const liveChildren = [...children];
-	children.clear();
-	for (const child of liveChildren) {
+	for (const child of children) {
 		if (child.exitCode === null && child.signalCode === null) {
 			child.kill("SIGTERM");
 		}
 	}
-	await Promise.all(liveChildren.map((child) => waitForExit(child).catch(() => undefined)));
+	// Await owned exits before rmSync: a dying worker's log writer otherwise races it into ENOTEMPTY.
+	await Promise.all([...children].map((child) => waitForExit(child).catch(() => undefined)));
+	children.clear();
 	for (const pid of workerPids) {
 		try {
 			process.kill(pid, "SIGCONT");
@@ -66,6 +81,7 @@ afterEach(async () => {
 			}
 		}
 	}
+	await Promise.all([...workerPids].map((pid) => waitForProcessGone(pid).catch(() => undefined)));
 	workerPids.clear();
 	for (const directory of tempDirs.splice(0)) {
 		await removeTempRoot(directory).catch(() => undefined);
@@ -215,15 +231,6 @@ async function connectEventually(socketPath: string, child?: ChildProcess): Prom
 	throw new Error(`Timed out waiting for supervisor: ${String(lastError)}`);
 }
 
-async function requestShutdown(client: DaemonClient, timeoutMs?: number): Promise<void> {
-	try {
-		const response = await client.request({ type: "shutdown" }, timeoutMs);
-		expect(response.success).toBe(true);
-	} catch (error) {
-		expect(getDaemonSocketCloseReason(error as Error)).toBe("shutdown");
-	}
-}
-
 async function waitForSocketGone(socketPath: string): Promise<void> {
 	const deadline = Date.now() + 10_000;
 	while (Date.now() < deadline) {
@@ -335,8 +342,7 @@ describe("daemon supervisor resident workers", () => {
 		const agentDir = join(root, "agent");
 		const projectDir = join(root, "project");
 		const sessionDir = join(agentDir, "sessions");
-		const socketId = `prime-supervisor-depth-${process.pid}-${randomUUID().slice(0, 8)}`;
-		const socketPath = process.platform === "win32" ? `\\\\.\\pipe\\${socketId}` : join(tmpdir(), `${socketId}.sock`);
+		const socketPath = testSocketPath("depth");
 		mkdirSync(projectDir, { recursive: true });
 
 		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], { RLM_DEPTH: "1" });
@@ -359,6 +365,133 @@ describe("daemon supervisor resident workers", () => {
 		workerPids.delete(summary.workerPid);
 		await waitForSocketGone(socketPath);
 	}, 60_000);
+
+	it("restarts an adopted pre-roster worker from the current binary", async () => {
+		const directory = tempDir();
+		const agentDir = join(directory, "agent");
+		const projectDir = join(directory, "project");
+		const sessionDir = join(agentDir, "sessions");
+		mkdirSync(projectDir, { recursive: true });
+		const manager = SessionManager.create(projectDir, sessionDir);
+		manager.appendMessage({ role: "user", content: "pre-roster fixture", timestamp: 1 });
+		manager.flushNow();
+		const sessionPath = manager.getSessionFile();
+		const sessionId = manager.getSessionId();
+		if (!sessionPath) throw new Error("Fixture session did not persist");
+
+		// A long-lived stand-in process plays the pre-roster worker's pid.
+		const legacyProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
+		children.add(legacyProcess);
+		if (!legacyProcess.pid) throw new Error("Missing legacy process pid");
+
+		// A fake worker socket that authenticates without advertising the roster capability.
+		const workerSocketPath = testSocketPath("legacy-worker");
+		const fakeWorker = createServer((socket) => {
+			const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
+			socket.write(
+				encodePrivateFrame<DaemonWorkerFrameHeader>(
+					{ kind: "outbound", outboundType: "daemon_hello" },
+					Buffer.from(`${JSON.stringify({ type: "daemon_hello" })}\n`),
+				),
+			);
+			socket.on("data", (chunk: Buffer) => {
+				for (const frame of decoder.push(chunk)) {
+					if (frame.header.kind !== "command") continue;
+					const command = JSON.parse(frame.payload.toString("utf8")) as { id: string; type: string };
+					const data =
+						command.type === "list"
+							? {
+									sessions: [
+										{
+											id: "legacy-root-active",
+											activeSessionId: "legacy-root-active",
+											sessionId,
+											sessionFile: sessionPath,
+											lifecycle: "live",
+											activity: "idle",
+											isSessionActive: false,
+											cwd: projectDir,
+											isStreaming: false,
+											isCompacting: false,
+											attachedClients: 0,
+											messageCount: 1,
+											sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+										},
+									],
+								}
+							: {};
+					socket.write(
+						encodePrivateFrame<DaemonWorkerFrameHeader>(
+							{ kind: "outbound", outboundType: "response", requestId: frame.header.requestId },
+							Buffer.from(
+								`${JSON.stringify({ id: command.id, type: "response", command: command.type, success: true, data })}\n`,
+							),
+						),
+					);
+				}
+			});
+		});
+		const socketPath = testSocketPath("legacy-supervisor");
+		await new Promise<void>((resolveListen) => fakeWorker.listen(workerSocketPath, resolveListen));
+		const descriptorDir = join(
+			agentDir,
+			"daemon-workers",
+			createHash("sha256").update(socketPath).digest("hex").slice(0, 12),
+		);
+		mkdirSync(descriptorDir, { recursive: true });
+		const now = new Date().toISOString();
+		writeFileSync(
+			join(descriptorDir, "legacy-worker.json"),
+			`${JSON.stringify({
+				version: 2,
+				workerId: "legacy-worker",
+				pid: legacyProcess.pid,
+				socketPath: workerSocketPath,
+				recoveryJournalPath: join(descriptorDir, "legacy-worker.recovery.jsonl"),
+				supervisorSocketPath: socketPath,
+				authenticationToken: "legacy-token",
+				rootActiveSessionId: "legacy-root-active",
+				rootSessionId: sessionId,
+				sessionFile: sessionPath,
+				sessionDir,
+				createdAt: now,
+				updatedAt: now,
+				lifecycle: "ready",
+				createCommand: { type: "create", sessionPath },
+				consecutiveFailures: 0,
+			})}\n`,
+		);
+
+		// Once the supervisor kills the old pid, its socket goes quiet exactly like a dead worker's.
+		legacyProcess.once("exit", () => {
+			fakeWorker.close();
+			rmSync(workerSocketPath, { force: true });
+		});
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		let restarted: SessionSummary | undefined;
+		const deadline = Date.now() + 30_000;
+		while (Date.now() < deadline) {
+			const listed = await client.request({ type: "list" });
+			restarted = requireSessionList(listed.success ? listed.data : undefined).find(
+				(candidate) => candidate.sessionId === sessionId,
+			);
+			if (restarted?.workerState === "ready" && restarted.workerPid !== undefined) break;
+			restarted = undefined;
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+		}
+		if (!restarted?.workerPid) {
+			throw new Error(`Pre-roster worker was not restarted:\n${readDaemonLogs(agentDir)}`);
+		}
+		workerPids.add(restarted.workerPid);
+		// A fresh current-binary worker owns the reloaded idle session; the fake pre-roster pid is not adopted.
+		expect(restarted.workerPid).not.toBe(legacyProcess.pid);
+		expect(restarted.isSessionActive).toBe(false);
+		expect(restarted.messageCount).toBe(1);
+		await waitForProcessGone(legacyProcess.pid);
+		fakeWorker.close();
+		client.close();
+	}, 90_000);
 
 	it("lists, creates, and attaches passive children through their owning worker", async () => {
 		const root = tempDir();
@@ -468,7 +601,7 @@ describe("daemon supervisor resident workers", () => {
 		});
 		expect(countWorkerDescriptors(agentDir)).toBe(1);
 
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 	}, 60_000);
@@ -478,8 +611,7 @@ describe("daemon supervisor resident workers", () => {
 		const agentDir = join(root, "agent");
 		const projectDir = join(root, "project");
 		const sessionDir = join(agentDir, "sessions");
-		const socketId = `prime-supervisor-owned-${process.pid}-${randomUUID().slice(0, 8)}`;
-		const socketPath = process.platform === "win32" ? `\\\\.\\pipe\\${socketId}` : join(tmpdir(), `${socketId}.sock`);
+		const socketPath = testSocketPath("owned");
 		mkdirSync(projectDir, { recursive: true });
 		const sessionManager = SessionManager.create(projectDir, sessionDir);
 		sessionManager.appendMessage({ role: "user", content: "owned worker fixture", timestamp: 1 });
@@ -495,11 +627,7 @@ describe("daemon supervisor resident workers", () => {
 			type: "create",
 			sessionPath: sessionFile,
 			lifecycle: "client_owned",
-			launchEnv: {
-				[ENV_AGENT_DIR]: join(root, "other-agent"),
-				LOCALAPPDATA: join(root, "other-local-app-data"),
-				PRIME_AGENT_OWNED_TEST: launchEnvSentinel,
-			},
+			launchEnv: { PRIME_AGENT_OWNED_TEST: launchEnvSentinel },
 			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
 		});
 		expect(created.success).toBe(true);
@@ -572,7 +700,7 @@ describe("daemon supervisor resident workers", () => {
 		);
 		expect((await readSessionInfo(sessionFile))?.state?.status).not.toBe("archived");
 
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 	}, 60_000);
@@ -620,7 +748,7 @@ describe("daemon supervisor resident workers", () => {
 			"Adopted client-owned worker descriptor was not removed",
 		);
 		const replacementClient = await connectEventually(socketPath);
-		await requestShutdown(replacementClient);
+		await replacementClient.request({ type: "shutdown" });
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	}, 60_000);
@@ -666,7 +794,8 @@ describe("daemon supervisor resident workers", () => {
 				deliveryStatus: "queued",
 			},
 		});
-		await requestShutdown(client, 10_000);
+		const shutdown = await client.request({ type: "shutdown" }, 10_000);
+		expect(shutdown.success).toBe(true);
 		client.close();
 		await waitForSocketGone(socketPath);
 	}, 30_000);
@@ -716,7 +845,7 @@ describe("daemon supervisor resident workers", () => {
 		).toEqual([]);
 		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
 
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -766,7 +895,7 @@ describe("daemon supervisor resident workers", () => {
 			),
 		).toEqual([]);
 
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -781,12 +910,8 @@ describe("daemon supervisor resident workers", () => {
 
 		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, ["--session-dir", sessionDir, "--no-tools"]);
 		const client = await connectEventually(socketPath, supervisor);
-		try {
-			const restarted = await client.request({ type: "restart" });
-			expect(restarted.success).toBe(true);
-		} catch (error) {
-			expect(getDaemonSocketCloseReason(error as Error)).toBe("update");
-		}
+		const restarted = await client.request({ type: "restart" });
+		expect(restarted.success).toBe(true);
 		client.close();
 		await waitForExit(supervisor);
 		children.delete(supervisor);
@@ -797,7 +922,7 @@ describe("daemon supervisor resident workers", () => {
 		const persistedConfig = readSupervisorConfig(agentDir);
 		expect(persistedConfig).toMatchObject({ defaultSessionConfig: { sessionDir } });
 		expect(persistedConfig.defaultSessionConfig).not.toHaveProperty("noTools");
-		await requestShutdown(replacementClient);
+		await replacementClient.request({ type: "shutdown" });
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -823,7 +948,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(listed.success).toBe(true);
 		expect(requireSessionList(listed.success ? listed.data : undefined)).toEqual([]);
 
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -873,7 +998,7 @@ describe("daemon supervisor resident workers", () => {
 		const observer = await connectEventually(socketPath, supervisor);
 		const observerClosed = new Promise<Error>((resolveClose) => observer.onClose(resolveClose));
 
-		await requestShutdown(client);
+		expect((await client.request({ type: "shutdown" })).success).toBe(true);
 		client.close();
 		expect(getDaemonSocketCloseReason(await observerClosed)).toBe("shutdown");
 		observer.close();
@@ -893,7 +1018,7 @@ describe("daemon supervisor resident workers", () => {
 				(session) => session.activeSessionId || session.workerPid,
 			),
 		).toEqual([]);
-		await requestShutdown(replacementClient);
+		await replacementClient.request({ type: "shutdown" });
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	}, 30_000);
@@ -954,7 +1079,7 @@ describe("daemon supervisor resident workers", () => {
 			20_000,
 		);
 
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -1007,9 +1132,9 @@ describe("daemon supervisor resident workers", () => {
 		workerPids.delete(summary.workerPid);
 
 		// Resuming the saved transcript must not be blocked by the stale
-		// registration. Whichever cleanup wins the race — the background stop
+		// registration. Whichever cleanup wins the race -- the background stop
 		// finalizer or the resume-time reclaim (each covered deterministically
-		// by unit tests) — the user-visible guarantee is the same: the resume
+		// by unit tests) -- the user-visible guarantee is the same: the resume
 		// below must succeed with a fresh worker.
 		const resumed = await client.request({
 			type: "create",
@@ -1031,7 +1156,7 @@ describe("daemon supervisor resident workers", () => {
 		});
 		expect(attached.success).toBe(true);
 
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 		if (resumedSummary.workerPid) {
@@ -1118,7 +1243,7 @@ describe("daemon supervisor resident workers", () => {
 		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
 		expect(cronStore.list().find((job) => job.id === heartbeat.id)).toMatchObject({ status: "cancelled" });
 
-		await requestShutdown(replacementClient);
+		await replacementClient.request({ type: "shutdown" });
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	});
@@ -1181,7 +1306,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(
 			new Set(requireSessionList(adopted.success ? adopted.data : undefined).map((summary) => summary.workerPid)),
 		).toEqual(new Set(pids));
-		await requestShutdown(replacementClient);
+		await replacementClient.request({ type: "shutdown" });
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 		await Promise.all(
@@ -1318,7 +1443,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(
 			new Set(requireSessionList(adopted.success ? adopted.data : undefined).map((summary) => summary.workerPid)),
 		).toEqual(new Set(pids));
-		await requestShutdown(replacementClient);
+		await replacementClient.request({ type: "shutdown" });
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 		await Promise.all(
@@ -1336,7 +1461,7 @@ describe("daemon supervisor resident workers", () => {
 		const agentDir = join(root, "agent");
 		const projectDir = join(root, "project");
 		const sessionDir = join(agentDir, "sessions");
-		const socketPath = testSocketPath("adopt");
+		const socketPath = testSocketPath("default");
 		mkdirSync(projectDir, { recursive: true });
 		const sessionManager = SessionManager.create(projectDir, sessionDir);
 		const largePrompt = `large:${"x".repeat(600 * 1024)}`;
@@ -1433,7 +1558,8 @@ describe("daemon supervisor resident workers", () => {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
 		}
 		expect(connectionEvents).toContain("connection_status:reconnecting");
-		expect(connectionEvents).toContain("session_resynced");
+		// The direct worker link held through the supervisor swap, so no resync is warranted.
+		expect(connectionEvents).not.toContain("session_resynced");
 		expect(connectionEvents).toContain("connection_status:connected");
 		expect(connectionEvents).not.toContain("closed");
 		await expect(connection.getState()).resolves.toMatchObject({
@@ -1522,7 +1648,7 @@ describe("daemon supervisor resident workers", () => {
 		await expect(recoveredConnection.getState()).resolves.toMatchObject({ sessionId: createdSummary.sessionId });
 
 		await recoveredConnection.dispose();
-		await requestShutdown(client);
+		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
 		await waitForProcessGone(recovered.workerPid);
@@ -1590,7 +1716,7 @@ describe("daemon supervisor resident workers", () => {
 		expect(store.list().find((candidate) => candidate.id === job.id)).toBeDefined();
 
 		const replacement = await connectEventually(socketPath);
-		await requestShutdown(replacement);
+		await replacement.request({ type: "shutdown" });
 		replacement.close();
 		await waitForSocketGone(socketPath);
 		await waitForProcessGone(summary.workerPid);

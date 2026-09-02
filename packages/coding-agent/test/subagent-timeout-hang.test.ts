@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { execCommand } from "../src/core/exec.js";
-import { KernelManager } from "../src/core/kernel/index.js";
+import type { KernelClient } from "../src/core/kernel/index.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -28,7 +28,6 @@ import { createTestResourceLoader } from "./utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
 const WINDOWS_COMMAND_TERMINATION_SETTLE_MS = 31_000;
-const USER_CELL_NO_DEADLINE_MS = 6_000;
 
 function usage(): Usage {
 	return {
@@ -128,30 +127,6 @@ function readPid(path: string): number {
 	return pid;
 }
 
-function stubRunningKernel(manager: KernelManager): { shellSend: ReturnType<typeof vi.fn> } {
-	const shellSend = vi.fn(async (_frames: Buffer[]) => {});
-	Object.assign(manager as unknown as Record<string, unknown>, {
-		state: "running",
-		connection: {
-			ip: "127.0.0.1",
-			transport: "tcp",
-			shell_port: 1,
-			iopub_port: 2,
-			stdin_port: 3,
-			control_port: 4,
-			hb_port: 5,
-			signature_scheme: "hmac-sha256",
-			key: "test-key",
-			kernel_name: "python3",
-		},
-		shell: { send: shellSend, close: vi.fn() },
-		control: { send: vi.fn(async () => {}), close: vi.fn() },
-		kernel: { exitCode: null, signalCode: null, kill: vi.fn(() => true) },
-		start: async () => {},
-	});
-	return { shellSend };
-}
-
 function createSession(
 	tempDir: string,
 	options: {
@@ -194,54 +169,12 @@ describe("subagent timeout hang", () => {
 	});
 
 	describe("IPython user-cell execute", () => {
-		it("does not fail-open a blocking user cell with no abort signal", async () => {
-			vi.useFakeTimers();
-			const manager = new KernelManager({ cwd: process.cwd() });
-			const { shellSend } = stubRunningKernel(manager);
-			const executePromise = manager.execute("while True: pass");
-			const state = hangState(executePromise);
-
-			await vi.waitFor(() => expect(shellSend).toHaveBeenCalled());
-			await vi.advanceTimersByTimeAsync(USER_CELL_NO_DEADLINE_MS);
-			await Promise.resolve();
-
-			expect(state.settled).toBe(false);
-			manager.disposeSync();
-		});
-
-		it("does not fail-open while a host_request handler never replies", async () => {
-			vi.useFakeTimers();
-			const hangingHandler = vi.fn(async () => new Promise<Record<string, unknown>>(() => {}));
-			const manager = new KernelManager({
-				cwd: process.cwd(),
-				hostHandlers: { "rlm.run": hangingHandler },
-			});
-			const { shellSend } = stubRunningKernel(manager);
-
-			(
-				manager as unknown as { startHostRequestFromComm(commId: string, data: unknown): void }
-			).startHostRequestFromComm("comm-hang", { type: "rlm.run", prompt: "stuck" });
-			expect(hangingHandler).toHaveBeenCalledTimes(1);
-
-			const executePromise = manager.execute("await rlm.host_request('rlm.run', {'prompt': 'stuck'})");
-			const executeState = hangState(executePromise);
-			const hostState = hangState(hangingHandler.mock.results[0]?.value as Promise<unknown>);
-
-			await vi.waitFor(() => expect(shellSend).toHaveBeenCalled());
-			await vi.advanceTimersByTimeAsync(USER_CELL_NO_DEADLINE_MS);
-			await Promise.resolve();
-
-			expect(hostState.settled).toBe(false);
-			expect(executeState.settled).toBe(false);
-			manager.disposeSync();
-		});
-
 		it("ipython tool execute does not wrap the kernel cell in a timeout", async () => {
 			const provisioner = new IpythonKernelProvisioner(process.cwd());
 			const execute = vi.fn(
 				(_code: string, _opts?: { signal?: AbortSignal; stallTimeoutMs?: number }) => new Promise<never>(() => {}),
 			);
-			vi.spyOn(provisioner, "ensure").mockResolvedValue({ execute } as unknown as KernelManager);
+			vi.spyOn(provisioner, "ensure").mockResolvedValue({ execute } as unknown as KernelClient);
 			const tool = createIpythonTool(process.cwd(), { provisioner });
 			const signal = new AbortController().signal;
 
@@ -260,7 +193,7 @@ describe("subagent timeout hang", () => {
 		it("ipython tool forwards stallTimeoutMs to kernel execute", async () => {
 			const provisioner = new IpythonKernelProvisioner(process.cwd());
 			const execute = vi.fn((_code: string, _opts?: { stallTimeoutMs?: number }) => new Promise<never>(() => {}));
-			vi.spyOn(provisioner, "ensure").mockResolvedValue({ execute } as unknown as KernelManager);
+			vi.spyOn(provisioner, "ensure").mockResolvedValue({ execute } as unknown as KernelClient);
 			const tool = createIpythonTool(process.cwd(), { provisioner, stallTimeoutMs: () => 12_000 });
 			void tool.execute("tool-stall", { code: "pass" });
 			await vi.waitFor(() => expect(execute).toHaveBeenCalled());

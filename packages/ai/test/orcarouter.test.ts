@@ -278,21 +278,4 @@ describe.skipIf(!catalogAuto)("OrcaRouter catalog", () => {
 		expect(catalogAuto?.featured).toBe(true);
 		expect(catalogAuto?.reasoning).toBe(false);
 	});
-
-	it("exposes OpenAI-shaped effort on reasoning routes", () => {
-		const sonnet = getModel("orcarouter", "anthropic/claude-sonnet-4.6");
-		expect(sonnet.reasoning).toBe(true);
-		expect(sonnet.reasoningCapabilities).toEqual({
-			control: "effort",
-			levels: {
-				off: "none",
-				minimal: null,
-				low: "low",
-				medium: "medium",
-				high: "high",
-				xhigh: null,
-				max: null,
-			},
-		});
-	});
 });

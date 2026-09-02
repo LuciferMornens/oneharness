@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import type { AgentSession } from "../core/agent-session.js";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import {
+	type ActiveOrphanProcess,
 	clearOrphanProcessJournal,
 	isOrphanProcessIdentityCurrent,
 	ORPHAN_PROCESS_JOURNAL_ENV,
@@ -17,6 +18,7 @@ import {
 	signalProcessGroupOrProcess,
 	terminateUnixProcessGroupByIdentity,
 	terminateWindowsProcessTreeByIdentity,
+	type WindowsTrackedProcessIdentity,
 } from "../utils/child-process.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
@@ -26,6 +28,12 @@ const OWNED_RECOVERY_DESCRIPTOR_ENV = "PRIME_AGENT_INTERNAL_OWNED_RECOVERY_DESCR
 const OWNED_PROFILE_ENV = "PRIME_AGENT_INTERNAL_OWNED_PROFILE";
 
 let closeOwnerWatch: (() => void) | undefined;
+
+function windowsTrackedProcessIdentities(orphans: readonly ActiveOrphanProcess[]): WindowsTrackedProcessIdentity[] {
+	return orphans.flatMap((orphan) =>
+		orphan.processStartId ? [{ pid: orphan.pid, processStartId: orphan.processStartId }] : [],
+	);
+}
 
 export type OwnedSessionWorkerProfile = "print" | "json" | "rpc" | "interactive-ephemeral";
 
@@ -349,13 +357,14 @@ export async function runOwnedSessionWorkerFrontend(
 				return false;
 			}
 			let result: Awaited<ReturnType<typeof terminateWindowsProcessTreeByIdentity>>;
+			const trackedOrphans = windowsTrackedProcessIdentities(orphans);
 			if (workerProcessStartId) {
-				result = await terminateWindowsProcessTreeByIdentity(workerPid, workerProcessStartId, orphans);
-			} else if (orphans[0]) {
+				result = await terminateWindowsProcessTreeByIdentity(workerPid, workerProcessStartId, trackedOrphans);
+			} else if (trackedOrphans[0]) {
 				result = await terminateWindowsProcessTreeByIdentity(
-					orphans[0].pid,
-					orphans[0].processStartId,
-					orphans.slice(1),
+					trackedOrphans[0].pid,
+					trackedOrphans[0].processStartId,
+					trackedOrphans.slice(1),
 				);
 			} else {
 				result = "not-found";
@@ -384,7 +393,8 @@ export async function runOwnedSessionWorkerFrontend(
 		);
 		const activeTrackedOrphans = [...trackedByIdentity.values()].filter(isOrphanProcessIdentityCurrent);
 		if (process.platform === "win32") {
-			const [primaryOrphan, ...remainingOrphans] = activeTrackedOrphans;
+			const trackedActive = windowsTrackedProcessIdentities(activeTrackedOrphans);
+			const [primaryOrphan, ...remainingOrphans] = trackedActive;
 			if (primaryOrphan) {
 				const result = await terminateWindowsProcessTreeByIdentity(
 					primaryOrphan.pid,
@@ -396,7 +406,7 @@ export async function runOwnedSessionWorkerFrontend(
 				}
 			}
 		} else {
-			for (const orphan of activeTrackedOrphans) {
+			for (const orphan of windowsTrackedProcessIdentities(activeTrackedOrphans)) {
 				const result = await terminateUnixProcessGroupByIdentity(
 					orphan.pid,
 					orphan.processStartId,
