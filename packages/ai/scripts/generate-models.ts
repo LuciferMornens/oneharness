@@ -2666,6 +2666,21 @@ function getAudnModels(): Model<"openai-completions">[] {
 				thinkingFormat: "openai",
 			},
 		},
+		{
+			id: "bartzabel",
+			name: "Bartzabel",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: AUDN_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 2, output: 8, cacheRead: 0.2, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 8192,
+			featured: true,
+			compat: { ...AUDN_REASONING_COMPAT },
+		},
 	];
 }
 

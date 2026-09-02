@@ -50,6 +50,40 @@ describe("audn.ai models", () => {
 		});
 	});
 
+	it("registers Bartzabel with a 262K context window and a fixed reasoning trace", () => {
+		const model = getModel("audn", "bartzabel");
+
+		expect(model).toBeDefined();
+		expect(model.api).toBe("openai-completions");
+		expect(model.provider).toBe("audn");
+		expect(model.baseUrl).toBe("https://platform.audn.ai/api/v1");
+		expect(model.name).toBe("Bartzabel");
+		expect(model.reasoning).toBe(true);
+		expect(model.reasoningCapabilities).toEqual({
+			control: "fixed",
+			levels: { off: null, minimal: null, low: null, medium: null, high: "always", xhigh: null, max: null },
+		});
+		expect(getSupportedThinkingLevels(model)).toEqual(["high"]);
+		expect(model.input).toEqual(["text"]);
+		expect(model.contextWindow).toBe(262144);
+		expect(model.maxTokens).toBe(8192);
+		expect(model.featured).toBe(true);
+		expect(model.cost).toEqual({
+			input: 2,
+			output: 8,
+			cacheRead: 0.2,
+			cacheWrite: 0,
+		});
+		expect(model.compat).toMatchObject({
+			supportsStore: false,
+			supportsDeveloperRole: true,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+			requiresReasoningContentOnAssistantMessages: true,
+		});
+	});
+
 	it("registers Pingu Unchained 10 as the non-reasoning function-calling model", () => {
 		const model = getModel("audn", "pingu-unchained-10");
 
@@ -76,6 +110,7 @@ describe("audn.ai models", () => {
 			.map((model) => model.id)
 			.sort();
 		expect(ids).toEqual([
+			"bartzabel",
 			"godzilla",
 			"k3-thinker-qwen38",
 			"kong",

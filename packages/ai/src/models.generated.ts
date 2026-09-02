@@ -2435,6 +2435,27 @@ export const MODELS = {
 		} satisfies Model<"anthropic-messages">,
 	},
 	"audn": {
+		"bartzabel": {
+			id: "bartzabel",
+			name: "Bartzabel",
+			api: "openai-completions",
+			provider: "audn",
+			baseUrl: "https://platform.audn.ai/api/v1",
+			compat: {"supportsStore":false,"supportsDeveloperRole":true,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"requiresReasoningContentOnAssistantMessages":true},
+			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":"always","xhigh":null,"max":null},
+			reasoningCapabilities: {"control":"fixed","levels":{"off":null,"minimal":null,"low":null,"medium":null,"high":"always","xhigh":null,"max":null}},
+			input: ["text"],
+			cost: {
+				input: 2,
+				output: 8,
+				cacheRead: 0.2,
+				cacheWrite: 0,
+			},
+			contextWindow: 262144,
+			maxTokens: 8192,
+			featured: true,
+		} satisfies Model<"openai-completions">,
 		"godzilla": {
 			id: "godzilla",
 			name: "GODZILLA",

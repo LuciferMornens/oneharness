@@ -140,7 +140,7 @@ Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.a
 
 ### audn.ai
 
-audn.ai is an OpenAI-compatible API at `https://platform.audn.ai/api/v1`. Set `AUDN_API_KEY` or store a key under `audn` via `/login`. Keys start with `sk_live_`; get one at [https://platform.audn.ai](https://platform.audn.ai). The default model is `necromicon`. Necromicon and K3-Thinker-Qwen38 use Kimi K3 reasoning effort (`low` / `high` / `max`; `/effort max` sends `reasoning_effort: "max"`). Reasoning models can take tens of seconds to minutes; `pingu-unchained-10` is the function-calling model and answers in about a second.
+audn.ai is an OpenAI-compatible API at `https://platform.audn.ai/api/v1`. Set `AUDN_API_KEY` or store a key under `audn` via `/login`. Keys start with `sk_live_`; get one at [https://platform.audn.ai](https://platform.audn.ai). The default model is `necromicon`. Necromicon and K3-Thinker-Qwen38 use Kimi K3 reasoning effort (`low` / `high` / `max`; `/effort max` sends `reasoning_effort: "max"`). Bartzabel (`bartzabel`) is a 262K-context Qwen3.8 chain that always thinks server-side and returns the trace in `reasoning_content` (~30s–3m). Reasoning models can take tens of seconds to minutes; `pingu-unchained-10` is the function-calling model and answers in about a second.
 
 See [https://platform.audn.ai/docs](https://platform.audn.ai/docs).
 

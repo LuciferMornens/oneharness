@@ -1,0 +1,1 @@
+- Added audn.ai Bartzabel (`bartzabel`) to the model catalog alongside Necromicon.
