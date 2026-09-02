@@ -6,7 +6,7 @@ import { getApiProvider, streamSimple } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
+import { ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
 
 type OpenAICompletionsCompatWithOrca = OpenAICompletionsCompat & {
 	orcaRouterRouting?: { models?: string[]; route?: "fallback" };
@@ -28,7 +28,6 @@ describe("ModelRegistry", () => {
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
-		clearApiKeyCache();
 	});
 
 	function providerConfig(

@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
-import { getShellConfig } from "../../utils/shell.js";
+import { resolveKernelBashShell } from "../../utils/shell.js";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
@@ -12,67 +12,35 @@ import {
 	type HostRequestHandlers,
 	type KernelAttachment,
 	KernelBusyAfterInterruptError,
+	type KernelClient,
 	type KernelDiffDisplay,
-	KernelManager,
 	type KernelSentAgentMessage,
+	ReplKernelManager,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
-import { parseIpythonBashCell } from "./ipython-cell-code.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
-const WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX = "__prime_agent_exec__";
-
-const RLM_BOOTSTRAP_BASE_CODE = `
+const RLM_BOOTSTRAP_HEADER_CODE = `
 import asyncio
 import os as _prime_agent_os
 
 _prime_agent_os.environ["NO_COLOR"] = "1"
-get_ipython().colors = "nocolor"
+`.trim();
 
-if _prime_agent_os.name == "nt":
-    import base64 as _prime_agent_base64
-    import json as _prime_agent_json
-    import IPython.core.magics.script as _prime_agent_script_magics
-
-    if not hasattr(_prime_agent_script_magics, "_prime_agent_original_arg_split"):
-        _prime_agent_script_magics._prime_agent_original_arg_split = _prime_agent_script_magics.arg_split
-
-    def _prime_agent_script_arg_split(commandline, posix=False, strict=True):
-        tokens = _prime_agent_script_magics._prime_agent_original_arg_split(
-            commandline,
-            posix=posix,
-            strict=strict,
-        )
-        if tokens and tokens[0].startswith("${WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX}"):
-            encoded_argv = tokens[0][len("${WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX}"):]
-            encoded_argv += "=" * (-len(encoded_argv) % 4)
-            argv = _prime_agent_json.loads(
-                _prime_agent_base64.urlsafe_b64decode(encoded_argv).decode("utf-8")
-            )
-            tokens[0:1] = argv
-        return tokens
-
-    _prime_agent_script_magics.arg_split = _prime_agent_script_arg_split
-
-try:
-    import nest_asyncio as _prime_agent_nest_asyncio
-    _prime_agent_nest_asyncio.apply()
-except Exception:
-    pass
-
+const RLM_BOOTSTRAP_RUNTIME_CODE = `
 try:
     import rlm as _prime_agent_rlm_module
     rlm = _prime_agent_rlm_module.rlm
+    bash = _prime_agent_rlm_module.bash
     import rlm.mcp as mcp
-    mcp.install_shutdown_hook()
 except Exception as _prime_agent_rlm_error:
     _PRIME_AGENT_RLM_IMPORT_ERROR = str(_prime_agent_rlm_error)
 
     class _PrimeAgentMissingRlm:
         def _raise_missing(self):
             raise RuntimeError(
-                "prime-agent-runtime is not installed in this IPython kernel. "
+                "prime-agent-runtime is not installed in this kernel. "
                 "Remove ~/.prime/agent/kernel-venv so prime-agent can rebuild it, or set "
                 "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
@@ -94,16 +62,20 @@ except Exception as _prime_agent_rlm_error:
             return await self.run(prompt, **kwargs)
 
     rlm = _PrimeAgentMissingRlm()
+
+    def bash(command):
+        rlm._raise_missing()
 `.trim();
 
 export function buildRlmBootstrapCode(pythonSkills: readonly PythonSkillRuntimeInfo[] = []): string {
+	const baseCode = [RLM_BOOTSTRAP_HEADER_CODE, RLM_BOOTSTRAP_RUNTIME_CODE].join("\n\n");
 	const importNames = [...new Set(pythonSkills.map((skill) => skill.importName))];
 	if (importNames.length === 0) {
-		return RLM_BOOTSTRAP_BASE_CODE;
+		return baseCode;
 	}
 
 	return `
-${RLM_BOOTSTRAP_BASE_CODE}
+${baseCode}
 
 import importlib as _prime_agent_importlib
 import inspect as _prime_agent_inspect
@@ -125,7 +97,7 @@ class _PrimeAgentUnavailableSkill:
 
     async def run(self, *args, **kwargs):
         raise RuntimeError(
-            f"Python skill {self.__name__} is unavailable in this IPython kernel. "
+            f"Python skill {self.__name__} is unavailable in this kernel. "
             f"Import error: {self._prime_agent_import_error}"
         )
 
@@ -172,31 +144,25 @@ for _prime_agent_skill_name in ${JSON.stringify(importNames)}:
 const ipythonSchema = Type.Object({
 	code: Type.String({
 		description:
-			"Python scratchpad code or `%%bash` shell cells to execute in the agent kernel. `%%bash` uses the configured execution shell, which may require PowerShell syntax on Windows. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
+			"Python code to execute in the persistent Python REPL. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
 	}),
 });
 
 const BUSY_KERNEL_WAIT_CHOICE = "Wait and preserve state";
 const BUSY_KERNEL_KILL_CHOICE = "Kill kernel and restart";
 const BUSY_KERNEL_PROMPT = [
-	"Interrupted IPython cell is still running",
-	"Ctrl+C sent an interrupt, but the previous cell has not stopped yet. A new IPython command cannot start until it finishes.",
-	"Waiting preserves the current kernel state. Killing restarts IPython and loses in-memory variables, imports, and running tasks.",
+	"Interrupted Python cell is still running",
+	"Ctrl+C sent an interrupt, but the previous cell has not stopped yet. A new command cannot start until it finishes.",
+	"Waiting preserves the current kernel state. Killing restarts the kernel and loses in-memory variables, imports, and running tasks.",
 ].join("\n");
 const KERNEL_RESTART_NOTICE = [
 	"<ipython_kernel_reset>",
-	"The IPython kernel was restarted after a previous interrupted cell kept running. Variables, imports, async tasks, and open resources from before the restart are no longer available; recreate them before using them.",
+	"The Python kernel was restarted after a previous interrupted cell kept running. Variables, imports, async tasks, and open resources from before the restart are no longer available; recreate them before using them.",
 	"</ipython_kernel_reset>",
 ].join("\n");
 
 function createAbortError(): Error {
-	return new Error("IPython execution aborted");
-}
-
-function resolveStallTimeoutMs(value: number | (() => number) | undefined): number | undefined {
-	const resolved = typeof value === "function" ? value() : value;
-	if (resolved === undefined || !Number.isFinite(resolved) || resolved <= 0) return undefined;
-	return resolved;
+	return new Error("Python execution aborted");
 }
 
 function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, onAbort?: () => void): Promise<T> {
@@ -287,7 +253,9 @@ export interface IpythonToolDetails {
 	stdout?: string;
 	stderr?: string;
 	result?: string;
-	/** Diffs streamed from file edits, rendered by the IPython cell. */
+	/** Output that arrived without this cell's id (threads, other cells' leftovers), shown separately from stdout. */
+	backgroundOutput?: string;
+	/** Diffs streamed from file edits, rendered by the cell view. */
 	diffs?: KernelDiffDisplay[];
 	/** Media attachments loaded into context (e.g. by the attach-image skill). */
 	attachments?: KernelAttachment[];
@@ -303,12 +271,12 @@ export interface IpythonToolDetails {
 }
 
 export interface IpythonToolOptions {
-	/** Python override. Must have `ipykernel` installed. */
+	/** Python override. Must have prime-agent-runtime installed. */
 	python?: string;
 	env?: Record<string, string>;
-	/** Command prefix prepended to every %%bash cell. */
+	/** Command prefix prepended to every bash() command. */
 	commandPrefix?: string;
-	/** Optional explicit shell path for bare %%bash cells. */
+	/** Shell used by bash(). */
 	shellPath?: string;
 	sessionId?: string;
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
@@ -319,8 +287,6 @@ export interface IpythonToolOptions {
 	/** Resolves before this kernel starts — e.g. the previous provisioner's dispose, so a
 	 * /reload's old-kernel snapshot flush can't race the new kernel's restore. */
 	readyGate?: Promise<unknown>;
-	/** Filled with the live KernelManager after the first kernel start; cleared on construction. */
-	kernelManagerRef?: { current?: KernelManager };
 	/**
 	 * Fires once per kernel start when a previous session's namespace was revived
 	 * (some names restored or some failed), so the session can tell the model.
@@ -337,86 +303,30 @@ export interface IpythonToolOptions {
 	stallTimeoutMs?: number | (() => number);
 }
 
-function quoteScriptMagicArgument(value: string): string {
-	return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\"'\"'")}'`;
-}
-
-function windowsScriptMagicCommand(shellPath: string, shellArgs: readonly string[]): string {
-	const encodedArgv = Buffer.from(JSON.stringify([shellPath, ...shellArgs]), "utf8").toString("base64url");
-	return `${WINDOWS_SCRIPT_MAGIC_COMMAND_PREFIX}${encodedArgv}`;
-}
-
-function scriptMagicCommand(shellPath: string): string {
-	const executableName = shellPath.split(/[\\/]/).at(-1)?.toLowerCase();
-	const powerShellStdinRunner = [
-		"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)",
-		"$source = [Console]::In.ReadToEnd()",
-		"$source += [Environment]::NewLine + 'if (-not $?) { if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; exit 1 }'",
-		"& ([scriptblock]::Create($source)) @args",
-	].join("; ");
-	const args =
-		executableName === "pwsh" ||
-		executableName === "pwsh.exe" ||
-		executableName === "powershell" ||
-		executableName === "powershell.exe"
-			? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `& { ${powerShellStdinRunner} }`]
-			: [];
-	if (process.platform === "win32") {
-		return windowsScriptMagicCommand(shellPath, args);
-	}
-	return [shellPath, ...args].map(quoteScriptMagicArgument).join(" ");
-}
-
-function resolveIpythonShellPath(shellPath: string | undefined): string | undefined {
-	const configured = shellPath?.trim();
-	if (process.platform === "win32") return getShellConfig(configured).shell;
-	return configured;
-}
-
-function applyShellSettingsToBashMagicCell(
-	code: string,
-	options: Pick<IpythonToolOptions, "commandPrefix" | "shellPath"> | undefined,
-): string {
-	const commandPrefix = options?.commandPrefix;
-	const shellPath = options?.shellPath;
-	if (!commandPrefix && !shellPath) return code;
-
-	const bashCell = parseIpythonBashCell(code);
-	if (!bashCell) return code;
-
-	const firstLine = shellPath
-		? `${bashCell.indent}%%script ${scriptMagicCommand(shellPath)}${bashCell.magicArguments}`
-		: `${bashCell.indent}%%bash${bashCell.magicArguments}`;
-	const nextBody = commandPrefix ? `${commandPrefix}${bashCell.body ? `\n${bashCell.body}` : ""}` : bashCell.body;
-	return `${bashCell.leadingWhitespace}${firstLine}${bashCell.lineBreak || "\n"}${nextBody}`;
-}
-
 /**
- * Owns the lazy create+start+runtime-bootstrap of one session's IPython kernel.
+ * Owns the lazy create+start+runtime-bootstrap of one session's Python kernel.
  *
  * Concurrent ensure() calls await the same in-flight startup, a failed startup
  * clears the memo so the next call retries fresh, and progress listeners can
  * attach mid-flight (a tool call racing a background prewarm()).
  */
 export class IpythonKernelProvisioner {
-	private managerPromise?: Promise<KernelManager>;
-	private startedManager?: KernelManager;
+	private managerPromise?: Promise<KernelClient>;
+	private startedManager?: KernelClient;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
 	private readonly disposeController = new AbortController();
+	/** Snapshot policy of the dispose that aborted a startup, honored by startKernel's failure teardown. */
+	private disposeSnapshot = true;
 
 	constructor(
 		private readonly cwd: string,
 		private readonly options?: Omit<IpythonToolOptions, "provisioner">,
-	) {
-		if (options?.kernelManagerRef) {
-			options.kernelManagerRef.current = undefined;
-		}
-	}
+	) {}
 
 	/** The kernel manager, once a startup has completed successfully. */
-	get manager(): KernelManager | undefined {
+	get manager(): KernelClient | undefined {
 		return this.startedManager;
 	}
 
@@ -449,7 +359,8 @@ export class IpythonKernelProvisioner {
 	}
 
 	/** Dispose the kernel owned by this provisioner, including one still starting up. */
-	async dispose(): Promise<void> {
+	async dispose(options?: { snapshot?: boolean }): Promise<void> {
+		this.disposeSnapshot = options?.snapshot ?? true;
 		// Drops a still-queued boot out of the semaphore and short-circuits an
 		// in-flight startKernel before it spawns, so a disposed session's boot
 		// doesn't waste a slot during a fan-out.
@@ -457,13 +368,10 @@ export class IpythonKernelProvisioner {
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
-		if (this.options?.kernelManagerRef) {
-			this.options.kernelManagerRef.current = undefined;
-		}
 		if (!pending) return;
 		try {
 			const m = await pending;
-			await m.dispose();
+			await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
 		} catch {
 			// a failed startup already cleaned up after itself
 		}
@@ -473,9 +381,6 @@ export class IpythonKernelProvisioner {
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
-		if (this.options?.kernelManagerRef) {
-			this.options.kernelManagerRef.current = undefined;
-		}
 		if (!pending) return;
 		try {
 			const m = await pending;
@@ -485,7 +390,7 @@ export class IpythonKernelProvisioner {
 		}
 	}
 
-	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelManager> {
+	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelClient> {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
 		}
@@ -539,7 +444,7 @@ export class IpythonKernelProvisioner {
 		}
 	}
 
-	private async startKernel(signal?: AbortSignal): Promise<KernelManager> {
+	private async startKernel(signal?: AbortSignal): Promise<KernelClient> {
 		const startupAbort = createLinkedAbortSignal([this.disposeController.signal, signal]);
 		const startupSignal = startupAbort.signal;
 		// Wait for a previous provisioner (e.g. on /reload) to finish disposing — and
@@ -554,10 +459,20 @@ export class IpythonKernelProvisioner {
 				);
 			}
 			const snapshotDir = this.options?.snapshotDir;
-			const m = new KernelManager({
+			// Always inject an absolute trusted shell (undefined only on win32
+			// without bash, where the runtime's teaching error fires instead).
+			const shellPath = resolveKernelBashShell(this.options?.shellPath);
+			const commandPrefix = this.options?.commandPrefix;
+			const bootstrapCode = buildRlmBootstrapCode(this.options?.pythonSkills);
+			const m = new ReplKernelManager({
 				python: this.options?.python,
 				cwd: this.cwd,
-				env: this.options?.env,
+				// bash() reads these to pick its shell and command prefix.
+				env: {
+					...this.options?.env,
+					...(shellPath ? { PRIME_AGENT_BASH_SHELL: shellPath } : {}),
+					...(commandPrefix ? { PRIME_AGENT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
+				},
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
 				pythonSkills: this.options?.pythonSkills,
@@ -565,12 +480,13 @@ export class IpythonKernelProvisioner {
 				snapshot: snapshotDir
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
 					: undefined,
+				bootstrapCode,
 			});
 			let pendingRestore: RestoreResult | undefined;
 			try {
 				// Emitted synchronously (before the permit await) so a listener attaching
 				// mid-flight can replay the current stage.
-				this.emitStartupProgress("Starting IPython kernel...");
+				this.emitStartupProgress("Starting Python kernel...");
 				// Only the process spawn + port resolve contends for OS resources under a
 				// fan-out, and it is bounded by start()'s own timeouts — so the permit
 				// covers only start(). Restore/bootstrap run per-kernel afterwards and are
@@ -588,23 +504,26 @@ export class IpythonKernelProvisioner {
 				// then overwrites live handles (rlm, skills) on top of anything restored.
 				if (snapshotDir) {
 					const snapshotExisted = existsSync(snapshotPathIn(snapshotDir));
-					this.emitStartupProgress("Restoring IPython state...");
+					this.emitStartupProgress("Restoring Python state...");
 					const restore = await raceWithAbort(m.restoreState(), startupSignal);
 					if (snapshotExisted) {
 						pendingRestore = restore ?? { restored: [], failed: [], path: snapshotPathIn(snapshotDir) };
 					}
 				}
-				this.emitStartupProgress("Preparing IPython runtime...");
-				const bootstrap = await m.execute(buildRlmBootstrapCode(this.options?.pythonSkills), {
+				this.emitStartupProgress("Preparing Python runtime...");
+				const bootstrap = await m.execute(bootstrapCode, {
 					signal: startupSignal,
 				});
 				if (bootstrap.status !== "ok") {
 					const details = [bootstrap.stderr, bootstrap.error?.traceback.join("\n")].filter(Boolean).join("\n");
-					throw new Error(`Failed to initialize rlm runtime in the IPython kernel:\n${details}`);
+					throw new Error(`Failed to initialize rlm runtime in the Python kernel:\n${details}`);
 				}
 			} catch (error) {
-				// Never leak the kernel's ZMQ sockets / temp dir if startup fails after spawn.
-				void m.dispose();
+				// Never leak the kernel process if startup fails after spawn — and never
+				// surface the failure before the teardown (final snapshot flush included)
+				// finished, or a replacement provisioner gated on this dispose could
+				// race the still-flushing kernel over the same snapshot files.
+				await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true }).catch(() => undefined);
 				throw error;
 			}
 			// Only tell the model what was revived once the kernel is actually usable —
@@ -612,9 +531,6 @@ export class IpythonKernelProvisioner {
 			if (pendingRestore) {
 				this._lastRestore = pendingRestore;
 				this.options?.onRestore?.(pendingRestore);
-			}
-			if (this.options?.kernelManagerRef) {
-				this.options.kernelManagerRef.current = m;
 			}
 			return m;
 		} finally {
@@ -652,7 +568,7 @@ async function executeWithBusyKernelChoice(
 	onWorkingMessage: (message?: string) => void,
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
 	ctx: ExtensionContext | undefined,
-	stallTimeoutMs: number | undefined,
+	stallTimeoutMs?: number,
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
 	let kernelRestarted = false;
 	while (true) {
@@ -661,11 +577,11 @@ async function executeWithBusyKernelChoice(
 			return {
 				result: await m.execute(code, {
 					signal,
-					stallTimeoutMs,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
 						: undefined,
+					...(stallTimeoutMs !== undefined ? { stallTimeoutMs } : {}),
 				}),
 				kernelRestarted,
 			};
@@ -675,11 +591,11 @@ async function executeWithBusyKernelChoice(
 			}
 			const action = await chooseBusyKernelAction(ctx, signal);
 			if (action === "wait") {
-				onWorkingMessage("Waiting for IPython kernel...");
+				onWorkingMessage("Waiting for Python kernel...");
 				continue;
 			}
 			if (action === "kill") {
-				onWorkingMessage("Restarting IPython kernel...");
+				onWorkingMessage("Restarting Python kernel...");
 				await provisioner.kill();
 				kernelRestarted = true;
 				continue;
@@ -702,18 +618,19 @@ export function createIpythonToolDefinition(
 	options?: IpythonToolOptions,
 ): ToolDefinition<typeof ipythonSchema, IpythonToolDetails> {
 	const provisioner = options?.provisioner ?? new IpythonKernelProvisioner(cwd, options);
-	const shellSettings = {
-		commandPrefix: options?.commandPrefix,
-		shellPath: resolveIpythonShellPath(options?.shellPath),
+	const resolveStallTimeoutMs = (): number | undefined => {
+		const resolved =
+			typeof options?.stallTimeoutMs === "function" ? options.stallTimeoutMs() : options?.stallTimeoutMs;
+		if (resolved === undefined || !Number.isFinite(resolved) || resolved <= 0) return undefined;
+		return resolved;
 	};
 
 	return {
 		name: "ipython",
 		label: "ipython",
 		description:
-			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. `%%bash` runs through the configured execution shell, so use PowerShell syntax when PowerShell is configured. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
-		promptSnippet:
-			"ipython - persistent agent notebook for Python scratchpad code and configured-shell %%bash orchestration",
+			"Execute Python code in a persistent Python REPL. Top-level `await` is supported. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Run shell commands with `bash('cmd')` / `await bash('cmd')`. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+		promptSnippet: "ipython - persistent Python REPL for code, state, and bash() orchestration",
 		// The kernel is single-threaded — pi must not run two ipython calls in parallel within a batch.
 		executionMode: "sequential",
 		parameters: ipythonSchema,
@@ -732,12 +649,11 @@ export function createIpythonToolDefinition(
 			};
 
 			try {
-				const code = applyShellSettingsToBashMagicCell(params.code, shellSettings);
 				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
 					provisioner,
 					reportStartupProgress,
 					toolCallId,
-					code,
+					params.code,
 					signal,
 					(chunk) => {
 						onUpdate?.({
@@ -748,7 +664,7 @@ export function createIpythonToolDefinition(
 					setToolWorkingMessage,
 					options?.onLateSentAgentMessage,
 					ctx,
-					resolveStallTimeoutMs(options?.stallTimeoutMs),
+					resolveStallTimeoutMs(),
 				);
 
 				let text = r.stdout;
@@ -756,6 +672,9 @@ export function createIpythonToolDefinition(
 				if (r.result) text += (text ? "\n" : "") + r.result;
 				if (r.status === "error" && r.error) {
 					text += (text ? "\n" : "") + r.error.traceback.join("\n");
+				}
+				if (r.backgroundOutput) {
+					text += `${text ? "\n" : ""}[background output (unattributed)]\n${r.backgroundOutput}`;
 				}
 				if (kernelRestarted) {
 					text = text ? `${KERNEL_RESTART_NOTICE}\n\n${text}` : KERNEL_RESTART_NOTICE;
@@ -773,6 +692,7 @@ export function createIpythonToolDefinition(
 						stdout: r.stdout,
 						stderr: r.stderr,
 						result: r.result,
+						backgroundOutput: r.backgroundOutput,
 						diffs: r.diffs,
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,

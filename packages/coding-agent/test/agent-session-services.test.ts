@@ -29,6 +29,7 @@ describe("createAgentSessionFromServices", () => {
 	});
 
 	it("shows the telemetry disclosure independently of the Herdr reporter", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-telemetry-notice-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -50,6 +51,7 @@ describe("createAgentSessionFromServices", () => {
 	});
 
 	it("honors an explicit daemon-carried telemetry opt-out", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-daemon-telemetry-opt-out-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -81,6 +83,7 @@ describe("createAgentSessionFromServices", () => {
 	});
 
 	it("does not install top-level telemetry for a resumed child session", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-child-telemetry-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -148,7 +151,7 @@ describe("createAgentSessionFromServices", () => {
 		try {
 			const initialPrompt = session.systemPrompt;
 			expect(initialPrompt).toContain(
-				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in IPython, not as top-level native tool namespaces or installed Python skills.",
+				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in the Python REPL, not as top-level native tool namespaces or installed Python skills.",
 			);
 			expect(initialPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');

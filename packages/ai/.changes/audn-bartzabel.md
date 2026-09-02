@@ -1,0 +1,1 @@
+- Added audn.ai Bartzabel (`bartzabel`), a 262K-context Qwen3.8 chain that returns a reasoning trace.

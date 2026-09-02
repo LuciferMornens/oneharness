@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	ensureInteractiveDaemonRunning,
 	probeDaemonVersion,
@@ -30,11 +30,14 @@ interface FakeDaemonOptions {
 	protocolVersion?: number;
 	appVersion?: string;
 	schemaId?: string;
+	firstSchemaId?: string;
 	serverCapabilities?: string[];
 	supervisorOwnerToken?: string;
 	supervisorProcessStartId?: string;
 	omitSupervisorIdentity?: boolean;
 	omitSupervisorProcessStartId?: boolean;
+	shouldSendHello?: (connectionIndex: number) => boolean;
+	onConnection?: (connectionIndex: number) => void;
 	onCommand?: (command: { type: string }) => void;
 }
 
@@ -64,28 +67,36 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 	if (!processStartId) {
 		throw new Error("Could not capture the fake daemon process identity");
 	}
+	let connectionIndex = 0;
 	const server: Server = createServer((socket) => {
+		const currentConnectionIndex = connectionIndex++;
+		options.onConnection?.(currentConnectionIndex);
 		socket.on("error", () => undefined);
-		send(socket, {
-			type: "daemon_hello",
-			socketPath,
-			protocol: { name: "prime-agent.daemon", version: options.protocolVersion ?? DAEMON_PROTOCOL_VERSION },
-			appVersion: options.appVersion,
-			schemaId: options.schemaId ?? DAEMON_SCHEMA_ID,
-			...(options.omitSupervisorIdentity
-				? {}
-				: {
-						supervisorGeneration: "fake-generation",
-						supervisorOwnerToken: options.supervisorOwnerToken ?? "fake-owner-token",
-						supervisorPid: process.pid,
-						...(options.omitSupervisorProcessStartId
-							? {}
-							: { supervisorProcessStartId: options.supervisorProcessStartId ?? processStartId }),
-						supervisorSocketPath: socketPath,
-					}),
-			clientId: "fake-client",
-			serverCapabilities: options.serverCapabilities ?? [],
-		});
+		if (options.shouldSendHello?.(currentConnectionIndex) ?? true) {
+			send(socket, {
+				type: "daemon_hello",
+				socketPath,
+				protocol: { name: "prime-agent.daemon", version: options.protocolVersion ?? DAEMON_PROTOCOL_VERSION },
+				appVersion: options.appVersion,
+				schemaId:
+					currentConnectionIndex === 0 && options.firstSchemaId
+						? options.firstSchemaId
+						: (options.schemaId ?? DAEMON_SCHEMA_ID),
+				...(options.omitSupervisorIdentity
+					? {}
+					: {
+							supervisorGeneration: "fake-generation",
+							supervisorOwnerToken: options.supervisorOwnerToken ?? "fake-owner-token",
+							supervisorPid: process.pid,
+							...(options.omitSupervisorProcessStartId
+								? {}
+								: { supervisorProcessStartId: options.supervisorProcessStartId ?? processStartId }),
+							supervisorSocketPath: socketPath,
+						}),
+				clientId: "fake-client",
+				serverCapabilities: options.serverCapabilities ?? [],
+			});
+		}
 		let buffer = "";
 		socket.on("data", (chunk) => {
 			buffer += chunk.toString();
@@ -305,6 +316,91 @@ describe("ensureInteractiveDaemonRunning", () => {
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
 
 		await expect(probe).resolves.toMatchObject({ status: "current" });
+	});
+
+	it("classifies a connected daemon without hello as unresponsive", async () => {
+		const daemon = await startFakeDaemon({ shouldSendHello: () => false });
+		cleanups.push(daemon.close);
+
+		await expect(probeDaemonVersion(daemon.socketPath, 10)).resolves.toEqual({ status: "unresponsive" });
+	});
+
+	it("reuses a daemon that becomes current inside the startup window", async () => {
+		vi.useFakeTimers();
+		let resolveFirstConnection = () => {};
+		let resolveSecondConnection = () => {};
+		const firstConnection = new Promise<void>((resolve) => {
+			resolveFirstConnection = resolve;
+		});
+		const secondConnection = new Promise<void>((resolve) => {
+			resolveSecondConnection = resolve;
+		});
+		const daemon = await startFakeDaemon({
+			appVersion: VERSION,
+			shouldSendHello: (connectionIndex) => connectionIndex > 0,
+			onConnection: (connectionIndex) => {
+				if (connectionIndex === 0) resolveFirstConnection();
+				if (connectionIndex === 1) resolveSecondConnection();
+			},
+		});
+		cleanups.push(daemon.close);
+
+		try {
+			const ensuring = ensureInteractiveDaemonRunning(daemon.socketPath);
+			await firstConnection;
+			await vi.advanceTimersByTimeAsync(2000);
+			await secondConnection;
+			await expect(ensuring).resolves.toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("leaves a connected unresponsive daemon running after the startup window", async () => {
+		vi.useFakeTimers();
+		const connections: Array<() => void> = [];
+		const connected = [0, 1].map(
+			(index) =>
+				new Promise<void>((resolve) => {
+					connections[index] = resolve;
+				}),
+		);
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			shouldSendHello: () => false,
+			onConnection: (connectionIndex) => connections[connectionIndex]?.(),
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		try {
+			const ensuring = ensureInteractiveDaemonRunning(daemon.socketPath);
+			const rejected = expect(ensuring).rejects.toThrow(/accepted connections but did not finish startup/);
+			await connected[0];
+			await vi.advanceTimersByTimeAsync(2000);
+			await connected[1];
+			await vi.advanceTimersByTimeAsync(30_000);
+			await rejected;
+			expect(commands).not.toContain("list");
+			expect(commands).not.toContain("shutdown");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("cancels replacement when a stale-looking daemon becomes current", async () => {
+		const commands: string[] = [];
+		const daemon = await startFakeDaemon({
+			appVersion: VERSION,
+			firstSchemaId: "stale-schema",
+			schemaId: DAEMON_SCHEMA_ID,
+			onCommand: (command) => commands.push(command.type),
+		});
+		cleanups.push(daemon.close);
+
+		await expect(ensureInteractiveDaemonRunning(daemon.socketPath)).resolves.toBeUndefined();
+		expect(commands).toContain("list");
+		expect(commands).not.toContain("shutdown");
 	});
 
 	async function expectLegacyProcessIdentityAdopted(): Promise<void> {

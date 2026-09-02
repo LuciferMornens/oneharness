@@ -45,8 +45,8 @@ describe("buildRlmPrompt", () => {
 
 		expect(prompt).toContain("Installed Python skill modules (pre-imported): `websearch`.");
 		expect(prompt).toContain("A callable `rlm` is already in your global namespace");
-		expect(prompt).toContain("IPython is the agent's long-lived notebook");
-		expect(prompt).toContain("Each `%%bash` cell runs in a throw-away subshell");
+		expect(prompt).toContain("persistent Python REPL");
+		expect(prompt).toContain("Python is the orchestration language");
 	});
 
 	test("discovers requested models through a bounded authenticated host search", () => {
@@ -114,7 +114,7 @@ describe("buildRlmPrompt", () => {
 			allowRecursion: false,
 		});
 
-		expect(prompt).not.toContain("IPython is the agent's long-lived notebook");
+		expect(prompt).not.toContain("persistent Python REPL");
 	});
 
 	test("keeps shell skill command guidance when ipython is inactive", () => {
@@ -202,7 +202,7 @@ describe("buildRlmPrompt", () => {
 		}
 	});
 
-	test("documents the %%bash first-line rule when ipython is active", () => {
+	test("documents the bash() orchestration contract when ipython is active", () => {
 		const prompt = buildRlmPrompt({
 			cwd: "/repo",
 			messagesPath: "/repo/.pi/sessions/session.jsonl",
@@ -210,7 +210,7 @@ describe("buildRlmPrompt", () => {
 			allowRecursion: false,
 		});
 
-		expect(prompt).toContain("it must be the first line of the code cell");
+		expect(prompt).toContain("Use `bash()` to invoke programs, not to write shell programs");
 	});
 
 	test("documents preferring Python for reading and searching files when ipython is active", () => {
@@ -515,7 +515,7 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("# Continual Harness State");
 		expect(prompt).toContain("Call contract: use installed skills as shell commands");
 		expect(prompt).toContain("subagent: 1");
-		expect(prompt).not.toContain("IPython is the agent's long-lived notebook");
+		expect(prompt).not.toContain("persistent Python REPL");
 		expect(prompt).not.toContain("Default to non-blocking subagents");
 		expect(prompt).not.toContain("agent_observe.list_agents");
 		expect(prompt).not.toContain("asyncio.create_task");
@@ -559,7 +559,7 @@ describe("buildSystemPrompt", () => {
 		});
 
 		expect(prompt).toContain("# Continual Harness State");
-		expect(prompt).toContain("without IPython or shell access");
+		expect(prompt).toContain("without the Python REPL or shell access");
 		expect(prompt).not.toContain("use installed skills as shell commands");
 		expect(prompt).not.toContain("<skill_import> ...");
 		expect(prompt).not.toContain("asyncio.create_task");
@@ -722,9 +722,9 @@ describe("createIpythonToolDefinition", () => {
 	test("describes project checks as target-environment work", () => {
 		const tool = createIpythonToolDefinition("/repo");
 
-		expect(tool.description).toContain("Python scratchpad code");
+		expect(tool.description).toContain("persistent Python REPL");
 		expect(tool.description).toContain("target project's own environment");
-		expect(tool.promptSnippet).toContain("%%bash orchestration");
+		expect(tool.promptSnippet).toContain("bash() orchestration");
 		const codeSchema = tool.parameters.properties.code;
 		const codeDescription =
 			"description" in codeSchema && typeof codeSchema.description === "string" ? codeSchema.description : "";

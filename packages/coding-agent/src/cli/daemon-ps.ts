@@ -4,7 +4,13 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, unlinkSync } 
 import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
-import { isOrphanProcessIdentityCurrent, readActiveOrphanProcesses } from "../core/orphan-process-journal.js";
+import {
+	type ActiveOrphanProcess,
+	isOrphanProcessIdentityCurrent,
+	killOrphanProcess,
+	readActiveOrphanProcesses,
+	shouldReapOrphanProcess,
+} from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
 import { DaemonCatalogClient } from "../modes/daemon/daemon-catalog-process.js";
 import { DaemonClient } from "../modes/daemon/daemon-client.js";
@@ -1330,13 +1336,20 @@ async function forceStopTrackedWorkers(
 			descriptor.pid,
 			descriptor.processStartId,
 			assertAdmission,
-			orphans,
+			trackedProcessIdentities(orphans),
 		);
 		if (!cleanupWorkerRecords) {
 			failures.push(`could not safely stop worker ${descriptor.workerId} (pid ${descriptor.pid})`);
 		}
 		if (process.platform !== "win32") {
 			for (const orphan of orphans) {
+				// Pid-only records go through the platform predicate (stopTrackedProcess needs a startId).
+				if (orphan.processStartId === undefined) {
+					if (shouldReapOrphanProcess(orphan)) {
+						killOrphanProcess(orphan.pid);
+					}
+					continue;
+				}
 				if (!isOrphanProcessIdentityCurrent(orphan)) {
 					continue;
 				}
@@ -1370,7 +1383,7 @@ async function forceStopTrackedWorkers(
 					primaryOrphan.pid,
 					primaryOrphan.processStartId,
 					assertAdmission,
-					remainingOrphans,
+					trackedProcessIdentities(remainingOrphans),
 				))
 			) {
 				cleanupWorkerRecords = false;
@@ -1533,6 +1546,12 @@ function isTrackedWorkerDescriptor(
 function normalizeFilesystemPath(path: string): string {
 	const normalized = resolve(path);
 	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function trackedProcessIdentities(orphans: readonly ActiveOrphanProcess[]): { pid: number; processStartId: string }[] {
+	return orphans.flatMap((orphan) =>
+		orphan.processStartId ? [{ pid: orphan.pid, processStartId: orphan.processStartId }] : [],
+	);
 }
 
 async function stopTrackedProcess(
