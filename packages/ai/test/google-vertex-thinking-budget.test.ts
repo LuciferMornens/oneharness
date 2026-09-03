@@ -169,10 +169,20 @@ describe("Google Vertex thinking budget payload", () => {
 	});
 
 	it("serializes current Flash aliases and Gemini 3.7 through named thinking levels", async () => {
-		for (const alias of ["gemini-flash-latest", "gemini-flash-lite-latest"] as const) {
-			const aliasPayload = await captureDirectReasoningPayload(getModel("google", alias), "minimal");
-			expect(aliasPayload.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "MINIMAL" });
-		}
+		const flashPayload = await captureDirectReasoningPayload(getModel("google", "gemini-flash-latest"), "low");
+		expect(flashPayload.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "LOW" });
+
+		const flashMinimalFallback = await captureDirectReasoningPayload(
+			getModel("google", "gemini-flash-latest"),
+			"minimal",
+		);
+		expect(flashMinimalFallback.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "LOW" });
+
+		const flashLitePayload = await captureDirectReasoningPayload(
+			getModel("google", "gemini-flash-lite-latest"),
+			"minimal",
+		);
+		expect(flashLitePayload.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "MINIMAL" });
 
 		const direct37: Model<"google-generative-ai"> = {
 			...getModel("google", "gemini-3.5-flash"),
@@ -196,7 +206,11 @@ describe("Google Vertex thinking budget payload", () => {
 	});
 
 	it("keeps numeric automatic-thinking maps as budget controls", async () => {
-		const direct = getModel("google", "gemini-robotics-er-1.6-preview");
+		const direct: Model<"google-generative-ai"> = {
+			...getModel("google", "gemini-2.5-flash"),
+			id: "gemini-robotics-er-2-preview",
+			reasoningCapabilities: { control: "budget", levels: { off: 0, high: -1 } },
+		};
 		const vertex = getModel("google-vertex", "gemini-2.0-flash-lite");
 
 		expect(direct.reasoningCapabilities).toEqual({ control: "budget", levels: { off: 0, high: -1 } });
