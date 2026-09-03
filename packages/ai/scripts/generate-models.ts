@@ -480,8 +480,13 @@ function isGemini35FlashLiteAlias(modelId: string): boolean {
 	return modelId.toLowerCase() === "gemini-flash-lite-latest";
 }
 
-function isGemini37FlashModel(modelId: string): boolean {
-	return /^gemini-3\.7-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/.test(modelId.toLowerCase());
+function isGemini37OrLaterFlashModel(modelId: string): boolean {
+	const match = /^gemini-3\.(\d+)-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/i.exec(modelId.toLowerCase());
+	if (match) {
+		const minor = Number.parseInt(match[1], 10);
+		return minor >= 7;
+	}
+	return false;
 }
 
 function getGeminiFlashThinkingLevelMap(modelId: string): Model<any>["thinkingLevelMap"] | undefined {
@@ -490,7 +495,7 @@ function getGeminiFlashThinkingLevelMap(modelId: string): Model<any>["thinkingLe
 	}
 	return {
 		off: null,
-		minimal: isGemini37FlashModel(modelId) ? null : "MINIMAL",
+		minimal: isGemini37OrLaterFlashModel(modelId) ? null : "MINIMAL",
 		low: "LOW",
 		medium: "MEDIUM",
 		high: "HIGH",
@@ -740,6 +745,26 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
 		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
+		return;
+	}
+	if (
+		model.id.includes("muse-spark-1.3") ||
+		model.id.includes("muse-spark-1.3-contributor")
+	) {
+		const museSparkLevels = {
+			off: null,
+			minimal: "minimal",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: "max",
+		};
+		model.thinkingLevelMap = { ...museSparkLevels };
+		model.reasoningCapabilities = { control: "effort", levels: { ...museSparkLevels } };
+		if (model.compat) {
+			model.compat.supportsReasoningEffort = true;
+		}
 		return;
 	}
 	if (model.reasoningCapabilities) return;
@@ -2294,6 +2319,25 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 			};
 		}
 	}
+	if (
+		model.id.includes("muse-spark-1.3") ||
+		model.id.includes("muse-spark-1.3-contributor")
+	) {
+		const museSparkLevels = {
+			off: null,
+			minimal: "minimal",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: "max",
+		};
+		model.thinkingLevelMap = { ...museSparkLevels };
+		model.reasoningCapabilities = { control: "effort", levels: { ...museSparkLevels } };
+		if (model.compat) {
+			model.compat.supportsReasoningEffort = true;
+		}
+	}
 	const kimiK3Id = model.id.toLowerCase();
 	if (
 		model.api === "openai-completions" &&
@@ -2901,6 +2945,72 @@ async function generateModels() {
 		});
 	}
 
+	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-3.8-flash")) {
+		allModels.push({
+			id: "gemini-3.8-flash",
+			name: "Gemini 3.8 Flash",
+			api: "google-generative-ai",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			provider: "google",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 0.75,
+				output: 3.75,
+				cacheRead: 0.075,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		});
+	}
+
+	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-robotics-er-1.6-preview")) {
+		allModels.push({
+			id: "gemini-robotics-er-1.6-preview",
+			name: "Gemini Robotics-ER 1.6 Preview",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			reasoning: true,
+			reasoningCapabilities: { control: "budget", levels: { off: 0, high: -1 } },
+			input: ["text", "image"],
+			cost: {
+				input: 1,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		});
+	}
+
+	if (!allModels.some((m) => m.provider === "fireworks" && m.id === "accounts/fireworks/models/deepseek-v4-flash")) {
+		allModels.push({
+			id: "accounts/fireworks/models/deepseek-v4-flash",
+			name: "DeepSeek V4 Flash",
+			api: "anthropic-messages",
+			provider: "fireworks",
+			baseUrl: "https://api.fireworks.ai/inference",
+			reasoning: true,
+			reasoningCapabilities: {
+				control: "budget",
+				supportsOff: true,
+				levels: { minimal: 1024, low: 2048, medium: 8192, high: 16384 },
+			},
+			input: ["text"],
+			cost: {
+				input: 0.14,
+				output: 0.28,
+				cacheRead: 0.028,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 16384,
+		});
+	}
+
 	// Add missing gpt models
 	if (!allModels.some(m => m.provider === "openai" && m.id === "gpt-5-chat-latest")) {
 		allModels.push({
@@ -3329,12 +3439,162 @@ async function generateModels() {
 		});
 	}
 
+	if (!allModels.some(m => m.provider === "openrouter" && m.id === "google/gemini-3.8-flash")) {
+		allModels.push({
+			id: "google/gemini-3.8-flash",
+			name: "Google: Gemini 3.8 Flash",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { supportsReasoningEffort: true },
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+			reasoningCapabilities: {
+				control: "effort",
+				levels: {
+					off: null,
+					minimal: null,
+					low: "low",
+					medium: "medium",
+					high: "high",
+					xhigh: null,
+					max: null,
+				},
+			},
+			input: ["text", "image"],
+			cost: {
+				input: 0.375,
+				output: 1.875,
+				cacheRead: 0.0375,
+				cacheWrite: 0.0208333333333333,
+			},
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		});
+	}
+
+	if (!allModels.some(m => m.provider === "openrouter" && m.id === "meta/muse-spark-1.3")) {
+		allModels.push({
+			id: "meta/muse-spark-1.3",
+			name: "Meta: Muse Spark 1.3",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { supportsReasoningEffort: true },
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: "minimal",
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: "xhigh",
+				max: "max",
+			},
+			reasoningCapabilities: {
+				control: "effort",
+				levels: {
+					off: null,
+					minimal: "minimal",
+					low: "low",
+					medium: "medium",
+					high: "high",
+					xhigh: "xhigh",
+					max: "max",
+				},
+			},
+			input: ["text", "image"],
+			cost: {
+				input: 1.25,
+				output: 4.25,
+				cacheRead: 0.15,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 943718,
+		});
+	}
+
+	if (!allModels.some(m => m.provider === "openrouter" && m.id === "meta/muse-spark-1.3-contributor")) {
+		allModels.push({
+			id: "meta/muse-spark-1.3-contributor",
+			name: "Meta: Muse Spark 1.3 Contributor",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			compat: { supportsReasoningEffort: true },
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: "minimal",
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: "xhigh",
+				max: "max",
+			},
+			reasoningCapabilities: {
+				control: "effort",
+				levels: {
+					off: null,
+					minimal: "minimal",
+					low: "low",
+					medium: "medium",
+					high: "high",
+					xhigh: "xhigh",
+					max: "max",
+				},
+			},
+			input: ["text", "image"],
+			cost: {
+				input: 0.1,
+				output: 0.2,
+				cacheRead: 0.002,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 943718,
+		});
+	}
+
 	if (!allModels.some(m => m.provider === "orcarouter" && m.id === "orcarouter/auto")) {
 		allModels.push(getOrcaRouterAutoModel());
 	}
 
 	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
 	const vertexModels: Model<"google-vertex">[] = [
+		{
+			id: "gemini-3.8-flash",
+			name: "Gemini 3.8 Flash (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
+		{
+			id: "gemini-3.7-flash",
+			name: "Gemini 3.7 Flash (Vertex)",
+			api: "google-vertex",
+			provider: "google-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+		},
 		{
 			id: "gemini-3-pro-preview",
 			name: "Gemini 3 Pro Preview (Vertex)",
