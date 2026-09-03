@@ -58,6 +58,7 @@ prime-agent
 
 | Provider | Environment Variable | `auth.json` key |
 |----------|----------------------|------------------|
+| abliteration.ai | `ABLITERATION_API_KEY` | `abliteration` |
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | audn.ai | `AUDN_API_KEY` | `audn` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |

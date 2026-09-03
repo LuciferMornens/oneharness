@@ -659,8 +659,16 @@ describe("Generate E2E Tests", () => {
 				await handleStreaming(llm);
 			});
 
+			it("should handle thinking mode", { retry: 3 }, async () => {
+				await handleThinking(llm, { reasoningEffort: "high" });
+			});
+
 			it("should handle multi-turn with tools", { retry: 3 }, async () => {
 				await multiTurn(llm);
+			});
+
+			it("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+				await multiTurn(llm, { reasoningEffort: "high" });
 			});
 		},
 	);
