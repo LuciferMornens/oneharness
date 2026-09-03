@@ -35,6 +35,9 @@ interface ModelsDevModel {
 	name: string;
 	tool_call?: boolean;
 	reasoning?: boolean;
+	interleaved?: {
+		field?: string;
+	};
 	limit?: {
 		context?: number;
 		output?: number;
@@ -54,12 +57,20 @@ interface ModelsDevModel {
 	};
 }
 
+interface AiGatewayReasoningOption {
+	type: string;
+	values?: string[];
+	min?: number;
+	max?: number;
+}
+
 interface AiGatewayModel {
 	id: string;
 	name?: string;
 	context_window?: number;
 	max_tokens?: number;
 	tags?: string[];
+	reasoning_options?: AiGatewayReasoningOption[];
 	pricing?: {
 		input?: string | number;
 		output?: string | number;
@@ -472,16 +483,14 @@ function isGemini3FlashModel(modelId: string): boolean {
 	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
 }
 
-function isGemini35FlashAlias(modelId: string): boolean {
-	return modelId.toLowerCase() === "gemini-flash-latest";
-}
-
 function isGemini35FlashLiteAlias(modelId: string): boolean {
 	return modelId.toLowerCase() === "gemini-flash-lite-latest";
 }
 
 function isGemini37OrLaterFlashModel(modelId: string): boolean {
-	const match = /^gemini-3\.(\d+)-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/i.exec(modelId.toLowerCase());
+	const id = modelId.toLowerCase();
+	if (id === "gemini-flash-latest") return true;
+	const match = /^gemini-3\.(\d+)-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/i.exec(id);
 	if (match) {
 		const minor = Number.parseInt(match[1], 10);
 		return minor >= 7;
@@ -490,7 +499,11 @@ function isGemini37OrLaterFlashModel(modelId: string): boolean {
 }
 
 function getGeminiFlashThinkingLevelMap(modelId: string): Model<any>["thinkingLevelMap"] | undefined {
-	if (!isGemini3FlashModel(modelId) && !isGemini35FlashAlias(modelId) && !isGemini35FlashLiteAlias(modelId)) {
+	if (
+		!isGemini3FlashModel(modelId) &&
+		!isGemini35FlashLiteAlias(modelId) &&
+		!isGemini37OrLaterFlashModel(modelId)
+	) {
 		return undefined;
 	}
 	return {
@@ -751,6 +764,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		model.id.includes("muse-spark-1.3") ||
 		model.id.includes("muse-spark-1.3-contributor")
 	) {
+		const parsedLevels = model.thinkingLevelMap ?? {};
 		const museSparkLevels = {
 			off: null,
 			minimal: "minimal",
@@ -758,8 +772,12 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 			medium: "medium",
 			high: "high",
 			xhigh: "xhigh",
-			max: "max",
+			max: null,
+			...parsedLevels,
 		};
+		if (parsedLevels.max === undefined) {
+			museSparkLevels.max = null;
+		}
 		model.thinkingLevelMap = { ...museSparkLevels };
 		model.reasoningCapabilities = { control: "effort", levels: { ...museSparkLevels } };
 		if (model.compat) {
@@ -779,6 +797,11 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		(model.provider === "opencode" || model.provider === "opencode-go") &&
 		model.id.toLowerCase().includes("deepseek-v4")
 	) {
+		model.compat = {
+			...model.compat,
+			requiresReasoningContentOnAssistantMessages: true,
+			thinkingFormat: "deepseek",
+		};
 		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
 		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
 		return;
@@ -937,8 +960,8 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		model.api === "mistral-conversations" ||
 		model.thinkingLevelMap !== undefined;
 	const fixedReasoning =
-		(model.api === "bedrock-converse-stream" && !isClaudeBedrock) ||
-		(model.api === "anthropic-messages" && !directClaudeApi) ||
+		(model.api === "bedrock-converse-stream" && !isClaudeBedrock && !model.thinkingLevelMap) ||
+		(model.api === "anthropic-messages" && !directClaudeApi && !model.thinkingLevelMap) ||
 		(model.api === "openai-completions" && model.provider === "xai" && !compatibleReasoningLevelMap) ||
 		(model.api === "openai-completions" &&
 			(model.provider === "cloudflare-workers-ai" ||
@@ -1482,6 +1505,26 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 			const cacheReadCost = toNumber(model.pricing?.input_cache_read) * 1_000_000;
 			const cacheWriteCost = toNumber(model.pricing?.input_cache_write) * 1_000_000;
 
+			let thinkingLevelMap: ThinkingLevelMap | undefined;
+			if (Array.isArray(model.reasoning_options)) {
+				const effortOption = model.reasoning_options.find((opt) => opt.type === "effort");
+				const toggleOption = model.reasoning_options.find((opt) => opt.type === "toggle");
+				if (effortOption && Array.isArray(effortOption.values) && effortOption.values.length > 0) {
+					const values = effortOption.values;
+					const hasNone = values.includes("none") || values.includes("off");
+					const canTurnOff = hasNone || toggleOption !== undefined;
+					thinkingLevelMap = {
+						off: canTurnOff ? "none" : null,
+						minimal: values.includes("minimal") ? "minimal" : null,
+						low: values.includes("low") ? "low" : null,
+						medium: values.includes("medium") ? "medium" : null,
+						high: values.includes("high") ? "high" : null,
+						xhigh: values.includes("xhigh") ? "xhigh" : null,
+						max: values.includes("max") ? "max" : null,
+					};
+				}
+			}
+
 			models.push({
 				id: model.id,
 				name: model.name || model.id,
@@ -1489,7 +1532,8 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 				baseUrl: AI_GATEWAY_BASE_URL,
 				provider: "vercel-ai-gateway",
 				// DeepSeek's *-thinking routes always think; the gateway omits the tag.
-				reasoning: tags.includes("reasoning") || model.id.includes("-thinking"),
+				reasoning: tags.includes("reasoning") || model.id.includes("-thinking") || thinkingLevelMap !== undefined,
+				...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 				input,
 				cost: {
 					input: inputCost,
@@ -1699,6 +1743,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
+				const hasDeepseekReasoning =
+					m.interleaved?.field === "reasoning_content" || modelId.toLowerCase().includes("deepseek-v4");
 				models.push({
 					id: modelId,
 					name: m.name || modelId,
@@ -1715,7 +1761,15 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					},
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
-					compat: { sendSessionAffinityHeaders: true },
+					compat: {
+						sendSessionAffinityHeaders: true,
+						...(hasDeepseekReasoning
+							? {
+									requiresReasoningContentOnAssistantMessages: true,
+									thinkingFormat: "deepseek",
+								}
+							: {}),
+					},
 				});
 			}
 		}
@@ -2008,6 +2062,16 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					}
 				}
 
+				if (api === "openai-completions") {
+					if (m.interleaved?.field === "reasoning_content" || modelId.toLowerCase().includes("deepseek-v4")) {
+						compat = {
+							...(compat ?? {}),
+							requiresReasoningContentOnAssistantMessages: true,
+							thinkingFormat: "deepseek",
+						};
+					}
+				}
+
 				models.push({
 					id: modelId,
 					name: m.name || modelId,
@@ -2297,6 +2361,11 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 		(model.provider === "opencode" || model.provider === "opencode-go") &&
 		model.id.toLowerCase().includes("deepseek-v4")
 	) {
+		model.compat = {
+			...model.compat,
+			requiresReasoningContentOnAssistantMessages: true,
+			thinkingFormat: "deepseek",
+		};
 		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
 		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
 		return;
@@ -2323,6 +2392,7 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 		model.id.includes("muse-spark-1.3") ||
 		model.id.includes("muse-spark-1.3-contributor")
 	) {
+		const parsedLevels = model.thinkingLevelMap ?? {};
 		const museSparkLevels = {
 			off: null,
 			minimal: "minimal",
@@ -2330,8 +2400,12 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 			medium: "medium",
 			high: "high",
 			xhigh: "xhigh",
-			max: "max",
+			max: null,
+			...parsedLevels,
 		};
+		if (parsedLevels.max === undefined) {
+			museSparkLevels.max = null;
+		}
 		model.thinkingLevelMap = { ...museSparkLevels };
 		model.reasoningCapabilities = { control: "effort", levels: { ...museSparkLevels } };
 		if (model.compat) {
@@ -2965,27 +3039,6 @@ async function generateModels() {
 		});
 	}
 
-	if (!allModels.some((m) => m.provider === "google" && m.id === "gemini-robotics-er-1.6-preview")) {
-		allModels.push({
-			id: "gemini-robotics-er-1.6-preview",
-			name: "Gemini Robotics-ER 1.6 Preview",
-			api: "google-generative-ai",
-			provider: "google",
-			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-			reasoning: true,
-			reasoningCapabilities: { control: "budget", levels: { off: 0, high: -1 } },
-			input: ["text", "image"],
-			cost: {
-				input: 1,
-				output: 5,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 1048576,
-			maxTokens: 65536,
-		});
-	}
-
 	if (!allModels.some((m) => m.provider === "fireworks" && m.id === "accounts/fireworks/models/deepseek-v4-flash")) {
 		allModels.push({
 			id: "accounts/fireworks/models/deepseek-v4-flash",
@@ -3167,7 +3220,7 @@ async function generateModels() {
 	allModels.push(...deepseekV4Models);
 
 	for (const candidate of allModels) {
-		if (candidate.provider === "deepseek" && candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
+		if (candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
 			candidate.compat = {
 				...candidate.compat,
 				...(candidate.provider === "openrouter"
@@ -3178,7 +3231,9 @@ async function generateModels() {
 						}
 					: DEEPSEEK_V4_COMPAT),
 			};
-			mergeThinkingLevelMap(candidate, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+			if (candidate.provider === "deepseek") {
+				mergeThinkingLevelMap(candidate, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+			}
 		}
 	}
 
@@ -3471,10 +3526,10 @@ async function generateModels() {
 			},
 			input: ["text", "image"],
 			cost: {
-				input: 0.375,
-				output: 1.875,
-				cacheRead: 0.0375,
-				cacheWrite: 0.0208333333333333,
+				input: 0.75,
+				output: 3.75,
+				cacheRead: 0.075,
+				cacheWrite: 0.0416666666666666,
 			},
 			contextWindow: 1048576,
 			maxTokens: 65536,
@@ -3497,7 +3552,7 @@ async function generateModels() {
 				medium: "medium",
 				high: "high",
 				xhigh: "xhigh",
-				max: "max",
+				max: null,
 			},
 			reasoningCapabilities: {
 				control: "effort",
@@ -3508,7 +3563,7 @@ async function generateModels() {
 					medium: "medium",
 					high: "high",
 					xhigh: "xhigh",
-					max: "max",
+					max: null,
 				},
 			},
 			input: ["text", "image"],
@@ -3539,7 +3594,7 @@ async function generateModels() {
 				medium: "medium",
 				high: "high",
 				xhigh: "xhigh",
-				max: "max",
+				max: null,
 			},
 			reasoningCapabilities: {
 				control: "effort",
@@ -3550,7 +3605,7 @@ async function generateModels() {
 					medium: "medium",
 					high: "high",
 					xhigh: "xhigh",
-					max: "max",
+					max: null,
 				},
 			},
 			input: ["text", "image"],

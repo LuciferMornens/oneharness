@@ -260,7 +260,7 @@ function assertGoogleBudgetValue<TApi extends Api>(model: Model<TApi>, level: st
 	const pro = id.includes("gemini-2.5-pro");
 	const flashLite = id.includes("gemini-2.5-flash-lite");
 	const flash = id.includes("gemini-2.5-flash") && !flashLite;
-	const robotics = id.includes("gemini-robotics-er-1.6");
+	const robotics = id.includes("gemini-robotics-er-1.6") || id.includes("gemini-robotics-er-2");
 	const legacyFlashLite = id.includes("gemini-2.0-flash-lite");
 	const documentedBudgetModel = pro || flash || flashLite || robotics || legacyFlashLite;
 

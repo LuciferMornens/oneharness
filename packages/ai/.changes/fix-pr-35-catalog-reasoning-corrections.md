@@ -1,0 +1,6 @@
+- Fixed Meta Muse Spark 1.3 reasoning effort options on OpenRouter by removing unsupported max effort.
+- Removed deprecated gemini-robotics-er-1.6-preview model from Google catalog.
+- Restored DeepSeek reasoning replay metadata for OpenCode, OpenCode Go, and Cloudflare Workers AI.
+- Updated gemini-flash-latest rolling alias to use Gemini 3.7+ thinking levels without minimal effort.
+- Added reasoning effort controls for Vercel AI Gateway Gemini models based on gateway reasoning options.
+- Corrected OpenRouter fallback pricing for Gemini 3.8 Flash.

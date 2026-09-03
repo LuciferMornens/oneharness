@@ -123,9 +123,13 @@ describe("Google mandatory thinking contracts", () => {
 			expect(getSupportedThinkingLevels(getModel(provider, "gemini-3.8-flash"))).toEqual(["low", "medium", "high"]);
 		}
 		expect(getSupportedThinkingLevels(getModel("google-vertex", "gemini-3-pro-preview"))).toEqual(["low", "high"]);
-		for (const alias of ["gemini-flash-latest", "gemini-flash-lite-latest"] as const) {
-			expect(getSupportedThinkingLevels(getModel("google", alias))).toEqual(["minimal", "low", "medium", "high"]);
-		}
+		expect(getSupportedThinkingLevels(getModel("google", "gemini-flash-latest"))).toEqual(["low", "medium", "high"]);
+		expect(getSupportedThinkingLevels(getModel("google", "gemini-flash-lite-latest"))).toEqual([
+			"minimal",
+			"low",
+			"medium",
+			"high",
+		]);
 	});
 });
 

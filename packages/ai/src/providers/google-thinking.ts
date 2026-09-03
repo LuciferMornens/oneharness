@@ -31,16 +31,14 @@ function isGemini3FlashModel(modelId: string): boolean {
 	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
 }
 
-function isGemini35FlashAlias(modelId: string): boolean {
-	return modelId.toLowerCase() === "gemini-flash-latest";
-}
-
 function isGemini35FlashLiteAlias(modelId: string): boolean {
 	return modelId.toLowerCase() === "gemini-flash-lite-latest";
 }
 
 function isGemini37OrLaterFlashModel(modelId: string): boolean {
-	const match = /^gemini-3\.(\d+)-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/i.exec(modelId.toLowerCase());
+	const id = modelId.toLowerCase();
+	if (id === "gemini-flash-latest") return true;
+	const match = /^gemini-3\.(\d+)-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/i.exec(id);
 	if (match) {
 		const minor = Number.parseInt(match[1], 10);
 		return minor >= 7;
@@ -52,7 +50,7 @@ export function usesGoogleThinkingLevels(modelId: string): boolean {
 	return (
 		isGemini3ProModel(modelId) ||
 		isGemini3FlashModel(modelId) ||
-		isGemini35FlashAlias(modelId) ||
+		isGemini37OrLaterFlashModel(modelId) ||
 		isGemini35FlashLiteAlias(modelId) ||
 		isGemma4Model(modelId)
 	);
@@ -65,7 +63,7 @@ export function getLegacyGoogleDisabledThinking(modelId: string): {
 	if (isGemini3ProModel(modelId)) return { level: "LOW" };
 	if (isGemini37OrLaterFlashModel(modelId)) return { level: "LOW" };
 	if (isGemini3FlashModel(modelId) || isGemma4Model(modelId)) return { level: "MINIMAL" };
-	if (isGemini35FlashAlias(modelId) || isGemini35FlashLiteAlias(modelId)) return { level: "MINIMAL" };
+	if (isGemini35FlashLiteAlias(modelId)) return { level: "MINIMAL" };
 	return { budgetTokens: 0 };
 }
 
