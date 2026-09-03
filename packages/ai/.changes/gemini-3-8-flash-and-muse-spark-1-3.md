@@ -1,0 +1,2 @@
+- Added Gemini 3.8 Flash support across Google, Google Vertex, and OpenRouter with low, medium, and high thinking levels.
+- Added Meta Muse Spark 1.3 and Contributor models on OpenRouter with reasoning effort support up to max.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getSupportedThinkingLevels } from "../src/models.js";
+import { getModel, getSupportedThinkingLevels } from "../src/models.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import type { Model } from "../src/types.js";
 
@@ -99,5 +99,19 @@ describe("OpenRouter reasoning metadata", () => {
 		expect(
 			getOpenRouterReasoningCapabilities(metadata({ mandatory: true, supported_efforts: ["high"] }, false)),
 		).toBeUndefined();
+	});
+
+	it("exposes Gemini 3.8 Flash and Muse Spark 1.3 reasoning levels in catalog", () => {
+		const gemini = getModel("openrouter", "google/gemini-3.8-flash");
+		expect(gemini).toBeDefined();
+		expect(getSupportedThinkingLevels(gemini)).toEqual(["low", "medium", "high"]);
+
+		const museSpark = getModel("openrouter", "meta/muse-spark-1.3");
+		expect(museSpark).toBeDefined();
+		expect(getSupportedThinkingLevels(museSpark)).toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+		const museContributor = getModel("openrouter", "meta/muse-spark-1.3-contributor");
+		expect(museContributor).toBeDefined();
+		expect(getSupportedThinkingLevels(museContributor)).toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
 	});
 });

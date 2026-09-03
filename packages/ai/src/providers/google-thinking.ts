@@ -39,8 +39,13 @@ function isGemini35FlashLiteAlias(modelId: string): boolean {
 	return modelId.toLowerCase() === "gemini-flash-lite-latest";
 }
 
-function isGemini37FlashModel(modelId: string): boolean {
-	return /^gemini-3\.7-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/.test(modelId.toLowerCase());
+function isGemini37OrLaterFlashModel(modelId: string): boolean {
+	const match = /^gemini-3\.(\d+)-flash(?:-\d{3}|-preview(?:-\d{2}-\d{4})?)?$/i.exec(modelId.toLowerCase());
+	if (match) {
+		const minor = Number.parseInt(match[1], 10);
+		return minor >= 7;
+	}
+	return false;
 }
 
 export function usesGoogleThinkingLevels(modelId: string): boolean {
@@ -58,7 +63,7 @@ export function getLegacyGoogleDisabledThinking(modelId: string): {
 	level?: GoogleThinkingLevel;
 } {
 	if (isGemini3ProModel(modelId)) return { level: "LOW" };
-	if (isGemini37FlashModel(modelId)) return { level: "LOW" };
+	if (isGemini37OrLaterFlashModel(modelId)) return { level: "LOW" };
 	if (isGemini3FlashModel(modelId) || isGemma4Model(modelId)) return { level: "MINIMAL" };
 	if (isGemini35FlashAlias(modelId) || isGemini35FlashLiteAlias(modelId)) return { level: "MINIMAL" };
 	return { budgetTokens: 0 };
@@ -69,7 +74,7 @@ export function getLegacyGoogleThinkingLevel(modelId: string, effort: GoogleBudg
 		if (effort === "minimal" || effort === "low") return "LOW";
 		return effort === "medium" && supportsGemini3ProMedium(modelId) ? "MEDIUM" : "HIGH";
 	}
-	if (isGemini37FlashModel(modelId)) {
+	if (isGemini37OrLaterFlashModel(modelId)) {
 		if (effort === "minimal" || effort === "low") return "LOW";
 		return effort === "medium" ? "MEDIUM" : "HIGH";
 	}
@@ -119,7 +124,7 @@ export function getLegacyGoogleReasoningLevels(modelId: string): ModelReasoningC
 			},
 		};
 	}
-	if (isGemini37FlashModel(modelId)) {
+	if (isGemini37OrLaterFlashModel(modelId)) {
 		return {
 			control: "effort",
 			levels: {
