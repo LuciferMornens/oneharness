@@ -772,12 +772,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 			medium: "medium",
 			high: "high",
 			xhigh: "xhigh",
-			max: null,
 			...parsedLevels,
+			max: null,
 		};
-		if (parsedLevels.max === undefined) {
-			museSparkLevels.max = null;
-		}
 		model.thinkingLevelMap = { ...museSparkLevels };
 		model.reasoningCapabilities = { control: "effort", levels: { ...museSparkLevels } };
 		if (model.compat) {
@@ -795,12 +792,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (
 		model.api === "openai-completions" &&
 		(model.provider === "opencode" || model.provider === "opencode-go") &&
-		model.id.toLowerCase().includes("deepseek-v4")
+		model.id.toLowerCase().includes("deepseek")
 	) {
 		model.compat = {
 			...model.compat,
 			requiresReasoningContentOnAssistantMessages: true,
 			thinkingFormat: "deepseek",
+			...(!model.id.toLowerCase().includes("deepseek-v4") ? { supportsReasoningEffort: false } : {}),
 		};
 		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
 		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
@@ -2069,6 +2067,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 							...(compat ?? {}),
 							requiresReasoningContentOnAssistantMessages: true,
 							thinkingFormat: "deepseek",
+							...(!modelId.toLowerCase().includes("deepseek-v4") ? { supportsReasoningEffort: false } : {}),
 						};
 					}
 				}
@@ -2341,6 +2340,17 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 	}
 	if (applyProviderSpecificReasoningMetadata(model)) return;
 	if (
+		model.api === "openai-completions" &&
+		model.provider === "cloudflare-workers-ai" &&
+		model.id.toLowerCase().includes("deepseek")
+	) {
+		model.compat = {
+			...model.compat,
+			requiresReasoningContentOnAssistantMessages: true,
+			thinkingFormat: "deepseek",
+		};
+	}
+	if (
 		model.provider === "github-copilot" &&
 		!GITHUB_COPILOT_CONFIGURABLE_REASONING_MODELS.has(model.id.toLowerCase())
 	) {
@@ -2360,12 +2370,13 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 	if (
 		model.api === "openai-completions" &&
 		(model.provider === "opencode" || model.provider === "opencode-go") &&
-		model.id.toLowerCase().includes("deepseek-v4")
+		model.id.toLowerCase().includes("deepseek")
 	) {
 		model.compat = {
 			...model.compat,
 			requiresReasoningContentOnAssistantMessages: true,
 			thinkingFormat: "deepseek",
+			...(!model.id.toLowerCase().includes("deepseek-v4") ? { supportsReasoningEffort: false } : {}),
 		};
 		model.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
 		model.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
@@ -2401,12 +2412,9 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 			medium: "medium",
 			high: "high",
 			xhigh: "xhigh",
-			max: null,
 			...parsedLevels,
+			max: null,
 		};
-		if (parsedLevels.max === undefined) {
-			museSparkLevels.max = null;
-		}
 		model.thinkingLevelMap = { ...museSparkLevels };
 		model.reasoningCapabilities = { control: "effort", levels: { ...museSparkLevels } };
 		if (model.compat) {
@@ -3235,6 +3243,15 @@ async function generateModels() {
 			};
 			if (candidate.provider === "deepseek") {
 				mergeThinkingLevelMap(candidate, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+			} else if (
+				!isOpenRouterDeepSeekV4Route(candidate) &&
+				!isPrimeDeepSeekV4Route(candidate) &&
+				candidate.provider !== "orcarouter" &&
+				!candidate.thinkingLevelMap &&
+				!candidate.reasoningCapabilities
+			) {
+				candidate.thinkingLevelMap = { ...FIXED_REASONING_LEVEL_MAP };
+				candidate.reasoningCapabilities = { control: "fixed", levels: { ...FIXED_REASONING_LEVEL_MAP } };
 			}
 		}
 	}
