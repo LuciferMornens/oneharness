@@ -1744,7 +1744,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 
 				const hasDeepseekReasoning =
-					m.interleaved?.field === "reasoning_content" || modelId.toLowerCase().includes("deepseek-v4");
+					modelId.toLowerCase().includes("deepseek") &&
+					(m.interleaved?.field === "reasoning_content" || modelId.toLowerCase().includes("deepseek-v4"));
 				models.push({
 					id: modelId,
 					name: m.name || modelId,
@@ -2062,7 +2063,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					}
 				}
 
-				if (api === "openai-completions") {
+				if (api === "openai-completions" && modelId.toLowerCase().includes("deepseek")) {
 					if (m.interleaved?.field === "reasoning_content" || modelId.toLowerCase().includes("deepseek-v4")) {
 						compat = {
 							...(compat ?? {}),
@@ -2850,7 +2851,8 @@ async function generateModels() {
 	// Combine models (models.dev has priority)
 	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels].filter(
 		(model) =>
-			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
+			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark") &&
+			!model.id.toLowerCase().includes("gemini-robotics-er-1.6"),
 	);
 
 	// Fix incorrect cache pricing for Claude Opus 4.5 from models.dev

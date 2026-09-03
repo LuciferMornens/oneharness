@@ -131,4 +131,18 @@ describe("OpenRouter reasoning metadata", () => {
 		expect(vercelGemini.reasoningCapabilities?.control).toBe("effort");
 		expect(getSupportedThinkingLevels(vercelGemini)).toEqual(["low", "medium", "high"]);
 	});
+
+	it("does not include deprecated gemini-robotics-er-1.6-preview", () => {
+		expect(getModel("google", "gemini-robotics-er-1.6-preview" as any)).toBeUndefined();
+		expect(getModel("orcarouter", "google/gemini-robotics-er-1.6-preview" as any)).toBeUndefined();
+	});
+
+	it("restricts DeepSeek reasoning format to DeepSeek models on Cloudflare Workers AI", () => {
+		const deepseekCf = getModel("cloudflare-workers-ai", "@cf/deepseek-ai/deepseek-v4-flash-0731");
+		expect(deepseekCf.compat?.requiresReasoningContentOnAssistantMessages).toBe(true);
+		expect(deepseekCf.compat?.thinkingFormat).toBe("deepseek");
+
+		const nonDeepseekCf = getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6");
+		expect(nonDeepseekCf.compat?.thinkingFormat).toBeUndefined();
+	});
 });
