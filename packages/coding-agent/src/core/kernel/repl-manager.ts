@@ -260,6 +260,10 @@ export class ReplKernelManager {
 				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
 			},
 			stdio: ["pipe", "pipe", "pipe"],
+			// The kernel talks over pipes; without this a console-less parent
+			// (e.g. the detached daemon worker) makes Windows pop a visible
+			// console window for python.exe. No-op on POSIX.
+			windowsHide: true,
 		});
 		this.child = child;
 		if (child.pid !== undefined) recordOrphanProcessState(child.pid, true);

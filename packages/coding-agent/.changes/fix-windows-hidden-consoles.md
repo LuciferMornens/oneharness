@@ -1,0 +1,1 @@
+- Fixed a stray empty console window appearing on Windows when the RLM Python kernel or a detached daemon process started.

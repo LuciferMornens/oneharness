@@ -2891,6 +2891,9 @@ export class DaemonSupervisor {
 			detached: true,
 			env: workerEnvironment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
+			// Detached workers have no console to inherit; without this Windows
+			// pops a visible console window for node.exe. No-op on POSIX.
+			windowsHide: true,
 		});
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
@@ -6631,6 +6634,9 @@ export class DaemonSupervisor {
 				detached: true,
 				env: environment,
 				stdio: "ignore",
+				// The replacement outlives this process; keep it console-less on
+				// Windows like the daemon-mode.ts supervisor relaunch. No-op on POSIX.
+				windowsHide: true,
 			});
 			replacement.unref();
 		}
