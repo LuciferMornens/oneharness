@@ -25,6 +25,7 @@ export PI_NO_LOCAL_LLM=1
 # Unset API keys (see packages/ai/src/stream.ts getEnvApiKey)
 unset ANTHROPIC_API_KEY
 unset ANTHROPIC_OAUTH_TOKEN
+unset ABLITERATION_API_KEY
 unset AUDN_API_KEY
 unset OPENAI_API_KEY
 unset GEMINI_API_KEY

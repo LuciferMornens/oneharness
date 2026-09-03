@@ -1,4 +1,5 @@
 export const BUILT_IN_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+	abliteration: "abliteration.ai",
 	anthropic: "Anthropic",
 	audn: "audn.ai",
 	"amazon-bedrock": "Amazon Bedrock",

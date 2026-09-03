@@ -4,6 +4,66 @@
 import type { Model } from "./types.js";
 
 export const MODELS = {
+	"abliteration": {
+		"abliterated-model": {
+			id: "abliterated-model",
+			name: "Abliterated Model",
+			api: "openai-responses",
+			provider: "abliteration",
+			baseUrl: "https://api.abliteration.ai/v1",
+			reasoning: true,
+			thinkingLevelMap: {"off":"none","minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null},
+			reasoningCapabilities: {"control":"effort","levels":{"off":"none","minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":null}},
+			input: ["text", "image"],
+			cost: {
+				input: 3,
+				output: 3,
+				cacheRead: 0.3,
+				cacheWrite: 0,
+			},
+			contextWindow: 262144,
+			maxTokens: 262134,
+		} satisfies Model<"openai-responses">,
+		"abliterated-model-large": {
+			id: "abliterated-model-large",
+			name: "Abliterated Model Large",
+			api: "openai-responses",
+			provider: "abliteration",
+			baseUrl: "https://api.abliteration.ai/v1",
+			reasoning: true,
+			thinkingLevelMap: {"off":"none","minimal":"high","low":"high","medium":"high","high":"high","xhigh":"max","max":"max"},
+			reasoningCapabilities: {"control":"effort","levels":{"off":"none","minimal":"high","low":"high","medium":"high","high":"high","xhigh":"max","max":"max"}},
+			input: ["text"],
+			cost: {
+				input: 5,
+				output: 5,
+				cacheRead: 0.5,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 999990,
+		} satisfies Model<"openai-responses">,
+		"abliterated-model-large-v2": {
+			id: "abliterated-model-large-v2",
+			name: "Abliterated Model Large V2",
+			api: "openai-responses",
+			provider: "abliteration",
+			baseUrl: "https://api.abliteration.ai/v1",
+			reasoning: true,
+			thinkingLevelMap: {"off":"none","minimal":"low","low":"low","medium":"high","high":"high","xhigh":"max","max":"max"},
+			reasoningCapabilities: {"control":"effort","levels":{"off":"none","minimal":"low","low":"low","medium":"high","high":"high","xhigh":"max","max":"max"}},
+			input: ["text"],
+			cost: {
+				input: 5,
+				output: 5,
+				cacheRead: 0.5,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 999990,
+			featured: true,
+		} satisfies Model<"openai-responses">,
+	},
 	"amazon-bedrock": {
 		"amazon.nova-2-lite-v1:0": {
 			id: "amazon.nova-2-lite-v1:0",

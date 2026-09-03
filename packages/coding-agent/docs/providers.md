@@ -144,6 +144,12 @@ audn.ai is an OpenAI-compatible API at `https://platform.audn.ai/api/v1`. Set `A
 
 See [https://platform.audn.ai/docs](https://platform.audn.ai/docs).
 
+### abliteration.ai
+
+abliteration.ai is an OpenAI Responses-compatible API at `https://api.abliteration.ai/v1`. Set `ABLITERATION_API_KEY` or store a key under `abliteration` via `/login`. Keys start with `ak_`; get one at [https://abliteration.ai](https://abliteration.ai). The default model is `abliterated-model-large-v2`. All three models reason by default (`/effort` maps to `reasoning.effort`): `abliterated-model` (262K context, text+image, `none`–`xhigh`), `abliterated-model-large-v2` (1M context, text-only, native `low` / `high` / `max`), and `abliterated-model-large` (1M context, text-only, native `high` / `max`).
+
+See [https://docs.abliteration.ai](https://docs.abliteration.ai).
+
 ### OrcaRouter
 
 OrcaRouter is an OpenAI-compatible router at `https://api.orcarouter.ai/v1`. Set `ORCAROUTER_API_KEY` (fallback `ORCA_KEY`) or store a key under `orcarouter` via `/login`. Keys start with `sk-orca-`; get one at [https://www.orcarouter.ai](https://www.orcarouter.ai). The default model is `orcarouter/auto`.

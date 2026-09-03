@@ -1,0 +1,1 @@
+- Added abliteration.ai provider (`abliteration`, `https://api.abliteration.ai/v1`) with `abliterated-model-large-v2` (1M context, `low` / `high` / `max` effort), `abliterated-model-large` (1M context, `high` / `max` effort), and `abliterated-model` (262K context, text+image) over the OpenAI Responses API via `ABLITERATION_API_KEY`.

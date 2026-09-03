@@ -197,6 +197,18 @@ describe("AI Providers Abort Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ABLITERATION_API_KEY)("abliteration.ai Provider Abort", () => {
+		const llm = getModel("abliteration", "abliterated-model-large-v2");
+
+		it("should abort mid-stream", { retry: 3 }, async () => {
+			await testAbortSignal(llm);
+		});
+
+		it("should handle immediate abort", { retry: 3 }, async () => {
+			await testImmediateAbort(llm);
+		});
+	});
+
 	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider Abort", () => {
 		const llm = getModel("xiaomi", "mimo-v2.5-pro");
 
