@@ -260,7 +260,10 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Strea
 	}
 }
 
-async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
+async function multiTurn<TApi extends Api>(
+	model: Model<TApi>,
+	options?: StreamOptionsWithExtras,
+): Promise<{ hasSeenThinking: boolean; hasSeenToolCalls: boolean }> {
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant that can use tools to answer questions.",
 		messages: [
@@ -332,6 +335,8 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamO
 	expect(allTextContent).toBeTruthy();
 	expect(allTextContent.includes("714")).toBe(true);
 	expect(allTextContent.includes("887")).toBe(true);
+
+	return { hasSeenThinking, hasSeenToolCalls };
 }
 
 describe("Generate E2E Tests", () => {
@@ -668,7 +673,9 @@ describe("Generate E2E Tests", () => {
 			});
 
 			it("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
-				await multiTurn(llm, { reasoningEffort: "high" });
+				const { hasSeenThinking, hasSeenToolCalls } = await multiTurn(llm, { reasoningEffort: "high" });
+				expect(hasSeenThinking).toBe(true);
+				expect(hasSeenToolCalls).toBe(true);
 			});
 		},
 	);
