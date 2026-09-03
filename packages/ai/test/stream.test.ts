@@ -260,7 +260,10 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Strea
 	}
 }
 
-async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
+async function multiTurn<TApi extends Api>(
+	model: Model<TApi>,
+	options?: StreamOptionsWithExtras,
+): Promise<{ hasSeenThinking: boolean; hasSeenToolCalls: boolean }> {
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant that can use tools to answer questions.",
 		messages: [
@@ -332,6 +335,8 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamO
 	expect(allTextContent).toBeTruthy();
 	expect(allTextContent.includes("714")).toBe(true);
 	expect(allTextContent.includes("887")).toBe(true);
+
+	return { hasSeenThinking, hasSeenToolCalls };
 }
 
 describe("Generate E2E Tests", () => {
@@ -641,6 +646,39 @@ describe("Generate E2E Tests", () => {
 			await multiTurn(llm);
 		});
 	});
+
+	describe.skipIf(!process.env.ABLITERATION_API_KEY)(
+		"abliteration.ai Provider (abliterated-model-large-v2 via OpenAI Responses)",
+		() => {
+			const llm = getModel("abliteration", "abliterated-model-large-v2");
+
+			it("should complete basic text generation", { retry: 3 }, async () => {
+				await basicTextGeneration(llm);
+			});
+
+			it("should handle tool calling", { retry: 3 }, async () => {
+				await handleToolCall(llm);
+			});
+
+			it("should handle streaming", { retry: 3 }, async () => {
+				await handleStreaming(llm);
+			});
+
+			it("should handle thinking mode", { retry: 3 }, async () => {
+				await handleThinking(llm, { reasoningEffort: "high" });
+			});
+
+			it("should handle multi-turn with tools", { retry: 3 }, async () => {
+				await multiTurn(llm);
+			});
+
+			it("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+				const { hasSeenThinking, hasSeenToolCalls } = await multiTurn(llm, { reasoningEffort: "high" });
+				expect(hasSeenThinking).toBe(true);
+				expect(hasSeenToolCalls).toBe(true);
+			});
+		},
+	);
 
 	describe.skipIf(!hasCloudflareWorkersAICredentials())(
 		"Cloudflare Workers AI Provider (Kimi K2.6 via OpenAI Completions)",

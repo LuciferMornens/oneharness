@@ -143,6 +143,14 @@ describe("Tool Call Without Result Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ABLITERATION_API_KEY)("abliteration.ai Provider", () => {
+		const model = getModel("abliteration", "abliterated-model-large-v2");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model);
+		});
+	});
+
 	describe.skipIf(!process.env.GROQ_API_KEY)("Groq Provider", () => {
 		const model = getModel("groq", "openai/gpt-oss-20b");
 

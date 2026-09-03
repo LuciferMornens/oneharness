@@ -314,6 +314,10 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider.audn).toBe("necromicon");
 	});
 
+	test("abliteration defaults to abliterated-model-large-v2", () => {
+		expect(defaultModelPerProvider.abliteration).toBe("abliterated-model-large-v2");
+	});
+
 	test("ai-gateway default tracks current model", () => {
 		expect(defaultModelPerProvider["vercel-ai-gateway"]).toBe("zai/glm-5.1");
 	});

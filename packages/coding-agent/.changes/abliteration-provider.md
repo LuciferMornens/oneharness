@@ -1,0 +1,1 @@
+- Added abliteration.ai provider (`abliterated-model-large-v2` default) to the model catalog via `ABLITERATION_API_KEY`.

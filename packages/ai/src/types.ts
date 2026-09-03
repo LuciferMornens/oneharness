@@ -20,6 +20,7 @@ export type Api = KnownApi | (string & {});
 export type KnownProvider =
 	| "amazon-bedrock"
 	| "anthropic"
+	| "abliteration"
 	| "audn"
 	| "google"
 	| "google-vertex"

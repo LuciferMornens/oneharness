@@ -2812,6 +2812,85 @@ function getAudnModels(): Model<"openai-completions">[] {
 	];
 }
 
+function getAbliterationModels(): Model<"openai-responses">[] {
+	const baseUrl = "https://api.abliteration.ai/v1";
+	return [
+		{
+			id: "abliterated-model",
+			name: "Abliterated Model",
+			api: "openai-responses",
+			provider: "abliteration",
+			baseUrl,
+			reasoning: true,
+			reasoningCapabilities: {
+				control: "effort",
+				levels: {
+					off: "none",
+					minimal: "minimal",
+					low: "low",
+					medium: "medium",
+					high: "high",
+					xhigh: "xhigh",
+					max: null,
+				},
+			},
+			input: ["text", "image"],
+			cost: { input: 3, output: 3, cacheRead: 0.3, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 262134,
+		},
+		{
+			id: "abliterated-model-large-v2",
+			name: "Abliterated Model Large V2",
+			api: "openai-responses",
+			provider: "abliteration",
+			baseUrl,
+			reasoning: true,
+			reasoningCapabilities: {
+				control: "effort",
+				levels: {
+					off: "none",
+					minimal: "low",
+					low: "low",
+					medium: "high",
+					high: "high",
+					xhigh: "max",
+					max: "max",
+				},
+			},
+			input: ["text"],
+			cost: { input: 5, output: 5, cacheRead: 0.5, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 999990,
+			featured: true,
+		},
+		{
+			id: "abliterated-model-large",
+			name: "Abliterated Model Large",
+			api: "openai-responses",
+			provider: "abliteration",
+			baseUrl,
+			reasoning: true,
+			reasoningCapabilities: {
+				control: "effort",
+				levels: {
+					off: "none",
+					minimal: "high",
+					low: "high",
+					medium: "high",
+					high: "high",
+					xhigh: "max",
+					max: "max",
+				},
+			},
+			input: ["text"],
+			cost: { input: 5, output: 5, cacheRead: 0.5, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 999990,
+		},
+	];
+}
+
 function getOrcaRouterAutoModel(): Model<"openai-completions"> {
 	return {
 		id: "orcarouter/auto",
@@ -2837,7 +2916,12 @@ function mergeCatalogModels(allModels: Model<any>[], extra: Model<any>[]): void 
 }
 
 function mergeStaticCatalogModels(allModels: Model<any>[]): void {
-	mergeCatalogModels(allModels, [...getGrokSubscriptionModels(), ...getAudnModels(), getOrcaRouterAutoModel()]);
+	mergeCatalogModels(allModels, [
+		...getGrokSubscriptionModels(),
+		...getAudnModels(),
+		...getAbliterationModels(),
+		getOrcaRouterAutoModel(),
+	]);
 }
 
 async function generateModels() {
@@ -3447,6 +3531,7 @@ async function generateModels() {
 	// xAI Grok subscription models (OAuth via the Grok CLI proxy)
 	allModels.push(...getGrokSubscriptionModels());
 	allModels.push(...getAudnModels());
+	allModels.push(...getAbliterationModels());
 
 	// Add missing Grok models
 	if (!allModels.some(m => m.provider === "xai" && m.id === "grok-code-fast-1")) {
