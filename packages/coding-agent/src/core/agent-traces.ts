@@ -1086,11 +1086,7 @@ class AgentTraceUploadController {
 		// so an entry pruned by a racing catch-up is re-registered.
 		if (this.options.settingsManager.getAgentTracesEnabled()) {
 			const sessionFile = this.sessionManager.getSessionFile();
-			if (
-				sessionFile &&
-				!locallyManagedSessionFiles.has(sessionFile) &&
-				markAgentTraceOutboxPendingSync(sessionFile)
-			) {
+			if (sessionFile && markAgentTraceOutboxPendingSync(sessionFile)) {
 				locallyManagedSessionFiles.add(sessionFile);
 			}
 			const ledgerPath = this.options.semanticEdgesLedgerPath;

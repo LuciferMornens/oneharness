@@ -1,0 +1,1 @@
+- Fixed agent-trace outbox registration re-running on every persist so an entry pruned by a racing catch-up is re-registered.
