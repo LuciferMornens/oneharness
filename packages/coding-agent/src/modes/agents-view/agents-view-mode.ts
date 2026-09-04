@@ -44,6 +44,7 @@ import {
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
 import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
@@ -73,6 +74,7 @@ import {
 	type AgentsViewSelectionKey,
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
+	computeRecursiveCosts,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -1285,6 +1287,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
 		);
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
@@ -1998,7 +2001,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private async killSubagent(pending: PendingKillSubagent, currentRow: AgentsViewRow): Promise<void> {
-		const running = currentRow.section === "running";
+		const running = hasLiveWork(currentRow);
 		const client = this.requireClient();
 		this.setStatusMessage(running ? "Stopping subagent..." : "Deleting subagent...");
 		try {
@@ -2064,7 +2067,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.showDeleteConfirmation();
 			return;
 		}
-		if (!isRunningSessionSummary(row.summary)) {
+		if (!hasLiveWork(row)) {
 			this.pendingDeleteAgent = {
 				identity,
 				activeSessionId,
@@ -2220,6 +2223,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
 		);
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
@@ -2577,7 +2581,8 @@ export class AgentsViewMode implements Component, Focusable {
 		if (row.kind === "subagent-summary") {
 			const indent = "  ".repeat(row.depth);
 			const hint = row.hasSpawnCode ? theme.fg("dim", ` · ${keyText("app.agents.program")} show program`) : "";
-			const label = `${theme.fg("dim", `${row.expanded ? "▾" : "▸"} ${row.title}`)}${hint}`;
+			const titleColor = row.runningSubagentCount > 0 ? ("success" as const) : ("dim" as const);
+			const label = `${theme.fg(titleColor, `${row.expanded ? "▾" : "▸"} ${row.title}`)}${hint}`;
 			const line = padLine(truncateToWidth(`${indent}${label}`, width, ""), width);
 			return selected ? `${SELECTED_ROW_MARKER}${line}` : line;
 		}
@@ -2587,10 +2592,12 @@ export class AgentsViewMode implements Component, Focusable {
 		const icon = this.formatRowIcon(row.section, rawIcon);
 		const indent = "  ".repeat(row.depth);
 		const age = formatSessionDuration(row.summary);
-		const details = row.section === "inactive" ? `${row.summary.messageCount} · ${age}` : age;
-		const detailsWidth = row.section === "inactive" ? Math.max(10, visibleWidth(details)) : 10;
+		const usageText = formatRowUsage(row);
+		const details = usageText ? `${usageText} · ${age}` : age;
+		const detailsWidth = Math.max(10, visibleWidth(details));
 		const heartbeatBadge = !pendingDelete && !pendingKill ? formatHeartbeatBadge(row.heartbeat) : "";
-		const heartbeatCell = heartbeatBadge ? theme.fg("error", heartbeatBadge) : "";
+		const heartbeatPausedOnly = (row.heartbeat?.activeCount ?? 0) < 1;
+		const heartbeatCell = heartbeatBadge ? theme.fg(heartbeatPausedOnly ? "dim" : "error", heartbeatBadge) : "";
 		const heartbeatWidth = visibleWidth(heartbeatBadge);
 		const titleWidth = Math.max(
 			0,
@@ -2601,10 +2608,12 @@ export class AgentsViewMode implements Component, Focusable {
 				2 -
 				(heartbeatWidth > 0 ? heartbeatWidth + 1 : 0),
 		);
+		const armedHeartbeat = row.summary.hasActiveHeartbeat === true || (row.heartbeat?.activeCount ?? 0) > 0;
+		const heartbeatWarning = armedHeartbeat ? "has an armed heartbeat — " : "";
 		const title = pendingDelete
-			? this.getPendingDeleteTitle()
+			? `${heartbeatWarning}${this.getPendingDeleteTitle()}`
 			: pendingKill
-				? `${keyText("app.agents.delete")} again to ${row.section === "running" ? "stop" : "delete"}`
+				? `${heartbeatWarning}${keyText("app.agents.delete")} again to ${hasLiveWork(row) ? "stop" : "delete"}`
 				: styleRowTitle(row);
 		// Keep stable model information ahead of the variable summary so narrow rows truncate the summary first.
 		const summaryText = !pendingDelete && !pendingKill ? row.summary.summary : undefined;
@@ -2866,8 +2875,16 @@ function rowHasSpawnCode(row: AgentsViewRow): boolean {
 	return typeof code === "string" && code.trim().length > 0;
 }
 
-function isRunningSessionSummary(summary: SessionSummary): boolean {
-	return summary.activity === "working";
+// Destructive actions gate on live work anywhere in the subtree, never on the display section.
+function hasLiveWork(row: AgentsViewRow): boolean {
+	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
+}
+
+function formatRowUsage(row: AgentsViewRow): string {
+	const usage = row.summary.usage;
+	return `↑${formatTokenCount(usage?.inputTokens ?? 0)} ↓${formatTokenCount(usage?.outputTokens ?? 0)} · $${(
+		usage?.cost ?? 0
+	).toFixed(2)} ($${row.recursiveCost.toFixed(2)} w/ subagents)`;
 }
 
 // Explicit session names read bold so they stand out from fallback titles

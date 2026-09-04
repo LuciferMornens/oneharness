@@ -258,9 +258,14 @@ export class McpManager {
 		return handlers;
 	}
 
-	/** Enabled persistent and session-scoped servers available through the generic kernel API. */
-	getEnabledGenericServers(): string[] {
-		const servers = Array.from(this.integrations.values())
+	/** Session-scoped servers supplied by the active ACP client. */
+	getAcpServers(): AcpMcpServerConfig[] {
+		return [...this.acpServers.values()];
+	}
+
+	/** Enabled user-declared servers available through the generic kernel API. */
+	getEnabledPersistentGenericServers(): string[] {
+		return Array.from(this.integrations.values())
 			.filter(
 				(integration) =>
 					integration.userDeclared &&
@@ -268,9 +273,8 @@ export class McpManager {
 					!getCatalogEntry(integration.server) &&
 					this.isAuthed(integration),
 			)
-			.map((integration) => integration.server);
-		for (const server of this.acpServers.keys()) servers.push(server);
-		return [...new Set(servers)].sort((left, right) => left.localeCompare(right));
+			.map((integration) => integration.server)
+			.sort((left, right) => left.localeCompare(right));
 	}
 
 	/** Status for the /mcp list command. */
