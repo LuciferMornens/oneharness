@@ -1362,11 +1362,13 @@ describe("daemon supervisor resident workers", () => {
 		expect(listed.success).toBe(true);
 		expect(requireSessionList(listed.success ? listed.data : undefined)).toEqual([]);
 
+		// The discard itself stops the worker; the daemon shutdown below must not be what reaps it.
+		await waitForProcessGone(draft.workerPid);
+		workerPids.delete(draft.workerPid);
+
 		await client.request({ type: "shutdown" });
 		client.close();
 		await waitForSocketGone(socketPath);
-		await waitForProcessGone(draft.workerPid);
-		workerPids.delete(draft.workerPid);
 	}, 60_000);
 
 	it("hosts resident roots in isolated worker processes without a session cap", {

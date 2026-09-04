@@ -577,6 +577,50 @@ describe("AgentsViewMode", () => {
 		runView.mockRestore();
 	});
 
+	it("still resumes by file when returning to a named chat whose file vanished", async () => {
+		const named = summary({
+			id: "named-active",
+			activeSessionId: "named-active",
+			sessionId: "named-session",
+			sessionName: "keep me",
+			sessionFile: "/tmp/definitely-missing/named.jsonl",
+			messageCount: 0,
+		});
+		const runView = vi
+			.spyOn(AgentsViewMode.prototype, "run")
+			.mockResolvedValueOnce({ type: "open", summary: named, returnToChat: true })
+			.mockImplementationOnce(function (this: AgentsViewMode) {
+				const state = (this as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
+				expect(state.statusMessage).toContain("Failed to open agent");
+				return Promise.resolve({ type: "exit" });
+			});
+		vi.mocked(DaemonAgentConnection.attach).mockRejectedValueOnce(new Error("Unknown active session: named-active"));
+		modeMocks.clientRequest.mockImplementation(async (command: { type: string; sessionPath?: string }) => {
+			if (command.type === "create" && command.sessionPath) throw new Error("No session found");
+			throw new Error(`unexpected command ${command.type}`);
+		});
+
+		await runAgentsViewMode({
+			socketPath: "/tmp/fake-daemon.sock",
+			config: { cwd: "/tmp" } as never,
+			uiServices: {
+				settingsManager: settingsManager as never,
+				modelRegistry: {} as never,
+				getInitialCwd: () => "/tmp",
+				getInitialSessionName: () => undefined,
+				getThemes: () => [],
+			},
+		});
+
+		expect(modeMocks.clientRequest).toHaveBeenCalledOnce();
+		expect(modeMocks.clientRequest).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "create", sessionPath: named.sessionFile }),
+		);
+		expect(modeMocks.interactiveRun).not.toHaveBeenCalled();
+		modeMocks.clientRequest.mockReset();
+		runView.mockRestore();
+	});
+
 	it("still fails a picked row whose file vanished instead of replacing it with a fresh chat", async () => {
 		const gone = summary({
 			id: "gone-active",

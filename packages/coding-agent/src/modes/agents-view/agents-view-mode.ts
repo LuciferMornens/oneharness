@@ -362,9 +362,11 @@ async function openAgentsViewSession(
 
 	try {
 		// A never-used chat is discarded by the daemon once the user leaves it for
-		// the view, so returning to it opens a fresh chat instead of failing.
+		// the view, so returning to it opens a fresh chat instead of failing. Named
+		// drafts are never discarded, so a missing named file is a real failure.
+		// messageCount is not consulted: it is stale after an in-place /new swap.
 		const resumed =
-			openOptions.returnToChat && !existsSync(summary.sessionFile)
+			openOptions.returnToChat && !summary.sessionName && !existsSync(summary.sessionFile)
 				? await createReplacementAgentsViewSession(client, options.config, summary)
 				: await resumeSavedAgentsViewSession(client, options.config, summary);
 		const connection = await DaemonAgentConnection.attach(client, resumed.activeSessionId, {
