@@ -1350,6 +1350,25 @@ describe("agents view state", () => {
 		}
 	});
 
+	test("hides message-less saved sessions but keeps them as enrichment for live rows", () => {
+		const draft = makeSessionInfo({ path: "/tmp/draft.jsonl", id: "draft", messageCount: 0 });
+		const namedDraft = makeSessionInfo({ path: "/tmp/named.jsonl", id: "named", messageCount: 0, name: "keep" });
+		const conversation = makeSessionInfo({ path: "/tmp/talk.jsonl", id: "talk", messageCount: 2 });
+		expect(reconcileUnifiedSessions([], [draft, namedDraft, conversation]).map((record) => record.saved?.id)).toEqual(
+			["talk"],
+		);
+
+		const live = makeSummary({
+			id: "live",
+			activeSessionId: "live",
+			sessionId: "draft",
+			sessionFile: "/tmp/draft.jsonl",
+		});
+		const [record] = reconcileUnifiedSessions([live], [draft]);
+		expect(record?.daemon).toBe(live);
+		expect(record?.saved).toBe(draft);
+	});
+
 	test("shows a fallback heartbeat count while catalog details are unavailable", () => {
 		const [record] = reconcileUnifiedSessions([makeSummary({ hasActiveHeartbeat: true })], []);
 		expect(record).toMatchObject({ section: "idle", heartbeat: { activeCount: 1 } });
@@ -1664,6 +1683,7 @@ describe("agents view state", () => {
 				summary: root,
 				expandedAncestorSessionIds: ["ancestor-session", "parent-session"],
 				hasChildren: true,
+				returnToChat: true,
 			});
 		});
 

@@ -55,6 +55,7 @@ interface SupervisorInternals {
 	updateRestartPhase?: "draining" | "fencing" | "prepared";
 	createOrReuseWorker: ReturnType<typeof vi.fn>;
 	stopWorker: ReturnType<typeof vi.fn>;
+	persistWorkerStopTombstone: ReturnType<typeof vi.fn>;
 	log: ReturnType<typeof vi.fn>;
 	scheduledWakeTimer?: ReturnType<typeof setTimeout>;
 	scheduledWakeRecompute?: Promise<void>;
@@ -518,9 +519,20 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 
-	it("evicts only abandoned empty unnamed sessions, and only on the last detach", async () => {
-		const now = Date.parse("2026-08-01T12:00:00.000Z");
+	/** Discarding a draft tombstones the worker in memory only; the fixtures have no descriptor file. */
+	function makeDetachSupervisor(): SupervisorInternals {
 		const supervisor = makeSupervisor();
+		supervisor.persistWorkerStopTombstone = vi.fn();
+		return supervisor;
+	}
+
+	function killCommand(worker: WorkerFixture) {
+		return { type: "kill", activeSessionId: worker.descriptor.rootActiveSessionId };
+	}
+
+	it("discards an abandoned empty draft, passivates a scheduled one, and only on the last detach", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeDetachSupervisor();
 		const empty = makeWorker("empty", [makeSummary("empty-root", now, { messageCount: 0 })]);
 		const heartbeat = makeWorker("heartbeat", [
 			makeSummary("heartbeat-root", now, { messageCount: 0, hasRegisteredHeartbeat: true }),
@@ -562,8 +574,13 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		expect(supervisor.stopWorker).not.toHaveBeenCalled();
 
 		await supervisor.handleCommand(viewer, { id: "detach-all", type: "detach" });
-		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(empty, true));
+		// The never-used draft is killed (the worker deletes its file) and archive-stopped.
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(empty, true, false, true));
+		expect(supervisor.persistWorkerStopTombstone).toHaveBeenCalledWith(empty, true);
+		expect(empty.client!.request).toHaveBeenCalledWith(killCommand(empty), expect.any(Number));
+		// The heartbeat draft is passivated so its durable wake can revive it.
 		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(heartbeat, true));
+		expect(heartbeat.client!.request).not.toHaveBeenCalledWith(killCommand(heartbeat), expect.any(Number));
 		await settle();
 		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
 		expect([...supervisor.workers.keys()].sort()).toEqual([
@@ -574,12 +591,33 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 			"one-message",
 			"owned",
 		]);
-		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker empty"));
+		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Discarded empty session worker empty"));
+		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker heartbeat"));
+	});
+
+	it("archive-stops the draft worker even when the forwarded kill fails", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeDetachSupervisor();
+		const worker = makeWorker("failing", [makeSummary("failing-root", now, { messageCount: 0 })]);
+		worker.client!.request.mockImplementation(async (command: { type: string }) => {
+			if (command.type === "kill") throw new Error("worker went away");
+			return success(undefined, "list", { sessions: [...worker.summaries.values()] });
+		});
+		supervisor.workers.set("failing", worker);
+		seedSupervisorRoster(supervisor, worker);
+		const client = makeDetachClient("viewer", ["failing-root"]);
+		supervisor.clients.add(client);
+
+		await supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "failing-root" });
+
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true, false, true));
+		expect(supervisor.workers.has("failing")).toBe(false);
+		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Empty-session eviction failed"));
 	});
 
 	it("evicts an empty draft when the worker reports its last direct viewer gone", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
-		const supervisor = makeSupervisor();
+		const supervisor = makeDetachSupervisor();
 		const liveSummaries = [makeSummary("draft-root", now, { messageCount: 0, directAttachedClients: 1 })];
 		const worker = makeWorker("draft", liveSummaries);
 		supervisor.workers.set("draft", worker);
@@ -591,13 +629,13 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		worker.summaries.set("draft-root", detached);
 		supervisor.writeRosterEntry(workerRosterEntryFromSummary(detached), worker);
 
-		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true));
-		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker draft"));
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true, false, true));
+		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Discarded empty session worker draft"));
 	});
 
 	it("evicts a mixed-client empty draft only when the last of both client kinds is gone", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
-		const supervisor = makeSupervisor();
+		const supervisor = makeDetachSupervisor();
 		const liveSummaries = [makeSummary("mixed-root", now, { messageCount: 0, directAttachedClients: 1 })];
 		const worker = makeWorker("mixed", liveSummaries);
 		supervisor.workers.set("mixed", worker);
@@ -614,7 +652,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		worker.summaries.set("mixed-root", detached);
 		supervisor.writeRosterEntry(workerRosterEntryFromSummary(detached), worker);
 
-		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true));
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true, false, true));
 	});
 
 	it("does not stop a worker that was replaced while its summary refresh was in flight", async () => {
@@ -683,7 +721,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 
 	it("evicts every empty draft when one client detaches from several at once", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
-		const supervisor = makeSupervisor();
+		const supervisor = makeDetachSupervisor();
 		const draftA = makeWorker("draft-a", [makeSummary("draft-a-root", now, { messageCount: 0 })]);
 		const draftB = makeWorker("draft-b", [makeSummary("draft-b-root", now, { messageCount: 0 })]);
 		supervisor.workers.set("draft-a", draftA);
@@ -700,7 +738,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 
 	it("makes a starting sweep wait for the detach fence instead of overwriting it", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
-		const supervisor = makeSupervisor();
+		const supervisor = makeDetachSupervisor();
 		// Recent activity keeps the worker out of the sweep's own idle candidates.
 		const emptySessions = () => [
 			makeSummary("gap-root", now, { messageCount: 0, lastActivityAt: new Date(now).toISOString() }),
@@ -739,7 +777,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		releaseHookList();
 		await sweep;
 		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
-		expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true);
+		expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true, false, true);
 	});
 });
 

@@ -110,6 +110,15 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 	return summary.lifecycle === "live";
 }
 
+/**
+ * Saved rows follow the same message-based lifecycle as live ones: a session
+ * nobody ever prompted is a draft, not a conversation to resume, so it never
+ * surfaces as an Inactive "(no messages)" row.
+ */
+export function shouldShowAgentsViewSavedSession(saved: AgentConnectionSavedSessionInfo): boolean {
+	return saved.messageCount > 0;
+}
+
 export function sectionTitle(section: AgentsViewSection): string {
 	switch (section) {
 		case "running":
@@ -227,6 +236,7 @@ export function reconcileUnifiedSessions(
 			for (const alias of aliases) recordByAlias.set(alias, record);
 			continue;
 		}
+		if (!shouldShowAgentsViewSavedSession(saved)) continue;
 		const inactive: UnifiedSessionRecord = {
 			saved,
 			identity: aliases[0]!,

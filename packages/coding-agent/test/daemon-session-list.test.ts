@@ -11,6 +11,8 @@ import {
 	buildRlmChildSnapshots,
 	buildSessionList,
 	hasLiveResidentSessionFile,
+	isDiscardableEmptySessionSummary,
+	isEvictableEmptySessionSummary,
 	resolveAttachModelFallbackMessage,
 	type SessionSummary,
 	summaryForActiveSession,
@@ -646,6 +648,46 @@ describe("hasLiveResidentSessionFile", () => {
 				{ activeSessionId: "other-live", sessionFile: "/tmp/other.jsonl" },
 			]),
 		).toBe(false);
+	});
+});
+
+describe("empty session eviction summaries", () => {
+	function emptySummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+		return {
+			id: "empty",
+			activeSessionId: "empty",
+			lifecycle: "draft",
+			activity: "idle",
+			isSessionActive: false,
+			sessionId: "empty-session",
+			cwd: "/tmp/project",
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			messageCount: 0,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			...overrides,
+		};
+	}
+
+	it("discards only an unnamed, idle, message-less session with nothing scheduled against it", () => {
+		expect(isDiscardableEmptySessionSummary(emptySummary())).toBe(true);
+		for (const overrides of [
+			{ messageCount: 1 },
+			{ sessionName: "keep" },
+			{ isSessionActive: true },
+			{ hasRunningRlmChildren: true },
+			{ hasRegisteredCronJob: true },
+		] satisfies Partial<SessionSummary>[]) {
+			expect(isEvictableEmptySessionSummary(emptySummary(overrides))).toBe(false);
+			expect(isDiscardableEmptySessionSummary(emptySummary(overrides))).toBe(false);
+		}
+	});
+
+	it("passivates rather than discards an empty session that a heartbeat can wake", () => {
+		const scheduled = emptySummary({ hasRegisteredHeartbeat: true });
+		expect(isEvictableEmptySessionSummary(scheduled)).toBe(true);
+		expect(isDiscardableEmptySessionSummary(scheduled)).toBe(false);
 	});
 });
 

@@ -118,6 +118,7 @@ import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
 	classifySessionRosterStatus,
 	hasLiveResidentSessionFile,
+	isDiscardableEmptySessionSummary,
 	isEvictableEmptySessionSummary,
 	isSessionSummaryBusy,
 	type SessionSummary,
@@ -1213,17 +1214,6 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private async passivateWorkerIfStillEligible(
-		worker: ResidentWorker,
-		isStillEligible: () => boolean,
-		describeEvicted: () => string,
-	): Promise<void> {
-		await this.refreshWorkerSummaries(worker, false, true);
-		if (!isStillEligible()) return;
-		await this.stopWorker(worker, true);
-		this.log(describeEvicted());
-	}
-
 	private async evictEmptySessionOnLastDetach(activeSessionId: string): Promise<void> {
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		const worker = this.matchWorkers(activeSessionId)[0]?.worker;
@@ -1241,23 +1231,41 @@ export class DaemonSupervisor {
 		} catch {
 			return;
 		}
-		if (!this.isEmptyDetachEvictionCandidate(worker)) return;
+		if (this.emptyDetachEvictionDisposition(worker) === undefined) return;
 		try {
 			// Idle-sweep coordination: fence new mutations, drain admitted ones, re-read before deciding.
-			await this.withEvictionFence("Timed out draining daemon mutations for empty-session eviction", () =>
-				this.passivateWorkerIfStillEligible(
-					worker,
-					() => this.isEmptyDetachEvictionCandidate(worker),
-					() =>
-						`Evicted empty session worker ${worker.descriptor.workerId} root=${worker.descriptor.rootSessionId ?? worker.descriptor.rootActiveSessionId} on last client detach`,
-				),
-			);
+			await this.withEvictionFence("Timed out draining daemon mutations for empty-session eviction", async () => {
+				await this.refreshWorkerSummaries(worker, false, true);
+				const disposition = this.emptyDetachEvictionDisposition(worker);
+				if (disposition === undefined) return;
+				const root = worker.descriptor.rootSessionId ?? worker.descriptor.rootActiveSessionId;
+				if (disposition === "discard") {
+					// An abandoned draft is killed, not passivated: the worker deletes a
+					// never-used session file and archives one that carries user config,
+					// so neither lingers as a "(no messages)" resume entry.
+					await this.killWorkerRoot(worker, {
+						type: "kill",
+						activeSessionId: worker.descriptor.rootActiveSessionId,
+					});
+					this.log(
+						`Discarded empty session worker ${worker.descriptor.workerId} root=${root} on last client detach`,
+					);
+					return;
+				}
+				await this.stopWorker(worker, true);
+				this.log(`Evicted empty session worker ${worker.descriptor.workerId} root=${root} on last client detach`);
+			});
 		} catch (error) {
 			this.log(`Empty-session eviction failed for worker ${worker.descriptor.workerId}: ${String(error)}`);
 		}
 	}
 
-	private isEmptyDetachEvictionCandidate(worker: ResidentWorker): boolean {
+	/**
+	 * How an empty worker leaves memory once its last client is gone: a draft with a
+	 * schedule behind it is passivated so the durable wake can revive it; one with
+	 * nothing behind it is discarded. Undefined when the worker must stay resident.
+	 */
+	private emptyDetachEvictionDisposition(worker: ResidentWorker): "discard" | "passivate" | undefined {
 		if (
 			this.shuttingDown ||
 			this.updateRestartPhase !== undefined ||
@@ -1265,7 +1273,7 @@ export class DaemonSupervisor {
 			this.isWorkerStopping(worker) ||
 			this.isWakeBlindScheduledWorker(worker)
 		) {
-			return false;
+			return undefined;
 		}
 		const summaries = this.workerRosterEntries(worker)
 			.filter((entry) => !entry.queuedChild)
@@ -1273,7 +1281,34 @@ export class DaemonSupervisor {
 		const hasAttachedClient = summaries.some(
 			(summary) => this.attachedClientCount(summary, summary.activeSessionId ?? summary.id) > 0,
 		);
-		return summaries.length > 0 && !hasAttachedClient && summaries.every(isEvictableEmptySessionSummary);
+		if (summaries.length === 0 || hasAttachedClient || !summaries.every(isEvictableEmptySessionSummary)) {
+			return undefined;
+		}
+		return summaries.every(isDiscardableEmptySessionSummary) ? "discard" : "passivate";
+	}
+
+	/**
+	 * Root kill: tombstone and hold stop ownership before forwarding, because the
+	 * worker's session_closed event may arrive before its reply, then archive-stop
+	 * the worker whether or not the forwarded kill succeeded.
+	 */
+	private async killWorkerRoot(
+		worker: ResidentWorker,
+		command: Extract<DaemonCommand, { type: "kill" }>,
+	): Promise<DaemonResponse> {
+		this.persistWorkerStopTombstone(worker, true);
+		const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
+		let response: DaemonResponse;
+		try {
+			response = await this.forwardToWorker(worker, command);
+		} finally {
+			try {
+				await this.stopWorker(worker, true, false, true);
+			} finally {
+				releaseStopOwnership();
+			}
+		}
+		return response;
 	}
 
 	private async assertCurrentOwnership(): Promise<void> {
@@ -1415,6 +1450,7 @@ export class DaemonSupervisor {
 	}
 
 	private hasPersistedWorkerDescriptors(): boolean {
+		if (!existsSync(this.descriptorDir)) return false;
 		return readdirSync(this.descriptorDir).some(
 			(name) => name !== SUPERVISOR_CONFIG_FILE_NAME && name.endsWith(".json"),
 		);
@@ -2653,19 +2689,7 @@ export class DaemonSupervisor {
 				}
 				return await forward();
 			}
-			this.persistWorkerStopTombstone(match.worker, true);
-			const releaseStopOwnership = this.acquireWorkerStopOwnership(match.worker);
-			let response: DaemonResponse;
-			try {
-				response = await this.forwardToWorker(match.worker, resolvedCommand);
-			} finally {
-				try {
-					await this.stopWorker(match.worker, true, false, true);
-				} finally {
-					releaseStopOwnership();
-				}
-			}
-			return response;
+			return await this.killWorkerRoot(match.worker, resolvedCommand as Extract<DaemonCommand, { type: "kill" }>);
 		} finally {
 			if (admission) this.deletePromptAdmission(admission);
 		}

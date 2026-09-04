@@ -1,0 +1,2 @@
+- Fixed abandoned empty chats piling up as "(no messages)" rows in the agents view: a never-used session is now discarded (file and artifacts removed) when its last client detaches, the agents view no longer lists message-less saved sessions as Inactive, and Escape from the agents view opens a fresh chat when the draft it came from was discarded. Restart the daemon after updating so the new behavior takes effect.
+- Fixed the daemon supervisor failing to start on a fresh install when no worker descriptor directory exists yet.
