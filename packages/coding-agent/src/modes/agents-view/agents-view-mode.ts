@@ -149,6 +149,8 @@ export type AgentsViewRunResult =
 			expandedAncestorSessionIds?: string[];
 			hasChildren?: boolean;
 			statusMessage?: string;
+			/** Set when the user returns to the chat they came from rather than picking a row. */
+			returnToChat?: boolean;
 	  };
 export type AgentsViewPersistentState = {
 	selectedRowIdentity?: string;
@@ -304,6 +306,7 @@ export function createScopeBackReturnChatOpenResult(
 		summary: result.returnChat,
 		expandedAncestorSessionIds: result.expandedAncestorSessionIds,
 		hasChildren: result.hasChildren,
+		returnToChat: true,
 	};
 }
 
@@ -329,6 +332,7 @@ export function resolveAgentsViewOpenCwd(
 async function openAgentsViewSession(
 	options: AgentsViewModeOptions,
 	summary: SessionSummary,
+	openOptions: { returnToChat?: boolean } = {},
 ): Promise<OpenedAgentsViewSession> {
 	const socketPath = options.socketPath;
 	if (!socketPath) throw new Error("Agents view daemon socket is not configured");
@@ -357,7 +361,12 @@ async function openAgentsViewSession(
 	}
 
 	try {
-		const resumed = await resumeSavedAgentsViewSession(client, options.config, summary);
+		// A never-used chat is discarded by the daemon once the user leaves it for
+		// the view, so returning to it opens a fresh chat instead of failing.
+		const resumed =
+			openOptions.returnToChat && !existsSync(summary.sessionFile)
+				? await createReplacementAgentsViewSession(client, options.config, summary)
+				: await resumeSavedAgentsViewSession(client, options.config, summary);
 		const connection = await DaemonAgentConnection.attach(client, resumed.activeSessionId, {
 			closeClientOnDispose: true,
 			recoverDaemon: options.recoverDaemon,
@@ -369,6 +378,27 @@ async function openAgentsViewSession(
 		client.close();
 		throw error;
 	}
+}
+
+/** Open a new empty session in the discarded draft's directory. */
+async function createReplacementAgentsViewSession(
+	client: DaemonClient,
+	config: AgentSessionRuntimeConfig,
+	summary: SessionSummary,
+): Promise<{ summary: SessionSummary; activeSessionId: string; cwdFallbackNotice?: string }> {
+	const { overrideCwd, notice } = resolveAgentsViewOpenCwd(summary, config.cwd);
+	const cwd = overrideCwd ?? (summary.cwd || config.cwd);
+	const response = await client.request({
+		type: "create",
+		config: cwd ? { ...config, cwd } : config,
+		env: collectDaemonClientEnv(),
+	});
+	const createdSummary = expectSessionSummary(requireDaemonData(response));
+	return {
+		summary: createdSummary,
+		activeSessionId: getRequiredActiveSessionId(createdSummary),
+		cwdFallbackNotice: notice,
+	};
 }
 
 /**
@@ -467,7 +497,7 @@ async function runAgentsViewLoop(
 
 		let opened: OpenedAgentsViewSession | undefined;
 		try {
-			opened = await openAgentsViewSession(options, result.summary);
+			opened = await openAgentsViewSession(options, result.summary, { returnToChat: result.returnToChat });
 			persistentState.backSession = opened.summary;
 			if (opened.cwdFallbackNotice) {
 				persistentState.statusMessage = combineAgentsViewStartupNotices(
@@ -818,6 +848,7 @@ export class AgentsViewMode implements Component, Focusable {
 									getAgentsViewSelectionKey(backSession),
 									this.unifiedIndex,
 								),
+								returnToChat: true,
 							}
 						: { type: "exit" },
 				);

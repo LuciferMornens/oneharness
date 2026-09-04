@@ -29,7 +29,7 @@ const modeMocks = vi.hoisted(() => ({
 	teardownSessionUi: vi.fn(async () => undefined),
 	dispose: vi.fn(async () => undefined),
 	connectionPrompt: vi.fn(async () => undefined),
-	clientRequest: vi.fn<() => Promise<unknown>>(),
+	clientRequest: vi.fn<(command: { type: string; sessionPath?: string }) => Promise<unknown>>(),
 }));
 
 vi.mock("../src/config.js", async (importOriginal) => {
@@ -510,6 +510,112 @@ describe("AgentsViewMode", () => {
 			opened.activeSessionId,
 			expect.objectContaining({ telemetryDisabled: true }),
 		);
+		runView.mockRestore();
+	});
+
+	it("opens a fresh chat in the draft's directory when returning to a draft the daemon discarded", async () => {
+		const draft = summary({
+			id: "draft-active",
+			activeSessionId: "draft-active",
+			sessionId: "draft-session",
+			sessionFile: "/tmp/definitely-missing/draft.jsonl",
+			cwd: "/tmp",
+			messageCount: 0,
+		});
+		const fresh = summary({ id: "fresh-active", activeSessionId: "fresh-active", sessionId: "fresh-session" });
+		const runView = vi
+			.spyOn(AgentsViewMode.prototype, "run")
+			.mockResolvedValueOnce({ type: "open", summary: draft, returnToChat: true })
+			.mockImplementationOnce(function (this: AgentsViewMode) {
+				const state = (this as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
+				expect(state.backSession).toMatchObject({ sessionId: fresh.sessionId });
+				expect(state.statusMessage).toBeUndefined();
+				return Promise.resolve({ type: "exit" });
+			});
+		vi.mocked(DaemonAgentConnection.attach).mockRejectedValueOnce(new Error("Unknown active session: draft-active"));
+		modeMocks.clientRequest.mockImplementation(async (command: { type: string }) => {
+			if (command.type === "create") return { success: true, data: fresh };
+			throw new Error(`unexpected command ${command.type}`);
+		});
+		modeMocks.interactiveRun.mockResolvedValueOnce({
+			type: "agents_view",
+			source: {
+				activeSessionId: fresh.activeSessionId,
+				sessionFile: fresh.sessionFile,
+				sessionId: fresh.sessionId,
+				sessionName: fresh.sessionName,
+				cwd: fresh.cwd,
+			},
+		} as never);
+
+		await runAgentsViewMode({
+			socketPath: "/tmp/fake-daemon.sock",
+			config: { cwd: "/tmp/elsewhere" } as never,
+			initialSession: draft,
+			uiServices: {
+				settingsManager: settingsManager as never,
+				modelRegistry: {} as never,
+				getInitialCwd: () => "/tmp",
+				getInitialSessionName: () => undefined,
+				getThemes: () => [],
+			},
+		});
+
+		expect(modeMocks.clientRequest).toHaveBeenCalledOnce();
+		expect(modeMocks.clientRequest).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "create", config: expect.objectContaining({ cwd: "/tmp" }) }),
+		);
+		expect(modeMocks.clientRequest).not.toHaveBeenCalledWith(
+			expect.objectContaining({ sessionPath: expect.anything() }),
+		);
+		expect(DaemonAgentConnection.attach).toHaveBeenLastCalledWith(
+			expect.anything(),
+			fresh.activeSessionId,
+			expect.anything(),
+		);
+		modeMocks.clientRequest.mockReset();
+		runView.mockRestore();
+	});
+
+	it("still fails a picked row whose file vanished instead of replacing it with a fresh chat", async () => {
+		const gone = summary({
+			id: "gone-active",
+			activeSessionId: "gone-active",
+			sessionId: "gone-session",
+			sessionFile: "/tmp/definitely-missing/gone.jsonl",
+			messageCount: 0,
+		});
+		const runView = vi
+			.spyOn(AgentsViewMode.prototype, "run")
+			.mockResolvedValueOnce({ type: "open", summary: gone })
+			.mockImplementationOnce(function (this: AgentsViewMode) {
+				const state = (this as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
+				expect(state.statusMessage).toContain("Failed to open agent");
+				return Promise.resolve({ type: "exit" });
+			});
+		vi.mocked(DaemonAgentConnection.attach).mockRejectedValueOnce(new Error("Unknown active session: gone-active"));
+		modeMocks.clientRequest.mockImplementation(async (command: { type: string; sessionPath?: string }) => {
+			if (command.type === "create" && command.sessionPath) throw new Error("No session found");
+			throw new Error(`unexpected command ${command.type}`);
+		});
+
+		await runAgentsViewMode({
+			socketPath: "/tmp/fake-daemon.sock",
+			config: { cwd: "/tmp" } as never,
+			uiServices: {
+				settingsManager: settingsManager as never,
+				modelRegistry: {} as never,
+				getInitialCwd: () => "/tmp",
+				getInitialSessionName: () => undefined,
+				getThemes: () => [],
+			},
+		});
+
+		expect(modeMocks.clientRequest).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "create", sessionPath: gone.sessionFile }),
+		);
+		expect(modeMocks.interactiveRun).not.toHaveBeenCalled();
+		modeMocks.clientRequest.mockReset();
 		runView.mockRestore();
 	});
 

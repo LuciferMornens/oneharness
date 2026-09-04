@@ -165,6 +165,14 @@ export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean
 	);
 }
 
+/**
+ * An evictable empty session with no heartbeat behind it is an abandoned draft:
+ * nothing will ever wake it, so it is discarded instead of passivated.
+ */
+export function isDiscardableEmptySessionSummary(summary: SessionSummary): boolean {
+	return isEvictableEmptySessionSummary(summary) && summary.hasRegisteredHeartbeat !== true;
+}
+
 export function buildSessionList(
 	activeSessions: readonly ActiveSessionState[],
 	savedSessions: readonly SessionInfo[],

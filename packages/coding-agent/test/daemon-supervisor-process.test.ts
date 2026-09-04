@@ -1319,6 +1319,56 @@ describe("daemon supervisor resident workers", () => {
 		);
 	}, 60_000);
 
+	it("discards a never-used draft, file and artifacts included, when its last client detaches", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const sessionDir = join(agentDir, "sessions");
+		const socketPath = testSocketPath("draft");
+		mkdirSync(projectDir, { recursive: true });
+
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const created = await client.request({
+			type: "create",
+			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+		});
+		if (!created.success) {
+			throw new Error(created.error);
+		}
+		const draft = requireSummary(created.data);
+		if (!draft.workerPid || !draft.activeSessionId || !draft.sessionFile) {
+			throw new Error("Draft session did not expose its worker, active id, and file");
+		}
+		workerPids.add(draft.workerPid);
+		// A fresh chat the user never prompted: the daemon creates its file up front.
+		expect(existsSync(draft.sessionFile)).toBe(true);
+
+		const connection = await DaemonAgentConnection.attach(client, draft.activeSessionId, {
+			supportsExtensionUi: false,
+		});
+		await connection.dispose();
+
+		await waitForCondition(
+			() => !existsSync(draft.sessionFile!),
+			`Abandoned draft file survived detach:\n${readDaemonLogs(agentDir)}`,
+		);
+		await waitForCondition(
+			() => readDaemonLogs(agentDir).includes("Discarded empty session worker"),
+			`Supervisor did not report the discard:\n${readDaemonLogs(agentDir)}`,
+		);
+		expect(existsSync(join(agentDir, "session-artifacts", draft.sessionId))).toBe(false);
+		const listed = await client.request({ type: "list", all: true });
+		expect(listed.success).toBe(true);
+		expect(requireSessionList(listed.success ? listed.data : undefined)).toEqual([]);
+
+		await client.request({ type: "shutdown" });
+		client.close();
+		await waitForSocketGone(socketPath);
+		await waitForProcessGone(draft.workerPid);
+		workerPids.delete(draft.workerPid);
+	}, 60_000);
+
 	it("hosts resident roots in isolated worker processes without a session cap", {
 		tags: ["process-stress"],
 		timeout: 180_000,
