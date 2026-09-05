@@ -40,10 +40,12 @@ except Exception as _prime_agent_rlm_error:
 
     class _PrimeAgentMissingRlm:
         def _raise_missing(self):
+            import sys as _prime_agent_sys
             raise RuntimeError(
-                "prime-agent-runtime is not installed in this kernel. "
-                "Remove the current venv under ~/.prime/agent/kernel-venvs/ so prime-agent can rebuild it, or set "
-                "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
+                f"prime-agent-runtime is not installed in this kernel ({_prime_agent_sys.executable}). "
+                "If this is a prime-agent managed venv (a kernel-venvs/ directory), remove that directory so "
+                "prime-agent can rebuild it. If PRIME_AGENT_KERNEL_VENV or PRIME_AGENT_KERNEL_PYTHON is set, "
+                "install prime-agent-runtime into that environment or unset the override. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
             )
 
