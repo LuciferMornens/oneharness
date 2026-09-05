@@ -1,0 +1,1 @@
+- Enabled `/fast` to toggle GPT-6 Astra fast mode without changing reasoning effort, while preserving saved off preferences.

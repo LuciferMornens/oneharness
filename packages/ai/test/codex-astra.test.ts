@@ -53,12 +53,17 @@ describe("GPT-6 Astra Codex subscription", () => {
 		expect(getSupportedThinkingLevels(model)).toEqual(efforts);
 	});
 
-	it.each(efforts)("sends %s reasoning unchanged with ChatGPT OAuth", async (reasoning) => {
+	it.each(
+		efforts.flatMap((reasoning) =>
+			(["priority", "default"] as const).map((serviceTier) => ({ reasoning, serviceTier })),
+		),
+	)("sends $reasoning reasoning unchanged with $serviceTier processing", async ({ reasoning, serviceTier }) => {
 		const fetchMock = mockResponses();
 		const result = await streamSimpleOpenAICodexResponses(getModel("openai-codex", "gpt-6-astra"), context, {
 			apiKey: token,
 			transport: "sse",
 			reasoning,
+			serviceTier,
 		}).result();
 
 		expect(result.stopReason).toBe("stop");
@@ -74,6 +79,7 @@ describe("GPT-6 Astra Codex subscription", () => {
 			model: "gpt-6-astra",
 			store: false,
 			stream: true,
+			service_tier: serviceTier,
 			reasoning: { effort: reasoning, summary: "auto" },
 		});
 	});

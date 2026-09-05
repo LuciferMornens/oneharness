@@ -357,6 +357,25 @@ describe("InteractiveMode /effort", () => {
 	});
 
 	describe("Fast mode", () => {
+		it.each(["low", "medium", "high", "xhigh", "max"] as const)(
+			"toggles Astra fast off and on without changing %s reasoning",
+			async (thinkingLevel) => {
+				const context = makeFastContext(testModel("openai-codex", "gpt-6-astra", "openai-codex-responses"));
+				context.connectionState = { sessionId: "session-1", serviceTier: "priority", thinkingLevel };
+				fastInteractiveModePrototype.handleFastCommand.call(context);
+				await context.fastModeToggleQueue;
+				expect(context.showStatus).toHaveBeenLastCalledWith("Fast mode: off");
+				expect(context.connectionState).toMatchObject({ serviceTier: "default", thinkingLevel });
+				fastInteractiveModePrototype.handleFastCommand.call(context);
+				await context.fastModeToggleQueue;
+				expect(context.showStatus).toHaveBeenLastCalledWith("Fast mode: on");
+				expect(context.connectionState).toMatchObject({ serviceTier: "priority", thinkingLevel });
+				expect(fastInteractiveModePrototype.getModelTrayLabel.call(context)).toBe(
+					`gpt-6-astra • ${thinkingLevel} • fast`,
+				);
+			},
+		);
+
 		it("enables Fast mode and refreshes the model tray", async () => {
 			const context = makeFastContext();
 

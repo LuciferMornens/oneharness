@@ -1,0 +1,1 @@
+- Added fast mode for GPT-6 Astra through Codex subscriptions and the OpenAI API, enabled by default unless a preference is saved or the API endpoint uses EU data residency.
