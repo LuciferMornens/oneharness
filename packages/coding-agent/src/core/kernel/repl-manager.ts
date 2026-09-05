@@ -266,7 +266,7 @@ export class ReplKernelManager {
 			throw createKernelStartupAbortError();
 		}
 		if (!this.startPromise) {
-			const startPromise = this.doStart({ onBootstrapProgress: options.onBootstrapProgress }).catch((error) => {
+			const startPromise = this.doStart(options).catch((error) => {
 				// Only clear our own memoization: a stale start must not evict a newer one.
 				if (this.startPromise === startPromise) this.startPromise = undefined;
 				throw error;
@@ -292,6 +292,7 @@ export class ReplKernelManager {
 				(await ensureKernelPython({
 					pythonSkills: this.options.pythonSkills,
 					onProgress: startOptions.onBootstrapProgress,
+					signal: startOptions.signal,
 				}));
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			this.options.python = python;

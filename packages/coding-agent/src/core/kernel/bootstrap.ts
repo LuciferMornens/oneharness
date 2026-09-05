@@ -9,6 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getPackageDir, VERSION } from "../../config.js";
+import { getCurrentProcessStartId, getProcessStartId } from "../session-lease.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 9;
@@ -54,14 +55,24 @@ const REQUIRED_HARNESS_METHODS = [
 const RUNTIME_READY_CHECK = `import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ${JSON.stringify(REQUIRED_HARNESS_METHODS)}; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert hasattr(rlm, 'run'); assert callable(rlm); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')`;
 const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
-const BOOTSTRAP_LOCK_RETRY_MS = 100;
+const BOOTSTRAP_LOCK_RETRY_MS = 250;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
+const BOOTSTRAP_LOCK_PROGRESS_AFTER_MS = 2_000;
+const BOOTSTRAP_LOCK_TIMEOUT_MS = 15 * 60_000;
 const KERNEL_VENVS_DIR_NAME = "kernel-venvs";
 const LEGACY_KERNEL_VENV_DIR_NAME = "kernel-venv";
 const KERNEL_VENV_LAST_USED_FILE = ".last-used";
 const KERNEL_VENV_GC_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
+interface InFlightEnsureKernelPython {
+	key: string;
+	promise: Promise<string>;
+	// Aborts the shared work only once every attached caller has aborted.
+	controller: AbortController;
+	activeCallers: number;
+}
+
+let inFlightEnsureKernelPython: InFlightEnsureKernelPython | null = null;
 
 export type KernelPythonSkill = PythonSkillRuntimeInfo;
 export type KernelBootstrapProgressHandler = (message: string) => void;
@@ -69,6 +80,9 @@ export type KernelBootstrapProgressHandler = (message: string) => void;
 export interface EnsureKernelPythonOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	onProgress?: KernelBootstrapProgressHandler;
+	// Stops waiting for another process's bootstrap lock. Installs already in
+	// progress are not interrupted.
+	signal?: AbortSignal;
 }
 
 interface BootstrapPythonSkill {
@@ -554,11 +568,20 @@ function processIsRunning(pid: number): boolean {
 	}
 }
 
-async function readLockPid(lockDir: string): Promise<number | null> {
+interface BootstrapLockOwner {
+	pid: number;
+	startId?: string;
+}
+
+async function readLockOwner(lockDir: string): Promise<BootstrapLockOwner | null> {
 	try {
 		const raw = await readFile(path.join(lockDir, "pid"), "utf8");
 		const pid = Number.parseInt(raw.trim(), 10);
-		return Number.isInteger(pid) && pid > 0 ? pid : null;
+		if (!Number.isInteger(pid) || pid <= 0) return null;
+		const startId = await readFile(path.join(lockDir, "start-id"), "utf8")
+			.then((value) => value.trim() || undefined)
+			.catch(() => undefined);
+		return { pid, startId };
 	} catch {
 		return null;
 	}
@@ -573,29 +596,85 @@ async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	}
 }
 
-async function bootstrapLockIsStale(lockDir: string): Promise<boolean> {
-	const pid = await readLockPid(lockDir);
-	return pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid);
+// A lock is stale when its owner pid is dead, or when the pid is alive but was
+// started at a different time than the recorded owner (pid reuse). An unreadable
+// start id counts as alive, never as stale.
+function lockOwnerIsStale(owner: BootstrapLockOwner): boolean {
+	if (!processIsRunning(owner.pid)) return true;
+	if (!owner.startId) return false;
+	const currentStartId = getProcessStartId(owner.pid);
+	return currentStartId !== undefined && currentStartId !== owner.startId;
 }
 
-async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> {
+async function bootstrapLockIsStale(lockDir: string): Promise<boolean> {
+	const owner = await readLockOwner(lockDir);
+	return owner === null ? await lockMissingPidIsStale(lockDir) : lockOwnerIsStale(owner);
+}
+
+function sameLockOwner(a: BootstrapLockOwner | null, b: BootstrapLockOwner | null): boolean {
+	return a?.pid === b?.pid && a?.startId === b?.startId;
+}
+
+function createBootstrapLockAbortError(): Error {
+	const error = new Error("Kernel bootstrap aborted while waiting for the bootstrap lock");
+	error.name = "AbortError";
+	return error;
+}
+
+async function acquireBootstrapLock(venv: string, options: EnsureKernelPythonOptions): Promise<() => Promise<void>> {
 	const lockDir = bootstrapLockDir(venv);
 	await mkdir(path.dirname(lockDir), { recursive: true });
+	const signal = options.signal;
+	const waitStartedAt = Date.now();
+	let progressReported = false;
+	// The start-id lookup spawns a subprocess on macOS and Windows, so an owner is
+	// fully verified once and then only re-checked with a cheap liveness probe
+	// until the owner file changes.
+	let verifiedOwner: BootstrapLockOwner | null = null;
 
 	for (;;) {
 		try {
 			await mkdir(lockDir);
 			await writeFile(path.join(lockDir, "pid"), `${process.pid}\n`, "utf8");
+			const startId = getCurrentProcessStartId();
+			if (startId) await writeFile(path.join(lockDir, "start-id"), `${startId}\n`, "utf8");
 			return () => rm(lockDir, { recursive: true, force: true });
 		} catch (error) {
 			if (!isNodeError(error, "EEXIST")) throw error;
+		}
 
-			if (await bootstrapLockIsStale(lockDir)) {
-				await rm(lockDir, { recursive: true, force: true });
-				continue;
-			}
+		const owner = await readLockOwner(lockDir);
+		let stale: boolean;
+		if (owner === null) {
+			verifiedOwner = null;
+			stale = await lockMissingPidIsStale(lockDir);
+		} else if (verifiedOwner !== null && sameLockOwner(owner, verifiedOwner)) {
+			stale = !processIsRunning(owner.pid);
+		} else {
+			stale = lockOwnerIsStale(owner);
+			verifiedOwner = stale ? null : owner;
+		}
+		if (stale) {
+			await rm(lockDir, { recursive: true, force: true });
+			continue;
+		}
 
-			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
+		if (signal?.aborted) throw createBootstrapLockAbortError();
+		const waited = Date.now() - waitStartedAt;
+		if (waited > BOOTSTRAP_LOCK_TIMEOUT_MS) {
+			throw new Error(
+				`Timed out after ${Math.round(BOOTSTRAP_LOCK_TIMEOUT_MS / 60_000)} minutes waiting for another prime-agent ` +
+					`(pid ${owner?.pid ?? "unknown"}) to finish Python kernel setup. If no setup is running, remove the lock directory ${lockDir} and retry.`,
+			);
+		}
+		if (!progressReported && waited > BOOTSTRAP_LOCK_PROGRESS_AFTER_MS) {
+			progressReported = true;
+			reportProgress(options, "waiting for another prime-agent to finish Python kernel setup...");
+		}
+		try {
+			await sleep(BOOTSTRAP_LOCK_RETRY_MS, undefined, { signal });
+		} catch {
+			throw createBootstrapLockAbortError();
 		}
 	}
 }
@@ -1075,7 +1154,7 @@ async function ensureKernelPythonUncached(
 	};
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return finish();
 
-	const releaseLock = await acquireBootstrapLock(venv);
+	const releaseLock = await acquireBootstrapLock(venv, options);
 	try {
 		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return finish();
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
@@ -1107,14 +1186,44 @@ async function ensureKernelPythonUncached(
 	return finish();
 }
 
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	if (signal.aborted) return Promise.reject(createBootstrapLockAbortError());
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(createBootstrapLockAbortError());
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	});
+}
+
+// Attaches a caller to the shared in-flight work: the caller stops waiting when
+// its own signal aborts, while the shared work is only aborted once no attached
+// caller remains.
+function attachEnsureCaller(inFlight: InFlightEnsureKernelPython, signal: AbortSignal | undefined): Promise<string> {
+	inFlight.activeCallers += 1;
+	const detach = () => {
+		inFlight.activeCallers -= 1;
+		if (inFlight.activeCallers === 0) inFlight.controller.abort();
+	};
+	if (signal) signal.addEventListener("abort", detach, { once: true });
+	return raceWithAbort(inFlight.promise, signal).finally(() => {
+		signal?.removeEventListener("abort", detach);
+	});
+}
+
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
+	if (options.signal?.aborted) return Promise.reject(createBootstrapLockAbortError());
 	const pythonSkills = normalizePythonSkills(options.pythonSkills);
 	const key = ensureKernelPythonKey(pythonSkills);
-	if (inFlightEnsureKernelPython?.key === key) return inFlightEnsureKernelPython.promise;
+	if (inFlightEnsureKernelPython?.key === key && !inFlightEnsureKernelPython.controller.signal.aborted) {
+		return attachEnsureCaller(inFlightEnsureKernelPython, options.signal);
+	}
 
-	const promise = ensureKernelPythonUncached(options, pythonSkills).finally(() => {
+	const controller = new AbortController();
+	const promise = ensureKernelPythonUncached({ ...options, signal: controller.signal }, pythonSkills).finally(() => {
 		if (inFlightEnsureKernelPython?.promise === promise) inFlightEnsureKernelPython = null;
 	});
-	inFlightEnsureKernelPython = { key, promise };
-	return promise;
+	const inFlight: InFlightEnsureKernelPython = { key, promise, controller, activeCallers: 0 };
+	inFlightEnsureKernelPython = inFlight;
+	return attachEnsureCaller(inFlight, options.signal);
 }

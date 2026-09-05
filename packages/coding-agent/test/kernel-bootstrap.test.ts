@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
@@ -21,6 +22,7 @@ import {
 	type KernelPythonSkill,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
+import { getCurrentProcessStartId } from "../src/core/session-lease.js";
 
 let tempDir = "";
 let originalEnv: NodeJS.ProcessEnv;
@@ -669,6 +671,132 @@ dependencies = ["httpx"]
 		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
 
 		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+	});
+
+	function writeBootstrapLock(venv: string, pid: number, startId?: string): string {
+		const lockDir = `${venv}.bootstrap.lock`;
+		mkdirSync(lockDir, { recursive: true });
+		writeFileSync(join(lockDir, "pid"), `${pid}\n`);
+		if (startId) writeFileSync(join(lockDir, "start-id"), `${startId}\n`);
+		return lockDir;
+	}
+
+	function exitedPid(): number {
+		const child = spawnSync("sh", ["-c", "exit 0"]);
+		if (!child.pid) throw new Error("could not spawn a short-lived process");
+		return child.pid;
+	}
+
+	it("reclaims a bootstrap lock whose owner pid is dead", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, exitedPid(), "proc:1");
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(lockDir)).toBe(false);
+	});
+
+	it("reclaims a bootstrap lock whose owner pid was reused by another process", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, "proc:0");
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(lockDir)).toBe(false);
+	});
+
+	it("waits for a live bootstrap lock and reports progress", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, getCurrentProcessStartId());
+		const progress: string[] = [];
+		const startedAt = Date.now();
+		const holdMs = 2_600;
+		const release = setTimeout(() => rmSync(lockDir, { recursive: true, force: true }), holdMs);
+
+		try {
+			await expect(ensureKernelPython({ onProgress: (message) => progress.push(message) })).resolves.toBe(
+				join(venv, "bin", "python"),
+			);
+		} finally {
+			clearTimeout(release);
+		}
+
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(holdMs - 50);
+		expect(progress).toContain("waiting for another prime-agent to finish Python kernel setup...");
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+	}, 10_000);
+
+	it("records its own pid and start id in the bootstrap lock", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = `${venv}.bootstrap.lock`;
+		let seen: { pid: string; startId: string } | undefined;
+		const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+		try {
+			await ensureKernelPython({
+				onProgress: () => {
+					if (!seen && existsSync(join(lockDir, "pid"))) {
+						seen = {
+							pid: readFileSync(join(lockDir, "pid"), "utf8").trim(),
+							startId: readFileSync(join(lockDir, "start-id"), "utf8").trim(),
+						};
+					}
+				},
+			});
+		} finally {
+			stderrWrite.mockRestore();
+		}
+
+		expect(seen).toEqual({ pid: String(process.pid), startId: getCurrentProcessStartId() });
+		expect(existsSync(lockDir)).toBe(false);
+	});
+
+	it("gives up on a live bootstrap lock after the wait bound and names the lock", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, getCurrentProcessStartId());
+		// Let the first poll see real time, then jump the clock past the wait bound.
+		const realNow = Date.now();
+		const mockedAt = performance.now();
+		const nowSpy = vi
+			.spyOn(Date, "now")
+			.mockImplementation(() => realNow + (performance.now() - mockedAt > 150 ? 16 * 60_000 : 0));
+
+		try {
+			await expect(ensureKernelPython()).rejects.toThrow(
+				new RegExp(
+					`Timed out after 15 minutes waiting for another prime-agent \\(pid ${process.pid}\\)[\\s\\S]*${lockDir}`,
+				),
+			);
+		} finally {
+			nowSpy.mockRestore();
+		}
+
+		expect(existsSync(join(lockDir, "pid"))).toBe(true);
+	});
+
+	it("stops waiting for a bootstrap lock when the signal aborts", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, getCurrentProcessStartId());
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 100);
+
+		await expect(ensureKernelPython({ signal: controller.signal })).rejects.toThrow(/aborted while waiting/);
+
+		expect(existsSync(join(lockDir, "pid"))).toBe(true);
 	});
 
 	it("uses PRIME_AGENT_KERNEL_PYTHON as an override contract", async () => {
