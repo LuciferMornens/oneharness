@@ -2587,6 +2587,26 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 	syncLegacyThinkingLevelMap(model);
 }
 
+function getCodexAstraModel(): Model<"openai-codex-responses"> {
+	return {
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		reasoningCapabilities: {
+			control: "effort",
+			levels: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+		},
+		input: ["text", "image"],
+		cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		// Default subscription window from the Codex catalog, not the API's 1.05M window.
+		contextWindow: 272000,
+		maxTokens: 128000,
+	};
+}
+
 const GROK_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 
 /**
@@ -2930,6 +2950,7 @@ function mergeCatalogModels(allModels: Model<any>[], extra: Model<any>[]): void 
 
 function mergeStaticCatalogModels(allModels: Model<any>[]): void {
 	mergeCatalogModels(allModels, [
+		getCodexAstraModel(),
 		...getGrokSubscriptionModels(),
 		...getAudnModels(),
 		...getAbliterationModels(),
@@ -3382,6 +3403,7 @@ async function generateModels() {
 	const CODEX_CONTEXT = 272000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
+		getCodexAstraModel(),
 		{
 			id: "gpt-5.1",
 			name: "GPT-5.1",
