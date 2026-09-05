@@ -3,6 +3,11 @@ import { Semaphore } from "../../utils/semaphore.js";
 
 // Above core count because boots are IO-bound (cold imports), but capped so a
 // fan-out can't thrash the FS past the ready-handshake window.
+//
+// Scope: the semaphore is per Node process. The daemon runs one worker process
+// per root session and creates RLM subagents inside that worker, so the limit
+// bounds concurrent boots within one root-session tree, not machine-wide. N
+// root sessions can boot up to N times this many kernels at once.
 const DEFAULT_KERNEL_BOOT_CONCURRENCY = Math.min(16, Math.max(4, (cpus().length || 4) * 2));
 const MAX_KERNEL_BOOT_CONCURRENCY = 64;
 
