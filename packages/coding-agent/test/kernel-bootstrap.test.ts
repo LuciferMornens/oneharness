@@ -53,8 +53,8 @@ function writeBootstrapVersion(venv: string, pythonSkills: readonly KernelPython
 	);
 }
 
-function createPythonSkill(name = "web-search"): KernelPythonSkill {
-	const packagePath = join(tempDir, "skills", name);
+function createPythonSkill(name = "web-search", skillsDir = join(tempDir, "skills")): KernelPythonSkill {
+	const packagePath = join(skillsDir, name);
 	const importName = name.replaceAll("-", "_");
 	const pyprojectPath = join(packagePath, "pyproject.toml");
 	mkdirSync(join(packagePath, "src", importName), { recursive: true });
@@ -484,6 +484,75 @@ dependencies = ["httpx"]
 		expect(
 			retryLog.split("\n").filter((line) => line.includes(`--editable ${brokenSkill.packagePath}`)),
 		).toHaveLength(2);
+	});
+
+	it("accepts a warm venv whose manifest is a superset of the requested Python skills", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const skillA = createPythonSkill("skill-a");
+		const skillB = createPythonSkill("skill-b");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [skillB, skillA]);
+		const manifestBefore = readFileSync(join(venv, ".bootstrap-version"), "utf8");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [skillA] })).resolves.toBe(python);
+
+		expect(existsSync(logPath)).toBe(false);
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).toBe(manifestBefore);
+	});
+
+	it("installs only the missing Python skills into a warm venv and keeps recorded ones", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const skillA = createPythonSkill("skill-a");
+		const skillB = createPythonSkill("skill-b");
+		const skillC = createPythonSkill("skill-c");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [skillA, skillC]);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [skillA, skillB] })).resolves.toBe(python);
+
+		const log = readFileSync(logPath, "utf8");
+		expect(log).toContain(`--editable ${skillB.packagePath}`);
+		expect(log).not.toContain(`--editable ${skillA.packagePath}`);
+		expect(log).not.toContain(`--editable ${skillC.packagePath}`);
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
+			"skill_a",
+			"skill_b",
+			"skill_c",
+		]);
+	});
+
+	it("reinstalls a Python skill whose import name is recorded from a different package path", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const globalSkill = createPythonSkill("skill-a", join(tempDir, "global-skills"));
+		const projectSkill = createPythonSkill("skill-a", join(tempDir, "project-skills"));
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [globalSkill]);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [projectSkill] })).resolves.toBe(python);
+
+		expect(readFileSync(logPath, "utf8")).toContain(`--editable ${projectSkill.packagePath}`);
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills).toEqual([
+			{
+				importName: projectSkill.importName,
+				packagePath: projectSkill.packagePath,
+				pyprojectPath: projectSkill.pyprojectPath,
+				pyprojectHash: pyprojectHash(projectSkill.pyprojectPath),
+			},
+		]);
 	});
 
 	it("rebuilds a warm venv with legacy unhashed Python skill manifest entries", async () => {

@@ -754,17 +754,42 @@ function extraUvArgsMatch(a: string[] | undefined, b: string[] | undefined): boo
 	return a.every((v, i) => v === b[i]);
 }
 
-function pythonSkillsMatch(a: BootstrapPythonSkill[] | undefined, b: readonly BootstrapPythonSkill[]): boolean {
-	const left = a ?? [];
-	if (left.length !== b.length) return false;
-	return left.every((skill, index) => {
-		const expected = b[index];
-		return (
-			skill.importName === expected.importName &&
-			skill.packagePath === expected.packagePath &&
-			skill.pyprojectPath === expected.pyprojectPath &&
-			skill.pyprojectHash === expected.pyprojectHash
-		);
+function pythonSkillsByImportName(
+	pythonSkills: readonly BootstrapPythonSkill[] | undefined,
+): Map<string, BootstrapPythonSkill> {
+	return new Map((pythonSkills ?? []).map((skill) => [skill.importName, skill]));
+}
+
+function pythonSkillRecorded(
+	recorded: ReadonlyMap<string, BootstrapPythonSkill>,
+	skill: BootstrapPythonSkill,
+): boolean {
+	const entry = recorded.get(skill.importName);
+	return (
+		entry !== undefined &&
+		entry.packagePath === skill.packagePath &&
+		entry.pyprojectPath === skill.pyprojectPath &&
+		entry.pyprojectHash === skill.pyprojectHash
+	);
+}
+
+// The manifest is keyed by import name and may hold skills other sessions on this
+// machine installed; a session only needs its own skills present with matching
+// package path and pyproject hash. One import name resolves to one editable
+// install, so a different package path for a recorded name is a mismatch.
+function pythonSkillsMatch(
+	recorded: readonly BootstrapPythonSkill[] | undefined,
+	requested: readonly BootstrapPythonSkill[],
+): boolean {
+	const byImportName = pythonSkillsByImportName(recorded);
+	return requested.every((skill) => pythonSkillRecorded(byImportName, skill));
+}
+
+function sortPythonSkillsForManifest(pythonSkills: Iterable<BootstrapPythonSkill>): BootstrapPythonSkill[] {
+	return [...pythonSkills].sort((a, b) => {
+		const packageCompare = a.packagePath.localeCompare(b.packagePath);
+		if (packageCompare !== 0) return packageCompare;
+		return a.importName.localeCompare(b.importName);
 	});
 }
 
@@ -914,9 +939,7 @@ async function syncPythonSkills(
 ): Promise<void> {
 	const version = await readBootstrapVersion(venv);
 	const installedPythonSkills: BootstrapPythonSkill[] = [];
-	const currentPythonSkills = new Map(
-		(version?.pythonSkills ?? []).map((skill) => [`${skill.importName}\0${skill.packagePath}`, skill]),
-	);
+	const currentPythonSkills = pythonSkillsByImportName(version?.pythonSkills);
 	const pythonSkillsByProjectName = new Map(
 		pythonSkills.map((skill) => [readPythonSkillProjectName(skill).replaceAll("_", "-").toLowerCase(), skill]),
 	);
@@ -934,8 +957,7 @@ async function syncPythonSkills(
 	);
 
 	for (const skill of sortPythonSkillsForInstall(pythonSkills)) {
-		const existingSkill = currentPythonSkills.get(`${skill.importName}\0${skill.packagePath}`);
-		if (existingSkill?.pyprojectPath === skill.pyprojectPath && existingSkill.pyprojectHash === skill.pyprojectHash) {
+		if (pythonSkillRecorded(currentPythonSkills, skill)) {
 			installedPythonSkills.push(skill);
 			continue;
 		}
@@ -943,7 +965,6 @@ async function syncPythonSkills(
 		const localDependencies = dependenciesBySkill.get(skill) ?? [];
 		const localDependencyArgs = localDependencies
 			.filter((dependency) => {
-				const installedDependency = currentPythonSkills.get(`${dependency.importName}\0${dependency.packagePath}`);
 				const installedThisSync = installedPythonSkills.some(
 					(installed) =>
 						installed.importName === dependency.importName &&
@@ -951,11 +972,7 @@ async function syncPythonSkills(
 						installed.pyprojectPath === dependency.pyprojectPath &&
 						installed.pyprojectHash === dependency.pyprojectHash,
 				);
-				return !(
-					installedThisSync ||
-					(installedDependency?.pyprojectPath === dependency.pyprojectPath &&
-						installedDependency.pyprojectHash === dependency.pyprojectHash)
-				);
+				return !(installedThisSync || pythonSkillRecorded(currentPythonSkills, dependency));
 			})
 			.flatMap(formatPythonSkillInstallArgs);
 
@@ -979,7 +996,14 @@ async function syncPythonSkills(
 			);
 		}
 	}
-	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
+	// Merge into the recorded manifest: skills installed by other sessions stay
+	// recorded (nothing is ever uninstalled), and a reinstall for an import name
+	// replaces that name's entry.
+	const manifest = new Map(currentPythonSkills);
+	for (const skill of installedPythonSkills) {
+		manifest.set(skill.importName, skill);
+	}
+	await writeBootstrapVersion(venv, runtimeIdentity, sortPythonSkillsForManifest(manifest.values()));
 }
 
 async function kernelBaseReady(python: string, venv: string, runtimeIdentity: string): Promise<boolean> {
