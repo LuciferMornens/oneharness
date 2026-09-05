@@ -188,6 +188,8 @@ export class ReplKernelManager {
 	private gracefulShutdownPromise?: Promise<boolean>;
 	/** Memoized so concurrent callers all await the same in-flight startup. */
 	private startPromise?: Promise<void>;
+	/** Aborts the shared startup only once every attached start() caller has aborted. */
+	private inFlightStart?: { promise: Promise<void>; controller: AbortController; waiters: number };
 	/** Pending debounced auto-snapshot, if one has been scheduled. */
 	private snapshotTimer?: ReturnType<typeof globalThis.setTimeout>;
 	/** While the final dispose snapshot is flushing, new external executions are rejected. */
@@ -266,14 +268,42 @@ export class ReplKernelManager {
 			throw createKernelStartupAbortError();
 		}
 		if (!this.startPromise) {
-			const startPromise = this.doStart({ onBootstrapProgress: options.onBootstrapProgress }).catch((error) => {
+			const controller = new AbortController();
+			const startPromise = this.doStart({
+				onBootstrapProgress: options.onBootstrapProgress,
+				signal: controller.signal,
+			}).catch((error) => {
 				// Only clear our own memoization: a stale start must not evict a newer one.
 				if (this.startPromise === startPromise) this.startPromise = undefined;
+				if (this.inFlightStart?.promise === startPromise) this.inFlightStart = undefined;
 				throw error;
 			});
 			this.startPromise = startPromise;
+			this.inFlightStart = { promise: startPromise, controller, waiters: 0 };
 		}
-		return raceStartupWithAbort(this.startPromise, options.signal);
+		return this.attachStartWaiter(this.startPromise, options.signal);
+	}
+
+	// Each caller stops waiting on its own signal; the shared startup is aborted
+	// only when no attached caller remains, so one caller's abort cannot fail the
+	// others awaiting the same startup.
+	private attachStartWaiter(startPromise: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+		const inFlight = this.inFlightStart;
+		if (!inFlight || inFlight.promise !== startPromise) {
+			return raceStartupWithAbort(startPromise, signal);
+		}
+		// A signal-less caller is a waiter that never detaches, so it keeps the
+		// shared startup alive even after every signalled caller aborted.
+		inFlight.waiters += 1;
+		if (!signal) return startPromise;
+		const detach = () => {
+			inFlight.waiters -= 1;
+			if (inFlight.waiters === 0) inFlight.controller.abort();
+		};
+		signal.addEventListener("abort", detach, { once: true });
+		return raceStartupWithAbort(startPromise, signal).finally(() => {
+			signal.removeEventListener("abort", detach);
+		});
 	}
 
 	private async doStart(startOptions: KernelStartOptions): Promise<void> {
@@ -292,6 +322,7 @@ export class ReplKernelManager {
 				(await ensureKernelPython({
 					pythonSkills: this.options.pythonSkills,
 					onProgress: startOptions.onBootstrapProgress,
+					signal: startOptions.signal,
 				}));
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			this.options.python = python;
@@ -1310,6 +1341,7 @@ export class ReplKernelManager {
 			if (pid !== undefined) reapKernelOrphanProcesses(pid);
 		}
 		this.startPromise = undefined;
+		this.inFlightStart = undefined;
 	}
 
 	private async waitForKernelExit(): Promise<void> {

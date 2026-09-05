@@ -187,7 +187,7 @@ export function getProcessStartId(pid: number): string | undefined {
 let currentProcessStartId: string | undefined;
 let currentProcessStartIdRead = false;
 
-function getCurrentProcessStartId(): string | undefined {
+export function getCurrentProcessStartId(): string | undefined {
 	if (!currentProcessStartIdRead) {
 		currentProcessStartId = getProcessStartId(process.pid);
 		currentProcessStartIdRead = true;

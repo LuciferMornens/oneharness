@@ -8,7 +8,8 @@ import { stderr, stdin } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { getPackageDir } from "../../config.js";
+import { getPackageDir, VERSION } from "../../config.js";
+import { getCurrentProcessStartId, getProcessStartId } from "../session-lease.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 9;
@@ -54,10 +55,24 @@ const REQUIRED_HARNESS_METHODS = [
 const RUNTIME_READY_CHECK = `import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ${JSON.stringify(REQUIRED_HARNESS_METHODS)}; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert hasattr(rlm, 'run'); assert callable(rlm); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')`;
 const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
-const BOOTSTRAP_LOCK_RETRY_MS = 100;
+const BOOTSTRAP_LOCK_RETRY_MS = 250;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
+const BOOTSTRAP_LOCK_PROGRESS_AFTER_MS = 2_000;
+const BOOTSTRAP_LOCK_TIMEOUT_MS = 15 * 60_000;
+const KERNEL_VENVS_DIR_NAME = "kernel-venvs";
+const LEGACY_KERNEL_VENV_DIR_NAME = "kernel-venv";
+const KERNEL_VENV_LAST_USED_FILE = ".last-used";
+const KERNEL_VENV_GC_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
+interface InFlightEnsureKernelPython {
+	key: string;
+	promise: Promise<string>;
+	// Aborts the shared work only once every attached caller has aborted.
+	controller: AbortController;
+	activeCallers: number;
+}
+
+let inFlightEnsureKernelPython: InFlightEnsureKernelPython | null = null;
 
 export type KernelPythonSkill = PythonSkillRuntimeInfo;
 export type KernelBootstrapProgressHandler = (message: string) => void;
@@ -65,6 +80,9 @@ export type KernelBootstrapProgressHandler = (message: string) => void;
 export interface EnsureKernelPythonOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	onProgress?: KernelBootstrapProgressHandler;
+	// Stops waiting for another process's bootstrap lock. Installs already in
+	// progress are not interrupted.
+	signal?: AbortSignal;
 }
 
 interface BootstrapPythonSkill {
@@ -336,43 +354,136 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 	].join("\0");
 }
 
-export function getKernelVenvDir(): string {
-	const override = process.env.PRIME_AGENT_KERNEL_VENV;
-	if (override) return path.resolve(expandHome(override));
-	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
+// Venvs are addressed by runtime identity so that different prime-agent builds
+// (a source checkout vs. an installed release, or two builds with different
+// rlm sources) coexist under kernel-venvs/ instead of rebuilding one shared
+// directory underneath each other's live kernels. A registry install has the
+// constant identity RUNTIME_REQUIREMENT, so the installed prime-agent version is
+// mixed into its segment to give every upgrade a fresh directory.
+function kernelVenvIdentitySegment(runtimeIdentity: string): string {
+	const hex = runtimeIdentity.startsWith("sha256:")
+		? runtimeIdentity.slice("sha256:".length)
+		: createHash("sha256").update(`${runtimeIdentity}\0${VERSION}`).digest("hex");
+	return `${BOOTSTRAP_SCHEMA}-${hex.slice(0, 12)}`;
 }
 
-function getFallbackKernelVenvDir(): string {
+export function getKernelVenvsRoot(): string {
+	return path.join(os.homedir(), ".prime", "agent", KERNEL_VENVS_DIR_NAME);
+}
+
+function getFallbackKernelVenvsRoot(): string {
 	if (process.platform === "win32") {
 		const localAppData = process.env.LOCALAPPDATA;
 		const dataHome = localAppData ? path.resolve(localAppData) : path.join(os.homedir(), "AppData", "Local");
-		return path.join(dataHome, "prime", "agent", "kernel-venv");
+		return path.join(dataHome, "prime", "agent", KERNEL_VENVS_DIR_NAME);
 	}
 	const dataHome = process.env.XDG_DATA_HOME
 		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
 		: path.join(os.homedir(), ".local", "share");
-	return path.join(dataHome, "prime", "agent", "kernel-venv");
+	return path.join(dataHome, "prime", "agent", KERNEL_VENVS_DIR_NAME);
 }
 
-async function resolveWritableKernelVenvDir(): Promise<string> {
-	const primary = getKernelVenvDir();
-	try {
-		await mkdir(path.dirname(primary), { recursive: true });
-		return primary;
-	} catch (primaryError) {
-		if (process.env.PRIME_AGENT_KERNEL_VENV) {
-			throw new Error(`couldn't create kernel venv parent directory for ${primary}: ${errorMessage(primaryError)}`);
-		}
+// PRIME_AGENT_KERNEL_VENV is an exact path: it is not identity-addressed and is
+// rebuilt in place when its recorded identity no longer matches.
+export function getKernelVenvDir(runtimeIdentity: string): string {
+	const override = process.env.PRIME_AGENT_KERNEL_VENV;
+	if (override) return path.resolve(expandHome(override));
+	return path.join(getKernelVenvsRoot(), kernelVenvIdentitySegment(runtimeIdentity));
+}
 
-		const fallback = getFallbackKernelVenvDir();
+export function resolveKernelVenvDirSync(): string {
+	return getKernelVenvDir(resolveRuntimeIdentitySync());
+}
+
+export function kernelVenvPython(venv: string): string {
+	return process.platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
+}
+
+interface ResolvedKernelVenv {
+	venv: string;
+	// The kernel-venvs/ root this venv lives in; undefined for the exact-path override.
+	root?: string;
+}
+
+async function resolveWritableKernelVenvDir(runtimeIdentity: string): Promise<ResolvedKernelVenv> {
+	const primary = getKernelVenvDir(runtimeIdentity);
+	if (process.env.PRIME_AGENT_KERNEL_VENV) {
 		try {
-			await mkdir(path.dirname(fallback), { recursive: true });
-			return fallback;
+			await mkdir(path.dirname(primary), { recursive: true });
+			return { venv: primary };
+		} catch (error) {
+			throw new Error(`couldn't create kernel venv parent directory for ${primary}: ${errorMessage(error)}`);
+		}
+	}
+
+	const segment = kernelVenvIdentitySegment(runtimeIdentity);
+	const primaryRoot = getKernelVenvsRoot();
+	try {
+		await mkdir(primaryRoot, { recursive: true });
+		return { venv: path.join(primaryRoot, segment), root: primaryRoot };
+	} catch {
+		const fallbackRoot = getFallbackKernelVenvsRoot();
+		try {
+			await mkdir(fallbackRoot, { recursive: true });
+			return { venv: path.join(fallbackRoot, segment), root: fallbackRoot };
 		} catch (fallbackError) {
 			throw new Error(
-				`couldn't create kernel venv directory at ${primary} or ${fallback}; set PRIME_AGENT_KERNEL_PYTHON to a python with a current prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
+				`couldn't create kernel venv directory at ${primary} or ${path.join(fallbackRoot, segment)}; set PRIME_AGENT_KERNEL_PYTHON to a python with a current prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
 			);
 		}
+	}
+}
+
+async function touchKernelVenvLastUsed(venv: string): Promise<void> {
+	try {
+		await writeFile(path.join(venv, KERNEL_VENV_LAST_USED_FILE), `${new Date().toISOString()}\n`, "utf8");
+	} catch {
+		// Best-effort marker; a missing marker only delays garbage collection.
+	}
+}
+
+async function bootstrapLockIsHeld(venv: string): Promise<boolean> {
+	const lockDir = bootstrapLockDir(venv);
+	if (!(await exists(lockDir))) return false;
+	return !(await bootstrapLockIsStale(lockDir));
+}
+
+async function collectStaleKernelVenv(venv: string, now: number): Promise<void> {
+	if (await bootstrapLockIsHeld(venv)) return;
+	const marker = path.join(venv, KERNEL_VENV_LAST_USED_FILE);
+	let markerStat: Awaited<ReturnType<typeof stat>>;
+	try {
+		markerStat = await stat(marker);
+	} catch {
+		// No marker yet (built by an older prime-agent, or never used since this
+		// marker was introduced): start the clock now instead of deleting.
+		await touchKernelVenvLastUsed(venv);
+		return;
+	}
+	if (now - markerStat.mtimeMs <= KERNEL_VENV_GC_AGE_MS) return;
+	await rm(venv, { recursive: true, force: true });
+}
+
+// Removes sibling venvs of other runtime identities that have not been used for a
+// week and are not being bootstrapped. A long-lived kernel still running from such
+// a venv is not detectable from here; the age threshold is the compromise.
+async function collectStaleKernelVenvs(root: string, currentVenv: string): Promise<void> {
+	const now = Date.now();
+	const candidates: string[] = [];
+	try {
+		for (const entry of await readdir(root, { withFileTypes: true })) {
+			if (!entry.isDirectory() || entry.name.endsWith(BOOTSTRAP_LOCK_NAME)) continue;
+			const venv = path.join(root, entry.name);
+			if (venv === currentVenv) continue;
+			candidates.push(venv);
+		}
+	} catch {
+		return;
+	}
+	const legacyVenv = path.join(path.dirname(root), LEGACY_KERNEL_VENV_DIR_NAME);
+	if (await exists(legacyVenv)) candidates.push(legacyVenv);
+	for (const venv of candidates) {
+		await collectStaleKernelVenv(venv, now).catch(() => undefined);
 	}
 }
 
@@ -457,11 +568,20 @@ function processIsRunning(pid: number): boolean {
 	}
 }
 
-async function readLockPid(lockDir: string): Promise<number | null> {
+interface BootstrapLockOwner {
+	pid: number;
+	startId?: string;
+}
+
+async function readLockOwner(lockDir: string): Promise<BootstrapLockOwner | null> {
 	try {
 		const raw = await readFile(path.join(lockDir, "pid"), "utf8");
 		const pid = Number.parseInt(raw.trim(), 10);
-		return Number.isInteger(pid) && pid > 0 ? pid : null;
+		if (!Number.isInteger(pid) || pid <= 0) return null;
+		const startId = await readFile(path.join(lockDir, "start-id"), "utf8")
+			.then((value) => value.trim() || undefined)
+			.catch(() => undefined);
+		return { pid, startId };
 	} catch {
 		return null;
 	}
@@ -476,25 +596,85 @@ async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	}
 }
 
-async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> {
+// A lock is stale when its owner pid is dead, or when the pid is alive but was
+// started at a different time than the recorded owner (pid reuse). An unreadable
+// start id counts as alive, never as stale.
+function lockOwnerIsStale(owner: BootstrapLockOwner): boolean {
+	if (!processIsRunning(owner.pid)) return true;
+	if (!owner.startId) return false;
+	const currentStartId = getProcessStartId(owner.pid);
+	return currentStartId !== undefined && currentStartId !== owner.startId;
+}
+
+async function bootstrapLockIsStale(lockDir: string): Promise<boolean> {
+	const owner = await readLockOwner(lockDir);
+	return owner === null ? await lockMissingPidIsStale(lockDir) : lockOwnerIsStale(owner);
+}
+
+function sameLockOwner(a: BootstrapLockOwner | null, b: BootstrapLockOwner | null): boolean {
+	return a?.pid === b?.pid && a?.startId === b?.startId;
+}
+
+function createBootstrapLockAbortError(): Error {
+	const error = new Error("Kernel bootstrap aborted while waiting for the bootstrap lock");
+	error.name = "AbortError";
+	return error;
+}
+
+async function acquireBootstrapLock(venv: string, options: EnsureKernelPythonOptions): Promise<() => Promise<void>> {
 	const lockDir = bootstrapLockDir(venv);
 	await mkdir(path.dirname(lockDir), { recursive: true });
+	const signal = options.signal;
+	const waitStartedAt = Date.now();
+	let progressReported = false;
+	// The start-id lookup spawns a subprocess on macOS and Windows, so an owner is
+	// fully verified once and then only re-checked with a cheap liveness probe
+	// until the owner file changes.
+	let verifiedOwner: BootstrapLockOwner | null = null;
 
 	for (;;) {
 		try {
 			await mkdir(lockDir);
 			await writeFile(path.join(lockDir, "pid"), `${process.pid}\n`, "utf8");
+			const startId = getCurrentProcessStartId();
+			if (startId) await writeFile(path.join(lockDir, "start-id"), `${startId}\n`, "utf8");
 			return () => rm(lockDir, { recursive: true, force: true });
 		} catch (error) {
 			if (!isNodeError(error, "EEXIST")) throw error;
+		}
 
-			const pid = await readLockPid(lockDir);
-			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
-				await rm(lockDir, { recursive: true, force: true });
-				continue;
-			}
+		const owner = await readLockOwner(lockDir);
+		let stale: boolean;
+		if (owner === null) {
+			verifiedOwner = null;
+			stale = await lockMissingPidIsStale(lockDir);
+		} else if (verifiedOwner !== null && sameLockOwner(owner, verifiedOwner)) {
+			stale = !processIsRunning(owner.pid);
+		} else {
+			stale = lockOwnerIsStale(owner);
+			verifiedOwner = stale ? null : owner;
+		}
+		if (stale) {
+			await rm(lockDir, { recursive: true, force: true });
+			continue;
+		}
 
-			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
+		if (signal?.aborted) throw createBootstrapLockAbortError();
+		const waited = Date.now() - waitStartedAt;
+		if (waited > BOOTSTRAP_LOCK_TIMEOUT_MS) {
+			throw new Error(
+				`Timed out after ${Math.round(BOOTSTRAP_LOCK_TIMEOUT_MS / 60_000)} minutes waiting for another prime-agent ` +
+					`(pid ${owner?.pid ?? "unknown"}) to finish Python kernel setup. If no setup is running, remove the lock directory ${lockDir} and retry.`,
+			);
+		}
+		if (!progressReported && waited > BOOTSTRAP_LOCK_PROGRESS_AFTER_MS) {
+			progressReported = true;
+			reportProgress(options, "waiting for another prime-agent to finish Python kernel setup...");
+		}
+		try {
+			await sleep(BOOTSTRAP_LOCK_RETRY_MS, undefined, { signal });
+		} catch {
+			throw createBootstrapLockAbortError();
 		}
 	}
 }
@@ -653,17 +833,42 @@ function extraUvArgsMatch(a: string[] | undefined, b: string[] | undefined): boo
 	return a.every((v, i) => v === b[i]);
 }
 
-function pythonSkillsMatch(a: BootstrapPythonSkill[] | undefined, b: readonly BootstrapPythonSkill[]): boolean {
-	const left = a ?? [];
-	if (left.length !== b.length) return false;
-	return left.every((skill, index) => {
-		const expected = b[index];
-		return (
-			skill.importName === expected.importName &&
-			skill.packagePath === expected.packagePath &&
-			skill.pyprojectPath === expected.pyprojectPath &&
-			skill.pyprojectHash === expected.pyprojectHash
-		);
+function pythonSkillsByImportName(
+	pythonSkills: readonly BootstrapPythonSkill[] | undefined,
+): Map<string, BootstrapPythonSkill> {
+	return new Map((pythonSkills ?? []).map((skill) => [skill.importName, skill]));
+}
+
+function pythonSkillRecorded(
+	recorded: ReadonlyMap<string, BootstrapPythonSkill>,
+	skill: BootstrapPythonSkill,
+): boolean {
+	const entry = recorded.get(skill.importName);
+	return (
+		entry !== undefined &&
+		entry.packagePath === skill.packagePath &&
+		entry.pyprojectPath === skill.pyprojectPath &&
+		entry.pyprojectHash === skill.pyprojectHash
+	);
+}
+
+// The manifest is keyed by import name and may hold skills other sessions on this
+// machine installed; a session only needs its own skills present with matching
+// package path and pyproject hash. One import name resolves to one editable
+// install, so a different package path for a recorded name is a mismatch.
+function pythonSkillsMatch(
+	recorded: readonly BootstrapPythonSkill[] | undefined,
+	requested: readonly BootstrapPythonSkill[],
+): boolean {
+	const byImportName = pythonSkillsByImportName(recorded);
+	return requested.every((skill) => pythonSkillRecorded(byImportName, skill));
+}
+
+function sortPythonSkillsForManifest(pythonSkills: Iterable<BootstrapPythonSkill>): BootstrapPythonSkill[] {
+	return [...pythonSkills].sort((a, b) => {
+		const packageCompare = a.packagePath.localeCompare(b.packagePath);
+		if (packageCompare !== 0) return packageCompare;
+		return a.importName.localeCompare(b.importName);
 	});
 }
 
@@ -717,9 +922,9 @@ function runtimeCandidateDirs(): string[] {
 	];
 }
 
-async function resolveRuntimeSourceDir(): Promise<string | null> {
+function resolveRuntimeSourceDir(): string | null {
 	for (const candidate of runtimeCandidateDirs()) {
-		if (await exists(path.join(candidate, "pyproject.toml"))) {
+		if (existsSync(path.join(candidate, "pyproject.toml"))) {
 			return candidate;
 		}
 	}
@@ -730,36 +935,40 @@ async function resolveRuntimeSourceDir(): Promise<string | null> {
 // content hash of every rlm/*.py file plus pyproject.toml, so any runtime code or
 // dependency change invalidates an existing venv automatically. Falls back to the
 // bare package name when the runtime resolves to a registry install (no local source).
-export async function resolveRuntimeIdentity(): Promise<string> {
-	const sourceDir = await resolveRuntimeSourceDir();
+// Synchronous so module-load-time callers (test guards) can resolve the venv path.
+export function resolveRuntimeIdentitySync(): string {
+	const sourceDir = resolveRuntimeSourceDir();
 	if (!sourceDir) return RUNTIME_REQUIREMENT;
 	return hashRuntimeSource(sourceDir);
+}
+
+export async function resolveRuntimeIdentity(): Promise<string> {
+	return resolveRuntimeIdentitySync();
 }
 
 // Throws if the local source can't be read. A failure here must surface rather than
 // fall back to RUNTIME_REQUIREMENT: that constant is the registry-install identity, and
 // recording it for a local checkout would permanently mask later source changes.
-async function hashRuntimeSource(sourceDir: string): Promise<string> {
+function hashRuntimeSource(sourceDir: string): string {
 	const rlmDir = path.join(sourceDir, "src", "rlm");
 	const files: string[] = [path.join(sourceDir, "pyproject.toml")];
-	async function collect(dir: string): Promise<void> {
-		const entries = await readdir(dir, { withFileTypes: true });
-		for (const entry of entries) {
+	function collect(dir: string): void {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
 			const full = path.join(dir, entry.name);
 			if (entry.isDirectory()) {
-				await collect(full);
+				collect(full);
 			} else if (entry.isFile() && entry.name.endsWith(".py")) {
 				files.push(full);
 			}
 		}
 	}
-	await collect(rlmDir);
+	collect(rlmDir);
 	files.sort();
 	const hash = createHash("sha256");
 	for (const file of files) {
 		hash.update(path.relative(sourceDir, file));
 		hash.update("\0");
-		hash.update(await readFile(file));
+		hash.update(readFileSync(file));
 		hash.update("\0");
 	}
 	return `sha256:${hash.digest("hex")}`;
@@ -773,9 +982,9 @@ async function bootstrapVenv(
 	await mkdir(path.dirname(venv), { recursive: true });
 	const uv = await ensureUv(options);
 	const python = kernelVenvPython(venv);
-	const sourceDir = await resolveRuntimeSourceDir();
+	const sourceDir = resolveRuntimeSourceDir();
 	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
-	const runtimeIdentity = await resolveRuntimeIdentity();
+	const runtimeIdentity = resolveRuntimeIdentitySync();
 
 	await run(uv, ["python", "install", PYTHON_VERSION]);
 	await run(uv, ["venv", venv, "--python", PYTHON_VERSION, "--seed"]);
@@ -789,10 +998,6 @@ async function bootstrapVenv(
 		...DEFAULT_RLM_EXTRA_UV_ARGS,
 	]);
 	await syncPythonSkills(uv, venv, python, runtimeIdentity, pythonSkills, options);
-}
-
-function kernelVenvPython(venv: string): string {
-	return process.platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
 }
 
 async function resolvePythonOverride(override: string): Promise<string> {
@@ -813,9 +1018,7 @@ async function syncPythonSkills(
 ): Promise<void> {
 	const version = await readBootstrapVersion(venv);
 	const installedPythonSkills: BootstrapPythonSkill[] = [];
-	const currentPythonSkills = new Map(
-		(version?.pythonSkills ?? []).map((skill) => [`${skill.importName}\0${skill.packagePath}`, skill]),
-	);
+	const currentPythonSkills = pythonSkillsByImportName(version?.pythonSkills);
 	const pythonSkillsByProjectName = new Map(
 		pythonSkills.map((skill) => [readPythonSkillProjectName(skill).replaceAll("_", "-").toLowerCase(), skill]),
 	);
@@ -833,8 +1036,7 @@ async function syncPythonSkills(
 	);
 
 	for (const skill of sortPythonSkillsForInstall(pythonSkills)) {
-		const existingSkill = currentPythonSkills.get(`${skill.importName}\0${skill.packagePath}`);
-		if (existingSkill?.pyprojectPath === skill.pyprojectPath && existingSkill.pyprojectHash === skill.pyprojectHash) {
+		if (pythonSkillRecorded(currentPythonSkills, skill)) {
 			installedPythonSkills.push(skill);
 			continue;
 		}
@@ -842,7 +1044,6 @@ async function syncPythonSkills(
 		const localDependencies = dependenciesBySkill.get(skill) ?? [];
 		const localDependencyArgs = localDependencies
 			.filter((dependency) => {
-				const installedDependency = currentPythonSkills.get(`${dependency.importName}\0${dependency.packagePath}`);
 				const installedThisSync = installedPythonSkills.some(
 					(installed) =>
 						installed.importName === dependency.importName &&
@@ -850,11 +1051,7 @@ async function syncPythonSkills(
 						installed.pyprojectPath === dependency.pyprojectPath &&
 						installed.pyprojectHash === dependency.pyprojectHash,
 				);
-				return !(
-					installedThisSync ||
-					(installedDependency?.pyprojectPath === dependency.pyprojectPath &&
-						installedDependency.pyprojectHash === dependency.pyprojectHash)
-				);
+				return !(installedThisSync || pythonSkillRecorded(currentPythonSkills, dependency));
 			})
 			.flatMap(formatPythonSkillInstallArgs);
 
@@ -878,7 +1075,14 @@ async function syncPythonSkills(
 			);
 		}
 	}
-	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
+	// Merge into the recorded manifest: skills installed by other sessions stay
+	// recorded (nothing is ever uninstalled), and a reinstall for an import name
+	// replaces that name's entry.
+	const manifest = new Map(currentPythonSkills);
+	for (const skill of installedPythonSkills) {
+		manifest.set(skill.importName, skill);
+	}
+	await writeBootstrapVersion(venv, runtimeIdentity, sortPythonSkillsForManifest(manifest.values()));
 }
 
 async function kernelBaseReady(python: string, venv: string, runtimeIdentity: string): Promise<boolean> {
@@ -940,19 +1144,30 @@ async function ensureKernelPythonUncached(
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
-	const venv = await resolveWritableKernelVenvDir();
+	const runtimeIdentity = resolveRuntimeIdentitySync();
+	const { venv, root } = await resolveWritableKernelVenvDir(runtimeIdentity);
 	const python = kernelVenvPython(venv);
-	const runtimeIdentity = await resolveRuntimeIdentity();
-	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+	const finish = async (): Promise<string> => {
+		await touchKernelVenvLastUsed(venv);
+		if (root) await collectStaleKernelVenvs(root, venv).catch(() => undefined);
+		return python;
+	};
+	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return finish();
 
-	const releaseLock = await acquireBootstrapLock(venv);
+	const releaseLock = await acquireBootstrapLock(venv, options);
 	try {
-		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return finish();
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
 			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
-			return python;
+			return finish();
 		}
 
+		// Reaching here with an existing venv means it is broken or half-built (or,
+		// for the PRIME_AGENT_KERNEL_VENV override, recorded for another identity).
+		// An identity-addressed dir is only ever used by processes with this same
+		// identity, and they all serialize on this lock, so rebuilding it in place
+		// is safe; a different identity never lands here because it resolves to its
+		// own sibling directory.
 		const hadVenv = existsSync(venv);
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
 		if (hadVenv) {
@@ -968,17 +1183,47 @@ async function ensureKernelPythonUncached(
 	}
 
 	reportProgress(options, "✓ ready");
-	return python;
+	return finish();
+}
+
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	if (signal.aborted) return Promise.reject(createBootstrapLockAbortError());
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(createBootstrapLockAbortError());
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	});
+}
+
+// Attaches a caller to the shared in-flight work: the caller stops waiting when
+// its own signal aborts, while the shared work is only aborted once no attached
+// caller remains.
+function attachEnsureCaller(inFlight: InFlightEnsureKernelPython, signal: AbortSignal | undefined): Promise<string> {
+	inFlight.activeCallers += 1;
+	const detach = () => {
+		inFlight.activeCallers -= 1;
+		if (inFlight.activeCallers === 0) inFlight.controller.abort();
+	};
+	if (signal) signal.addEventListener("abort", detach, { once: true });
+	return raceWithAbort(inFlight.promise, signal).finally(() => {
+		signal?.removeEventListener("abort", detach);
+	});
 }
 
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
+	if (options.signal?.aborted) return Promise.reject(createBootstrapLockAbortError());
 	const pythonSkills = normalizePythonSkills(options.pythonSkills);
 	const key = ensureKernelPythonKey(pythonSkills);
-	if (inFlightEnsureKernelPython?.key === key) return inFlightEnsureKernelPython.promise;
+	if (inFlightEnsureKernelPython?.key === key && !inFlightEnsureKernelPython.controller.signal.aborted) {
+		return attachEnsureCaller(inFlightEnsureKernelPython, options.signal);
+	}
 
-	const promise = ensureKernelPythonUncached(options, pythonSkills).finally(() => {
+	const controller = new AbortController();
+	const promise = ensureKernelPythonUncached({ ...options, signal: controller.signal }, pythonSkills).finally(() => {
 		if (inFlightEnsureKernelPython?.promise === promise) inFlightEnsureKernelPython = null;
 	});
-	inFlightEnsureKernelPython = { key, promise };
-	return promise;
+	const inFlight: InFlightEnsureKernelPython = { key, promise, controller, activeCallers: 0 };
+	inFlightEnsureKernelPython = inFlight;
+	return attachEnsureCaller(inFlight, options.signal);
 }

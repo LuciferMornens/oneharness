@@ -1,5 +1,15 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,9 +18,11 @@ import {
 	DEFAULT_RLM_EXTRA_UV_ARGS,
 	ensureKernelPython,
 	getKernelVenvDir,
+	getKernelVenvsRoot,
 	type KernelPythonSkill,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
+import { getCurrentProcessStartId } from "../src/core/session-lease.js";
 
 let tempDir = "";
 let originalEnv: NodeJS.ProcessEnv;
@@ -43,8 +55,8 @@ function writeBootstrapVersion(venv: string, pythonSkills: readonly KernelPython
 	);
 }
 
-function createPythonSkill(name = "web-search"): KernelPythonSkill {
-	const packagePath = join(tempDir, "skills", name);
+function createPythonSkill(name = "web-search", skillsDir = join(tempDir, "skills")): KernelPythonSkill {
+	const packagePath = join(skillsDir, name);
 	const importName = name.replaceAll("-", "_");
 	const pyprojectPath = join(packagePath, "pyproject.toml");
 	mkdirSync(join(packagePath, "src", importName), { recursive: true });
@@ -159,7 +171,12 @@ describe("kernel bootstrap", () => {
 	});
 
 	afterEach(() => {
-		process.env = originalEnv;
+		// Mutate rather than replace process.env: a replaced object is not the real
+		// environment, so later HOME assignments would not reach os.homedir().
+		for (const key of Object.keys(process.env)) {
+			if (!(key in originalEnv)) delete process.env[key];
+		}
+		Object.assign(process.env, originalEnv);
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 			tempDir = "";
@@ -170,7 +187,106 @@ describe("kernel bootstrap", () => {
 		const venv = join(tempDir, "custom-venv");
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
-		expect(getKernelVenvDir()).toBe(venv);
+		expect(getKernelVenvDir(runtimeIdentity)).toBe(venv);
+		expect(getKernelVenvDir("sha256:other")).toBe(venv);
+	});
+
+	it("addresses default kernel venvs by runtime identity", () => {
+		const root = join(tempDir, ".prime", "agent", "kernel-venvs");
+		const sourceA = getKernelVenvDir(`sha256:${"a".repeat(64)}`);
+		const sourceB = getKernelVenvDir(`sha256:${"b".repeat(64)}`);
+		const registry = getKernelVenvDir("prime-agent-runtime");
+
+		expect(getKernelVenvsRoot()).toBe(root);
+		expect(sourceA).toBe(join(root, `9-${"a".repeat(12)}`));
+		expect(sourceB).toBe(join(root, `9-${"b".repeat(12)}`));
+		expect(registry).toMatch(/[/\\]9-[0-9a-f]{12}$/);
+		expect(new Set([sourceA, sourceB, registry]).size).toBe(3);
+	});
+
+	it("bootstraps the default venv under kernel-venvs without touching other identities", async () => {
+		const logPath = installFakeUv();
+		const venv = getKernelVenvDir(runtimeIdentity);
+		const otherVenv = join(getKernelVenvsRoot(), "9-000000000000");
+		mkdirSync(join(otherVenv, "bin"), { recursive: true });
+		writeFileSync(join(otherVenv, ".last-used"), "recent\n");
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(join(otherVenv, "bin"))).toBe(true);
+		expect(existsSync(join(venv, ".last-used"))).toBe(true);
+	});
+
+	it("garbage collects stale unlocked sibling venvs and the legacy venv", async () => {
+		const root = getKernelVenvsRoot();
+		const venv = getKernelVenvDir(runtimeIdentity);
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+
+		const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+		const makeSibling = (name: string, lastUsed: Date | undefined): string => {
+			const dir = join(root, name);
+			mkdirSync(join(dir, "bin"), { recursive: true });
+			if (lastUsed) {
+				writeFileSync(join(dir, ".last-used"), `${lastUsed.toISOString()}\n`);
+				utimesSync(join(dir, ".last-used"), lastUsed, lastUsed);
+			}
+			return dir;
+		};
+		const staleUnlocked = makeSibling("9-aaaaaaaaaaaa", eightDaysAgo);
+		const staleLocked = makeSibling("9-bbbbbbbbbbbb", eightDaysAgo);
+		mkdirSync(`${staleLocked}.bootstrap.lock`);
+		writeFileSync(join(`${staleLocked}.bootstrap.lock`, "pid"), `${process.pid}\n`);
+		const recent = makeSibling("9-cccccccccccc", new Date());
+		const markerless = makeSibling("9-dddddddddddd", undefined);
+		const legacy = join(tempDir, ".prime", "agent", "kernel-venv");
+		mkdirSync(join(legacy, "bin"), { recursive: true });
+		writeFileSync(join(legacy, ".last-used"), `${eightDaysAgo.toISOString()}\n`);
+		utimesSync(join(legacy, ".last-used"), eightDaysAgo, eightDaysAgo);
+
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		expect(existsSync(staleUnlocked)).toBe(false);
+		expect(existsSync(legacy)).toBe(false);
+		expect(existsSync(join(staleLocked, "bin"))).toBe(true);
+		expect(existsSync(join(recent, "bin"))).toBe(true);
+		expect(existsSync(join(markerless, "bin"))).toBe(true);
+		expect(existsSync(join(markerless, ".last-used"))).toBe(true);
+		expect(existsSync(join(venv, "bin"))).toBe(true);
+	});
+
+	it("leaves a marker-less legacy venv in place and starts its clock", async () => {
+		const venv = getKernelVenvDir(runtimeIdentity);
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		const legacy = join(tempDir, ".prime", "agent", "kernel-venv");
+		mkdirSync(join(legacy, "bin"), { recursive: true });
+
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		expect(existsSync(join(legacy, "bin"))).toBe(true);
+		expect(existsSync(join(legacy, ".last-used"))).toBe(true);
+	});
+
+	it("keeps PRIME_AGENT_KERNEL_VENV as an exact path and skips sibling garbage collection", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "custom", "venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+		const stale = join(getKernelVenvsRoot(), "9-aaaaaaaaaaaa");
+		mkdirSync(join(stale, "bin"), { recursive: true });
+		writeFileSync(join(stale, ".last-used"), "old\n");
+		utimesSync(join(stale, ".last-used"), eightDaysAgo, eightDaysAgo);
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(existsSync(join(venv, ".bootstrap-version"))).toBe(true);
+		expect(existsSync(join(stale, "bin"))).toBe(true);
 	});
 
 	it("bootstraps a missing venv with uv, prime-agent-runtime, and default extra packages", async () => {
@@ -372,6 +488,75 @@ dependencies = ["httpx"]
 		).toHaveLength(2);
 	});
 
+	it("accepts a warm venv whose manifest is a superset of the requested Python skills", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const skillA = createPythonSkill("skill-a");
+		const skillB = createPythonSkill("skill-b");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [skillB, skillA]);
+		const manifestBefore = readFileSync(join(venv, ".bootstrap-version"), "utf8");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [skillA] })).resolves.toBe(python);
+
+		expect(existsSync(logPath)).toBe(false);
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).toBe(manifestBefore);
+	});
+
+	it("installs only the missing Python skills into a warm venv and keeps recorded ones", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const skillA = createPythonSkill("skill-a");
+		const skillB = createPythonSkill("skill-b");
+		const skillC = createPythonSkill("skill-c");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [skillA, skillC]);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [skillA, skillB] })).resolves.toBe(python);
+
+		const log = readFileSync(logPath, "utf8");
+		expect(log).toContain(`--editable ${skillB.packagePath}`);
+		expect(log).not.toContain(`--editable ${skillA.packagePath}`);
+		expect(log).not.toContain(`--editable ${skillC.packagePath}`);
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
+			"skill_a",
+			"skill_b",
+			"skill_c",
+		]);
+	});
+
+	it("reinstalls a Python skill whose import name is recorded from a different package path", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const globalSkill = createPythonSkill("skill-a", join(tempDir, "global-skills"));
+		const projectSkill = createPythonSkill("skill-a", join(tempDir, "project-skills"));
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [globalSkill]);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [projectSkill] })).resolves.toBe(python);
+
+		expect(readFileSync(logPath, "utf8")).toContain(`--editable ${projectSkill.packagePath}`);
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills).toEqual([
+			{
+				importName: projectSkill.importName,
+				packagePath: projectSkill.packagePath,
+				pyprojectPath: projectSkill.pyprojectPath,
+				pyprojectHash: pyprojectHash(projectSkill.pyprojectPath),
+			},
+		]);
+	});
+
 	it("rebuilds a warm venv with legacy unhashed Python skill manifest entries", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
@@ -486,6 +671,132 @@ dependencies = ["httpx"]
 		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
 
 		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+	});
+
+	function writeBootstrapLock(venv: string, pid: number, startId?: string): string {
+		const lockDir = `${venv}.bootstrap.lock`;
+		mkdirSync(lockDir, { recursive: true });
+		writeFileSync(join(lockDir, "pid"), `${pid}\n`);
+		if (startId) writeFileSync(join(lockDir, "start-id"), `${startId}\n`);
+		return lockDir;
+	}
+
+	function exitedPid(): number {
+		const child = spawnSync("sh", ["-c", "exit 0"]);
+		if (!child.pid) throw new Error("could not spawn a short-lived process");
+		return child.pid;
+	}
+
+	it("reclaims a bootstrap lock whose owner pid is dead", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, exitedPid(), "proc:1");
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(lockDir)).toBe(false);
+	});
+
+	it("reclaims a bootstrap lock whose owner pid was reused by another process", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, "proc:0");
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(lockDir)).toBe(false);
+	});
+
+	it("waits for a live bootstrap lock and reports progress", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, getCurrentProcessStartId());
+		const progress: string[] = [];
+		const startedAt = Date.now();
+		const holdMs = 2_600;
+		const release = setTimeout(() => rmSync(lockDir, { recursive: true, force: true }), holdMs);
+
+		try {
+			await expect(ensureKernelPython({ onProgress: (message) => progress.push(message) })).resolves.toBe(
+				join(venv, "bin", "python"),
+			);
+		} finally {
+			clearTimeout(release);
+		}
+
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(holdMs - 50);
+		expect(progress).toContain("waiting for another prime-agent to finish Python kernel setup...");
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+	}, 10_000);
+
+	it("records its own pid and start id in the bootstrap lock", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = `${venv}.bootstrap.lock`;
+		let seen: { pid: string; startId: string } | undefined;
+		const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+		try {
+			await ensureKernelPython({
+				onProgress: () => {
+					if (!seen && existsSync(join(lockDir, "pid"))) {
+						seen = {
+							pid: readFileSync(join(lockDir, "pid"), "utf8").trim(),
+							startId: readFileSync(join(lockDir, "start-id"), "utf8").trim(),
+						};
+					}
+				},
+			});
+		} finally {
+			stderrWrite.mockRestore();
+		}
+
+		expect(seen).toEqual({ pid: String(process.pid), startId: getCurrentProcessStartId() });
+		expect(existsSync(lockDir)).toBe(false);
+	});
+
+	it("gives up on a live bootstrap lock after the wait bound and names the lock", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, getCurrentProcessStartId());
+		// Let the first poll see real time, then jump the clock past the wait bound.
+		const realNow = Date.now();
+		const mockedAt = performance.now();
+		const nowSpy = vi
+			.spyOn(Date, "now")
+			.mockImplementation(() => realNow + (performance.now() - mockedAt > 150 ? 16 * 60_000 : 0));
+
+		try {
+			await expect(ensureKernelPython()).rejects.toThrow(
+				new RegExp(
+					`Timed out after 15 minutes waiting for another prime-agent \\(pid ${process.pid}\\)[\\s\\S]*${lockDir}`,
+				),
+			);
+		} finally {
+			nowSpy.mockRestore();
+		}
+
+		expect(existsSync(join(lockDir, "pid"))).toBe(true);
+	});
+
+	it("stops waiting for a bootstrap lock when the signal aborts", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const lockDir = writeBootstrapLock(venv, process.pid, getCurrentProcessStartId());
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 100);
+
+		await expect(ensureKernelPython({ signal: controller.signal })).rejects.toThrow(/aborted while waiting/);
+
+		expect(existsSync(join(lockDir, "pid"))).toBe(true);
 	});
 
 	it("uses PRIME_AGENT_KERNEL_PYTHON as an override contract", async () => {
