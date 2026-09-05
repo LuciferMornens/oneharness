@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +17,7 @@ import {
 	DEFAULT_RLM_EXTRA_UV_ARGS,
 	ensureKernelPython,
 	getKernelVenvDir,
+	getKernelVenvsRoot,
 	type KernelPythonSkill,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
@@ -159,7 +169,12 @@ describe("kernel bootstrap", () => {
 	});
 
 	afterEach(() => {
-		process.env = originalEnv;
+		// Mutate rather than replace process.env: a replaced object is not the real
+		// environment, so later HOME assignments would not reach os.homedir().
+		for (const key of Object.keys(process.env)) {
+			if (!(key in originalEnv)) delete process.env[key];
+		}
+		Object.assign(process.env, originalEnv);
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 			tempDir = "";
@@ -170,7 +185,106 @@ describe("kernel bootstrap", () => {
 		const venv = join(tempDir, "custom-venv");
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
-		expect(getKernelVenvDir()).toBe(venv);
+		expect(getKernelVenvDir(runtimeIdentity)).toBe(venv);
+		expect(getKernelVenvDir("sha256:other")).toBe(venv);
+	});
+
+	it("addresses default kernel venvs by runtime identity", () => {
+		const root = join(tempDir, ".prime", "agent", "kernel-venvs");
+		const sourceA = getKernelVenvDir(`sha256:${"a".repeat(64)}`);
+		const sourceB = getKernelVenvDir(`sha256:${"b".repeat(64)}`);
+		const registry = getKernelVenvDir("prime-agent-runtime");
+
+		expect(getKernelVenvsRoot()).toBe(root);
+		expect(sourceA).toBe(join(root, `9-${"a".repeat(12)}`));
+		expect(sourceB).toBe(join(root, `9-${"b".repeat(12)}`));
+		expect(registry).toMatch(/[/\\]9-[0-9a-f]{12}$/);
+		expect(new Set([sourceA, sourceB, registry]).size).toBe(3);
+	});
+
+	it("bootstraps the default venv under kernel-venvs without touching other identities", async () => {
+		const logPath = installFakeUv();
+		const venv = getKernelVenvDir(runtimeIdentity);
+		const otherVenv = join(getKernelVenvsRoot(), "9-000000000000");
+		mkdirSync(join(otherVenv, "bin"), { recursive: true });
+		writeFileSync(join(otherVenv, ".last-used"), "recent\n");
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
+		expect(existsSync(join(otherVenv, "bin"))).toBe(true);
+		expect(existsSync(join(venv, ".last-used"))).toBe(true);
+	});
+
+	it("garbage collects stale unlocked sibling venvs and the legacy venv", async () => {
+		const root = getKernelVenvsRoot();
+		const venv = getKernelVenvDir(runtimeIdentity);
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+
+		const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+		const makeSibling = (name: string, lastUsed: Date | undefined): string => {
+			const dir = join(root, name);
+			mkdirSync(join(dir, "bin"), { recursive: true });
+			if (lastUsed) {
+				writeFileSync(join(dir, ".last-used"), `${lastUsed.toISOString()}\n`);
+				utimesSync(join(dir, ".last-used"), lastUsed, lastUsed);
+			}
+			return dir;
+		};
+		const staleUnlocked = makeSibling("9-aaaaaaaaaaaa", eightDaysAgo);
+		const staleLocked = makeSibling("9-bbbbbbbbbbbb", eightDaysAgo);
+		mkdirSync(`${staleLocked}.bootstrap.lock`);
+		writeFileSync(join(`${staleLocked}.bootstrap.lock`, "pid"), `${process.pid}\n`);
+		const recent = makeSibling("9-cccccccccccc", new Date());
+		const markerless = makeSibling("9-dddddddddddd", undefined);
+		const legacy = join(tempDir, ".prime", "agent", "kernel-venv");
+		mkdirSync(join(legacy, "bin"), { recursive: true });
+		writeFileSync(join(legacy, ".last-used"), `${eightDaysAgo.toISOString()}\n`);
+		utimesSync(join(legacy, ".last-used"), eightDaysAgo, eightDaysAgo);
+
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		expect(existsSync(staleUnlocked)).toBe(false);
+		expect(existsSync(legacy)).toBe(false);
+		expect(existsSync(join(staleLocked, "bin"))).toBe(true);
+		expect(existsSync(join(recent, "bin"))).toBe(true);
+		expect(existsSync(join(markerless, "bin"))).toBe(true);
+		expect(existsSync(join(markerless, ".last-used"))).toBe(true);
+		expect(existsSync(join(venv, "bin"))).toBe(true);
+	});
+
+	it("leaves a marker-less legacy venv in place and starts its clock", async () => {
+		const venv = getKernelVenvDir(runtimeIdentity);
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		const legacy = join(tempDir, ".prime", "agent", "kernel-venv");
+		mkdirSync(join(legacy, "bin"), { recursive: true });
+
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		expect(existsSync(join(legacy, "bin"))).toBe(true);
+		expect(existsSync(join(legacy, ".last-used"))).toBe(true);
+	});
+
+	it("keeps PRIME_AGENT_KERNEL_VENV as an exact path and skips sibling garbage collection", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "custom", "venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+		const stale = join(getKernelVenvsRoot(), "9-aaaaaaaaaaaa");
+		mkdirSync(join(stale, "bin"), { recursive: true });
+		writeFileSync(join(stale, ".last-used"), "old\n");
+		utimesSync(join(stale, ".last-used"), eightDaysAgo, eightDaysAgo);
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(existsSync(join(venv, ".bootstrap-version"))).toBe(true);
+		expect(existsSync(join(stale, "bin"))).toBe(true);
 	});
 
 	it("bootstraps a missing venv with uv, prime-agent-runtime, and default extra packages", async () => {

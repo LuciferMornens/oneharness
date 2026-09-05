@@ -8,7 +8,7 @@ import { stderr, stdin } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { getPackageDir } from "../../config.js";
+import { getPackageDir, VERSION } from "../../config.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 9;
@@ -56,6 +56,10 @@ const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
+const KERNEL_VENVS_DIR_NAME = "kernel-venvs";
+const LEGACY_KERNEL_VENV_DIR_NAME = "kernel-venv";
+const KERNEL_VENV_LAST_USED_FILE = ".last-used";
+const KERNEL_VENV_GC_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
 
@@ -336,43 +340,136 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 	].join("\0");
 }
 
-export function getKernelVenvDir(): string {
-	const override = process.env.PRIME_AGENT_KERNEL_VENV;
-	if (override) return path.resolve(expandHome(override));
-	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
+// Venvs are addressed by runtime identity so that different prime-agent builds
+// (a source checkout vs. an installed release, or two builds with different
+// rlm sources) coexist under kernel-venvs/ instead of rebuilding one shared
+// directory underneath each other's live kernels. A registry install has the
+// constant identity RUNTIME_REQUIREMENT, so the installed prime-agent version is
+// mixed into its segment to give every upgrade a fresh directory.
+function kernelVenvIdentitySegment(runtimeIdentity: string): string {
+	const hex = runtimeIdentity.startsWith("sha256:")
+		? runtimeIdentity.slice("sha256:".length)
+		: createHash("sha256").update(`${runtimeIdentity}\0${VERSION}`).digest("hex");
+	return `${BOOTSTRAP_SCHEMA}-${hex.slice(0, 12)}`;
 }
 
-function getFallbackKernelVenvDir(): string {
+export function getKernelVenvsRoot(): string {
+	return path.join(os.homedir(), ".prime", "agent", KERNEL_VENVS_DIR_NAME);
+}
+
+function getFallbackKernelVenvsRoot(): string {
 	if (process.platform === "win32") {
 		const localAppData = process.env.LOCALAPPDATA;
 		const dataHome = localAppData ? path.resolve(localAppData) : path.join(os.homedir(), "AppData", "Local");
-		return path.join(dataHome, "prime", "agent", "kernel-venv");
+		return path.join(dataHome, "prime", "agent", KERNEL_VENVS_DIR_NAME);
 	}
 	const dataHome = process.env.XDG_DATA_HOME
 		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
 		: path.join(os.homedir(), ".local", "share");
-	return path.join(dataHome, "prime", "agent", "kernel-venv");
+	return path.join(dataHome, "prime", "agent", KERNEL_VENVS_DIR_NAME);
 }
 
-async function resolveWritableKernelVenvDir(): Promise<string> {
-	const primary = getKernelVenvDir();
-	try {
-		await mkdir(path.dirname(primary), { recursive: true });
-		return primary;
-	} catch (primaryError) {
-		if (process.env.PRIME_AGENT_KERNEL_VENV) {
-			throw new Error(`couldn't create kernel venv parent directory for ${primary}: ${errorMessage(primaryError)}`);
-		}
+// PRIME_AGENT_KERNEL_VENV is an exact path: it is not identity-addressed and is
+// rebuilt in place when its recorded identity no longer matches.
+export function getKernelVenvDir(runtimeIdentity: string): string {
+	const override = process.env.PRIME_AGENT_KERNEL_VENV;
+	if (override) return path.resolve(expandHome(override));
+	return path.join(getKernelVenvsRoot(), kernelVenvIdentitySegment(runtimeIdentity));
+}
 
-		const fallback = getFallbackKernelVenvDir();
+export function resolveKernelVenvDirSync(): string {
+	return getKernelVenvDir(resolveRuntimeIdentitySync());
+}
+
+export function kernelVenvPython(venv: string): string {
+	return process.platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
+}
+
+interface ResolvedKernelVenv {
+	venv: string;
+	// The kernel-venvs/ root this venv lives in; undefined for the exact-path override.
+	root?: string;
+}
+
+async function resolveWritableKernelVenvDir(runtimeIdentity: string): Promise<ResolvedKernelVenv> {
+	const primary = getKernelVenvDir(runtimeIdentity);
+	if (process.env.PRIME_AGENT_KERNEL_VENV) {
 		try {
-			await mkdir(path.dirname(fallback), { recursive: true });
-			return fallback;
+			await mkdir(path.dirname(primary), { recursive: true });
+			return { venv: primary };
+		} catch (error) {
+			throw new Error(`couldn't create kernel venv parent directory for ${primary}: ${errorMessage(error)}`);
+		}
+	}
+
+	const segment = kernelVenvIdentitySegment(runtimeIdentity);
+	const primaryRoot = getKernelVenvsRoot();
+	try {
+		await mkdir(primaryRoot, { recursive: true });
+		return { venv: path.join(primaryRoot, segment), root: primaryRoot };
+	} catch {
+		const fallbackRoot = getFallbackKernelVenvsRoot();
+		try {
+			await mkdir(fallbackRoot, { recursive: true });
+			return { venv: path.join(fallbackRoot, segment), root: fallbackRoot };
 		} catch (fallbackError) {
 			throw new Error(
-				`couldn't create kernel venv directory at ${primary} or ${fallback}; set PRIME_AGENT_KERNEL_PYTHON to a python with a current prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
+				`couldn't create kernel venv directory at ${primary} or ${path.join(fallbackRoot, segment)}; set PRIME_AGENT_KERNEL_PYTHON to a python with a current prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
 			);
 		}
+	}
+}
+
+async function touchKernelVenvLastUsed(venv: string): Promise<void> {
+	try {
+		await writeFile(path.join(venv, KERNEL_VENV_LAST_USED_FILE), `${new Date().toISOString()}\n`, "utf8");
+	} catch {
+		// Best-effort marker; a missing marker only delays garbage collection.
+	}
+}
+
+async function bootstrapLockIsHeld(venv: string): Promise<boolean> {
+	const lockDir = bootstrapLockDir(venv);
+	if (!(await exists(lockDir))) return false;
+	return !(await bootstrapLockIsStale(lockDir));
+}
+
+async function collectStaleKernelVenv(venv: string, now: number): Promise<void> {
+	if (await bootstrapLockIsHeld(venv)) return;
+	const marker = path.join(venv, KERNEL_VENV_LAST_USED_FILE);
+	let markerStat: Awaited<ReturnType<typeof stat>>;
+	try {
+		markerStat = await stat(marker);
+	} catch {
+		// No marker yet (built by an older prime-agent, or never used since this
+		// marker was introduced): start the clock now instead of deleting.
+		await touchKernelVenvLastUsed(venv);
+		return;
+	}
+	if (now - markerStat.mtimeMs <= KERNEL_VENV_GC_AGE_MS) return;
+	await rm(venv, { recursive: true, force: true });
+}
+
+// Removes sibling venvs of other runtime identities that have not been used for a
+// week and are not being bootstrapped. A long-lived kernel still running from such
+// a venv is not detectable from here; the age threshold is the compromise.
+async function collectStaleKernelVenvs(root: string, currentVenv: string): Promise<void> {
+	const now = Date.now();
+	const candidates: string[] = [];
+	try {
+		for (const entry of await readdir(root, { withFileTypes: true })) {
+			if (!entry.isDirectory() || entry.name.endsWith(BOOTSTRAP_LOCK_NAME)) continue;
+			const venv = path.join(root, entry.name);
+			if (venv === currentVenv) continue;
+			candidates.push(venv);
+		}
+	} catch {
+		return;
+	}
+	const legacyVenv = path.join(path.dirname(root), LEGACY_KERNEL_VENV_DIR_NAME);
+	if (await exists(legacyVenv)) candidates.push(legacyVenv);
+	for (const venv of candidates) {
+		await collectStaleKernelVenv(venv, now).catch(() => undefined);
 	}
 }
 
@@ -476,6 +573,11 @@ async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	}
 }
 
+async function bootstrapLockIsStale(lockDir: string): Promise<boolean> {
+	const pid = await readLockPid(lockDir);
+	return pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid);
+}
+
 async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> {
 	const lockDir = bootstrapLockDir(venv);
 	await mkdir(path.dirname(lockDir), { recursive: true });
@@ -488,8 +590,7 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 		} catch (error) {
 			if (!isNodeError(error, "EEXIST")) throw error;
 
-			const pid = await readLockPid(lockDir);
-			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
+			if (await bootstrapLockIsStale(lockDir)) {
 				await rm(lockDir, { recursive: true, force: true });
 				continue;
 			}
@@ -717,9 +818,9 @@ function runtimeCandidateDirs(): string[] {
 	];
 }
 
-async function resolveRuntimeSourceDir(): Promise<string | null> {
+function resolveRuntimeSourceDir(): string | null {
 	for (const candidate of runtimeCandidateDirs()) {
-		if (await exists(path.join(candidate, "pyproject.toml"))) {
+		if (existsSync(path.join(candidate, "pyproject.toml"))) {
 			return candidate;
 		}
 	}
@@ -730,36 +831,40 @@ async function resolveRuntimeSourceDir(): Promise<string | null> {
 // content hash of every rlm/*.py file plus pyproject.toml, so any runtime code or
 // dependency change invalidates an existing venv automatically. Falls back to the
 // bare package name when the runtime resolves to a registry install (no local source).
-export async function resolveRuntimeIdentity(): Promise<string> {
-	const sourceDir = await resolveRuntimeSourceDir();
+// Synchronous so module-load-time callers (test guards) can resolve the venv path.
+export function resolveRuntimeIdentitySync(): string {
+	const sourceDir = resolveRuntimeSourceDir();
 	if (!sourceDir) return RUNTIME_REQUIREMENT;
 	return hashRuntimeSource(sourceDir);
+}
+
+export async function resolveRuntimeIdentity(): Promise<string> {
+	return resolveRuntimeIdentitySync();
 }
 
 // Throws if the local source can't be read. A failure here must surface rather than
 // fall back to RUNTIME_REQUIREMENT: that constant is the registry-install identity, and
 // recording it for a local checkout would permanently mask later source changes.
-async function hashRuntimeSource(sourceDir: string): Promise<string> {
+function hashRuntimeSource(sourceDir: string): string {
 	const rlmDir = path.join(sourceDir, "src", "rlm");
 	const files: string[] = [path.join(sourceDir, "pyproject.toml")];
-	async function collect(dir: string): Promise<void> {
-		const entries = await readdir(dir, { withFileTypes: true });
-		for (const entry of entries) {
+	function collect(dir: string): void {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
 			const full = path.join(dir, entry.name);
 			if (entry.isDirectory()) {
-				await collect(full);
+				collect(full);
 			} else if (entry.isFile() && entry.name.endsWith(".py")) {
 				files.push(full);
 			}
 		}
 	}
-	await collect(rlmDir);
+	collect(rlmDir);
 	files.sort();
 	const hash = createHash("sha256");
 	for (const file of files) {
 		hash.update(path.relative(sourceDir, file));
 		hash.update("\0");
-		hash.update(await readFile(file));
+		hash.update(readFileSync(file));
 		hash.update("\0");
 	}
 	return `sha256:${hash.digest("hex")}`;
@@ -773,9 +878,9 @@ async function bootstrapVenv(
 	await mkdir(path.dirname(venv), { recursive: true });
 	const uv = await ensureUv(options);
 	const python = kernelVenvPython(venv);
-	const sourceDir = await resolveRuntimeSourceDir();
+	const sourceDir = resolveRuntimeSourceDir();
 	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
-	const runtimeIdentity = await resolveRuntimeIdentity();
+	const runtimeIdentity = resolveRuntimeIdentitySync();
 
 	await run(uv, ["python", "install", PYTHON_VERSION]);
 	await run(uv, ["venv", venv, "--python", PYTHON_VERSION, "--seed"]);
@@ -789,10 +894,6 @@ async function bootstrapVenv(
 		...DEFAULT_RLM_EXTRA_UV_ARGS,
 	]);
 	await syncPythonSkills(uv, venv, python, runtimeIdentity, pythonSkills, options);
-}
-
-function kernelVenvPython(venv: string): string {
-	return process.platform === "win32" ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
 }
 
 async function resolvePythonOverride(override: string): Promise<string> {
@@ -940,19 +1041,30 @@ async function ensureKernelPythonUncached(
 		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
-	const venv = await resolveWritableKernelVenvDir();
+	const runtimeIdentity = resolveRuntimeIdentitySync();
+	const { venv, root } = await resolveWritableKernelVenvDir(runtimeIdentity);
 	const python = kernelVenvPython(venv);
-	const runtimeIdentity = await resolveRuntimeIdentity();
-	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+	const finish = async (): Promise<string> => {
+		await touchKernelVenvLastUsed(venv);
+		if (root) await collectStaleKernelVenvs(root, venv).catch(() => undefined);
+		return python;
+	};
+	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return finish();
 
 	const releaseLock = await acquireBootstrapLock(venv);
 	try {
-		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return finish();
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
 			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
-			return python;
+			return finish();
 		}
 
+		// Reaching here with an existing venv means it is broken or half-built (or,
+		// for the PRIME_AGENT_KERNEL_VENV override, recorded for another identity).
+		// An identity-addressed dir is only ever used by processes with this same
+		// identity, and they all serialize on this lock, so rebuilding it in place
+		// is safe; a different identity never lands here because it resolves to its
+		// own sibling directory.
 		const hadVenv = existsSync(venv);
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
 		if (hadVenv) {
@@ -968,7 +1080,7 @@ async function ensureKernelPythonUncached(
 	}
 
 	reportProgress(options, "✓ ready");
-	return python;
+	return finish();
 }
 
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {

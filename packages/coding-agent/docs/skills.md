@@ -165,7 +165,7 @@ await web_search.run("prime agent skills")
 help(web_search)
 ```
 
-Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.prime/agent/kernel-venv`; set `PRIME_AGENT_KERNEL_VENV` to override it. If `pyproject.toml` changes, Prime Agent rebuilds the kernel venv so dependency changes are picked up.
+Python skills are installed editable into the kernel venv during kernel setup. By default this is `~/.prime/agent/kernel-venvs/<schema>-<runtime-hash>`; set `PRIME_AGENT_KERNEL_VENV` to override it with one exact path. If `pyproject.toml` changes, Prime Agent rebuilds the kernel venv so dependency changes are picked up.
 
 If you set `PRIME_AGENT_KERNEL_PYTHON`, Prime Agent does not install packages into that environment. The Python must already have a current `prime-agent-runtime` and the default runtime packages installed. Missing Python skill imports are disabled with a warning and calling the skill raises a `RuntimeError`.
 

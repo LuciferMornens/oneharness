@@ -76,10 +76,10 @@ The Python side does not call providers or implement an agent loop.
 The kernel is created lazily on first Python REPL use. Python resolution is:
 
 1. `PRIME_AGENT_KERNEL_PYTHON`, when it has a current `prime-agent-runtime`;
-2. `~/.prime/agent/kernel-venv/bin/python`, bootstrapped with `uv`; or
-3. the XDG data location when `~/.prime` is not writable.
+2. `~/.prime/agent/kernel-venvs/<schema>-<runtime-hash>/bin/python`, bootstrapped with `uv`; or
+3. the same `kernel-venvs/` layout under the XDG data location when `~/.prime` is not writable.
 
-The managed environment includes Python 3.11, `prime-agent-runtime`, `dill`, and the default Python packages. A bootstrap marker detects stale environments.
+The managed environment includes Python 3.11, `prime-agent-runtime`, `dill`, and the default Python packages. Each venv directory is named after the bootstrap schema and a hash of the `prime-agent-runtime` source it was built from (for registry installs: the package name plus the installed prime-agent version), so different prime-agent builds keep separate venvs and never rebuild one while another build's kernels are running from it. A bootstrap marker inside the venv detects a broken or half-built environment, which is repaired in place under a bootstrap lock. Sibling venvs of other identities are removed once their `.last-used` marker is older than seven days and no bootstrap lock is held on them; the marker is refreshed on every kernel start. `PRIME_AGENT_KERNEL_VENV` points at one exact venv path instead, which is rebuilt in place when its recorded identity changes.
 
 Startup spawns `python -m rlm.repl` and exchanges newline-delimited JSON over stdio: the runtime announces itself with a single `ready` event, then requests and events flow one JSON object per line (see `prime-agent-runtime/src/rlm/repl.md`).
 

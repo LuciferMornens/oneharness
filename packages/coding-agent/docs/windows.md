@@ -83,7 +83,7 @@ When PowerShell is selected, Prime Agent uses non-interactive `-Command` executi
 
 ## IPython Runtime
 
-The managed runtime is stored under `~/.prime/agent/kernel-venv` and uses the Windows virtual-environment layout automatically. To use an existing Python environment with `ipykernel`, set:
+The managed runtime is stored under `~/.prime/agent/kernel-venvs/<schema>-<runtime-hash>` and uses the Windows virtual-environment layout automatically. To use an existing Python environment with `ipykernel`, set:
 
 ```powershell
 $env:PRIME_AGENT_KERNEL_PYTHON = "C:\path\to\python.exe"
