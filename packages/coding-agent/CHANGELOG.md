@@ -38,6 +38,10 @@
 - Hid background Windows subprocess consoles, made IPython and the session catalog lazy, and stopped the catalog after 30 seconds idle to reduce startup churn and memory without removing on-demand capabilities.
 - Fixed `--no-env` to unset every supported provider credential environment variable.
 
+## [0.9.3] - 2026-09-06
+
+- Fixed ChatGPT OAuth model discovery hiding GPT-6 Astra by advertising Codex CLI 0.153.4 instead of 0.147.0.
+
 ## [0.9.2] - 2026-09-05
 
 - Fixed daemon session creation after macOS timezone changes ([#879](https://github.com/PrimeIntellect-ai/prime-agent/issues/879))

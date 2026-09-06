@@ -1,1 +1,0 @@
-- Fixed Codex subscription model discovery omitting GPT-6 Astra from available subagent models.

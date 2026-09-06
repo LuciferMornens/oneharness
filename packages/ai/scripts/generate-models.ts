@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { assertValidReasoningCapabilities } from "../src/models.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
@@ -79,12 +80,7 @@ interface AiGatewayModel {
 	};
 }
 
-const COPILOT_STATIC_HEADERS = {
-	"User-Agent": "GitHubCopilotChat/0.35.0",
-	"Editor-Version": "vscode/1.107.0",
-	"Editor-Plugin-Version": "copilot-chat/0.35.0",
-	"Copilot-Integration-Id": "vscode-chat",
-} as const;
+const COPILOT_STATIC_HEADERS = COPILOT_CLIENT_HEADERS;
 
 const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
@@ -847,7 +843,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
 	}
 	if (
-		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
+		(model.api === "openai-responses" ||
+			model.api === "azure-openai-responses" ||
+			model.api === "openai-codex-responses") &&
 		model.id.startsWith("gpt-6")
 	) {
 		mergeThinkingLevelMap(model, { off: null });
@@ -1444,10 +1442,22 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 
 			// Convert pricing from $/token to $/million tokens. OpenRouter uses
 			// negative values as a placeholder for unknown pricing (e.g. auto-beta).
-			const inputCost = Math.max(0, parseFloat(model.pricing?.prompt || "0")) * 1_000_000;
-			const outputCost = Math.max(0, parseFloat(model.pricing?.completion || "0")) * 1_000_000;
-			const cacheReadCost = Math.max(0, parseFloat(model.pricing?.input_cache_read || "0")) * 1_000_000;
-			const cacheWriteCost = Math.max(0, parseFloat(model.pricing?.input_cache_write || "0")) * 1_000_000;
+			// Time-windowed tariff overrides (utc_start/utc_end) make the top-level
+			// price clock-dependent (e.g. Tencent Hy3 peak/off-peak); commit the peak
+			// rate so cost accounting never undercounts and regens stay hour-independent.
+			const timeWindowedTariffs = (Array.isArray(model.pricing?.overrides) ? model.pricing.overrides : []).filter(
+				(override: any) => typeof override?.utc_start === "number",
+			);
+			const peakPrice = (field: string): number =>
+				Math.max(
+					0,
+					parseFloat(model.pricing?.[field] || "0"),
+					...timeWindowedTariffs.map((override: any) => parseFloat(override?.[field] || "0")),
+				) * 1_000_000;
+			const inputCost = peakPrice("prompt");
+			const outputCost = peakPrice("completion");
+			const cacheReadCost = peakPrice("input_cache_read");
+			const cacheWriteCost = peakPrice("input_cache_write");
 			const reasoningCapabilities = getOpenRouterReasoningCapabilities(model);
 
 			const normalizedModel: Model<any> = {
@@ -2587,26 +2597,6 @@ function updatePreservedReasoningMetadata(model: Model<any>): void {
 	syncLegacyThinkingLevelMap(model);
 }
 
-function getCodexAstraModel(): Model<"openai-codex-responses"> {
-	return {
-		id: "gpt-6-astra",
-		name: "GPT-6 Astra",
-		api: "openai-codex-responses",
-		provider: "openai-codex",
-		baseUrl: "https://chatgpt.com/backend-api",
-		reasoning: true,
-		reasoningCapabilities: {
-			control: "effort",
-			levels: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
-		},
-		input: ["text", "image"],
-		cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
-		// Default subscription window from the Codex catalog, not the API's 1.05M window.
-		contextWindow: 272000,
-		maxTokens: 128000,
-	};
-}
-
 const GROK_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 
 /**
@@ -2950,7 +2940,6 @@ function mergeCatalogModels(allModels: Model<any>[], extra: Model<any>[]): void 
 
 function mergeStaticCatalogModels(allModels: Model<any>[]): void {
 	mergeCatalogModels(allModels, [
-		getCodexAstraModel(),
 		...getGrokSubscriptionModels(),
 		...getAudnModels(),
 		...getAbliterationModels(),
@@ -3403,7 +3392,6 @@ async function generateModels() {
 	const CODEX_CONTEXT = 272000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
-		getCodexAstraModel(),
 		{
 			id: "gpt-5.1",
 			name: "GPT-5.1",
@@ -3533,6 +3521,18 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},

@@ -11,6 +11,11 @@
 - Fixed legacy Google and Vertex thinkingLevelMap overlays to fill missing levels with native named thinking levels or token budgets.
 - Updated the generated model catalog with current reasoning-capable provider routes.
 
+## [0.9.3] - 2026-09-06
+
+- Added GPT-6 Astra to the Codex/ChatGPT OAuth catalog with its mandatory-reasoning effort levels, and bumped the Codex discovery client version to 0.153.4 so account discovery lists it (reported by endcycles and api-moose in discussion #2062).
+- Bumped the impersonated client versions: Claude Code 2.1.257 -> 2.1.261 and GitHub Copilot Chat 0.35.0 -> 0.48.1 on VS Code 1.136.1, keeping OAuth traffic accepted as a current client; the Copilot client identity now has a single owner shared by the OAuth flow and the generated catalog headers.
+
 ## [0.9.2] - 2026-09-05
 
 - Fixed Claude Fable 5.x failing over Anthropic OAuth with "Claude Code 2.1.75 does not support this model" by bumping the impersonated Claude Code version to 2.1.257 ([#1962](https://github.com/PrimeIntellect-ai/prime-agent/issues/1962))
