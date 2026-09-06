@@ -19,22 +19,25 @@ describe("ENG-4620 fast mode settings", () => {
 		harness = undefined;
 	});
 
-	it("defaults ChatGPT-auth GPT models to fast when no preference is saved", async () => {
+	it.each(["gpt-5.6-sol", "gpt-6-astra"])(
+		"defaults ChatGPT-auth %s to fast when no preference is saved",
+		async (id) => {
+			harness = await createHarness({
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				models: [{ id }],
+			});
+
+			expect(harness.settingsManager.getConfiguredDefaultServiceTier()).toBeUndefined();
+			expect(harness.session.serviceTier).toBe("priority");
+		},
+	);
+
+	it.each(["gpt-5.6-sol", "gpt-6-astra"])("keeps an explicit off preference over the %s fast default", async (id) => {
 		harness = await createHarness({
 			api: "openai-codex-responses",
 			provider: "openai-codex",
-			models: [{ id: "gpt-5.6-sol" }],
-		});
-
-		expect(harness.settingsManager.getConfiguredDefaultServiceTier()).toBeUndefined();
-		expect(harness.session.serviceTier).toBe("priority");
-	});
-
-	it("keeps an explicit default preference over the ChatGPT-auth fast default", async () => {
-		harness = await createHarness({
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			models: [{ id: "gpt-5.6-sol" }],
+			models: [{ id }],
 		});
 		const currentHarness = harness;
 
@@ -83,6 +86,17 @@ describe("ENG-4620 fast mode settings", () => {
 		const { session: nextSession } = await createSession();
 		sessions.push(nextSession);
 		expect(nextSession.serviceTier).toBe("default");
+	});
+
+	it("defaults API Astra to fast and persists toggling it off and back on", async () => {
+		harness = await createHarness({ api: "openai-responses", provider: "openai", models: [{ id: "gpt-6-astra" }] });
+		expect(harness.session.serviceTier).toBe("priority");
+		harness.session.setServiceTier("default");
+		expect(harness.session.serviceTier).toBe("default");
+		expect(harness.settingsManager.getConfiguredDefaultServiceTier()).toBe("default");
+		harness.session.setServiceTier("priority");
+		expect(harness.session.serviceTier).toBe("priority");
+		expect(harness.settingsManager.getConfiguredDefaultServiceTier()).toBe("priority");
 	});
 
 	it("persists the preference across settings manager restarts", async () => {

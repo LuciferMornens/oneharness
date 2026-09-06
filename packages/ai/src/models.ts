@@ -60,7 +60,15 @@ export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean 
 		return capabilities?.control === "effort" && capabilities.levels.low != null;
 	}
 	const eligibleId =
-		model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-");
+		model.id === "gpt-5.4" ||
+		model.id === "gpt-5.5" ||
+		model.id === "gpt-5.6" ||
+		model.id.startsWith("gpt-5.6-") ||
+		model.id === "gpt-6-astra";
+	// Astra Fast mode is unavailable with EU API data residency.
+	if (model.id === "gpt-6-astra" && /^https:\/\/eu\.api\.openai\.com(?:[/:]|$)/i.test(model.baseUrl)) {
+		return false;
+	}
 	return (
 		eligibleId &&
 		((model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
@@ -70,7 +78,7 @@ export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean 
 
 /** Default service tier when the user has not saved a preference. */
 export function defaultServiceTierForModel<TApi extends Api>(model: Model<TApi> | undefined | null): ServiceTier {
-	if (model && model.provider === "openai-codex" && supportsFastMode(model)) {
+	if (model && (model.provider === "openai-codex" || model.id === "gpt-6-astra") && supportsFastMode(model)) {
 		return "priority";
 	}
 	return "default";

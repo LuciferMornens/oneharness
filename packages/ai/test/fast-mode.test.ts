@@ -19,7 +19,7 @@ function model(provider: string, id: string, api: Api): Model<Api> {
 }
 
 describe("Fast mode", () => {
-	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-luna"])("supports %s through ChatGPT auth", (id) => {
+	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-luna", "gpt-6-astra"])("supports %s through ChatGPT auth", (id) => {
 		expect(supportsFastMode(model("openai-codex", id, "openai-codex-responses"))).toBe(true);
 	});
 
@@ -41,8 +41,25 @@ describe("Fast mode", () => {
 		expect(buildBaseOptions(testModel, { serviceTier: "priority" }).serviceTier).toBe("priority");
 	});
 
-	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna"])("defaults ChatGPT-auth %s to priority", (id) => {
-		expect(defaultServiceTierForModel(model("openai-codex", id, "openai-codex-responses"))).toBe("priority");
+	it.each(["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra"])(
+		"defaults ChatGPT-auth %s to priority",
+		(id) => {
+			expect(defaultServiceTierForModel(model("openai-codex", id, "openai-codex-responses"))).toBe("priority");
+		},
+	);
+
+	it("defaults native API Astra to fast and forwards an explicit off preference", () => {
+		const astra = model("openai", "gpt-6-astra", "openai-responses");
+		expect(supportsFastMode(astra)).toBe(true);
+		expect(defaultServiceTierForModel(astra)).toBe("priority");
+		expect(buildBaseOptions(astra, { serviceTier: "default" }).serviceTier).toBe("default");
+		expect(defaultServiceTierForModel(model("openrouter", "gpt-6-astra", "openai-completions"))).toBe("default");
+	});
+
+	it("keeps Astra standard on the EU API data-residency endpoint", () => {
+		const astra = { ...model("openai", "gpt-6-astra", "openai-responses"), baseUrl: "https://eu.api.openai.com/v1" };
+		expect(supportsFastMode(astra)).toBe(false);
+		expect(defaultServiceTierForModel(astra)).toBe("default");
 	});
 
 	it("does not default API-key GPT or Grok models to priority", () => {
