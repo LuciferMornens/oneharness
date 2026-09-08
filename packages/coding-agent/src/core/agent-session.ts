@@ -21,6 +21,7 @@ import type {
 	ImageContent,
 	Model,
 	ServiceTier,
+	StopReason,
 	TextContent,
 	Usage,
 	UserMessage,
@@ -283,6 +284,11 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.js"
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import {
+	createTruncatedOutputContinuation,
+	isActionlessTruncation,
+	MAX_TRUNCATED_OUTPUT_CONTINUATIONS,
+} from "./truncated-output.js";
 import { addAssistantUsage, emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
 
@@ -1113,6 +1119,7 @@ export class AgentSession {
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
+	private _truncatedOutputContinuations = 0;
 
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
@@ -3383,12 +3390,33 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * A turn that hits the output limit while still thinking leaves no text and no
+	 * tool call; ending there strands the task. Nudge the model to act, bounded so a
+	 * model that keeps overrunning the limit cannot loop.
+	 */
+	private _getTruncatedOutputContinuation(message: AssistantMessage): UserMessage | undefined {
+		if (!isActionlessTruncation(message)) {
+			this._truncatedOutputContinuations = 0;
+			return undefined;
+		}
+		if (this._truncatedOutputContinuations >= MAX_TRUNCATED_OUTPUT_CONTINUATIONS) {
+			return undefined;
+		}
+		this._truncatedOutputContinuations++;
+		return createTruncatedOutputContinuation();
+	}
+
 	private async _getContinuationMessages(
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
 		if (this.queuedActionCount > 0) {
 			return [];
+		}
+		const truncatedContinuation = this._getTruncatedOutputContinuation(context.message);
+		if (truncatedContinuation) {
+			return [truncatedContinuation];
 		}
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
 		const goalSnapshot = this._goalState;
@@ -3814,6 +3842,7 @@ export class AgentSession {
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
+			this._truncatedOutputContinuations = 0;
 			this.sessionManager.recordGitStateIfChanged();
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
@@ -10923,6 +10952,7 @@ export class AgentSession {
 							kind: "completed_without_reply",
 							childId: run.id,
 							sessionName,
+							lastStopReason: child.getLastAssistantStopReason(),
 							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
 						}),
 					);
@@ -12170,6 +12200,14 @@ export class AgentSession {
 
 		writeFileSync(filePath, `${lines.join("\n")}\n`);
 		return filePath;
+	}
+
+	getLastAssistantStopReason(): StopReason | undefined {
+		const lastAssistant = this.messages
+			.slice()
+			.reverse()
+			.find((message) => message.role === "assistant") as AssistantMessage | undefined;
+		return lastAssistant?.stopReason;
 	}
 
 	/**

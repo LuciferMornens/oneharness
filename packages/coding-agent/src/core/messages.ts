@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, Message, StopReason, TextContent } from "@earendil-works/pi-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
 import type { AppliedRefinementEdit, HarnessScope, RefinementResult } from "./refinement/refinement.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
@@ -106,8 +106,13 @@ export type RlmChildTerminalNoticeDetails =
 			kind: "completed_without_reply";
 			childId: string;
 			sessionName: string;
+			lastStopReason?: StopReason;
 			lastAssistantTextPreview?: string;
 	  };
+
+function describeStopReason(stopReason: StopReason): string {
+	return stopReason === "length" ? "length (output token limit reached)" : stopReason;
+}
 
 export function createRlmChildFailureMessage(
 	details: RlmChildFailureDetails,
@@ -130,7 +135,7 @@ export function createRlmChildTerminalNoticeMessage(
 	const content =
 		details.kind === "cancelled"
 			? `RLM child ${details.sessionName} (${details.childId}) was cancelled${details.reason ? `: ${details.reason}` : ""}`
-			: `RLM child ${details.sessionName} (${details.childId}) completed without sending a reply${details.lastAssistantTextPreview ? `. Last assistant text: ${details.lastAssistantTextPreview}` : ""}`;
+			: `RLM child ${details.sessionName} (${details.childId}) completed without sending a reply${details.lastStopReason ? ` (last stop reason: ${describeStopReason(details.lastStopReason)})` : ""}${details.lastAssistantTextPreview ? `. Last assistant text: ${details.lastAssistantTextPreview}` : ""}`;
 	return {
 		role: "custom",
 		customType: RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,

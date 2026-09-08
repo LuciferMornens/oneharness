@@ -1,0 +1,2 @@
+- Added an automatic continuation when a turn stops at the output token limit with no text or tool call, instead of silently ending the turn.
+- Changed the subagent "completed without sending a reply" notice to include the child's last stop reason.

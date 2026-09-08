@@ -1,0 +1,1 @@
+- Changed the default output limit for Claude Fable/Mythos 5.x and GPT-6 models to their full 128k so high-effort thinking no longer hits the 32k cap before a tool call.
