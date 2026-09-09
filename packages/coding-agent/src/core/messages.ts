@@ -35,6 +35,8 @@ export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
 export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
+export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
+export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Shell message received";
 
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
@@ -112,6 +114,36 @@ export type RlmChildTerminalNoticeDetails =
 
 function describeStopReason(stopReason: StopReason): string {
 	return stopReason === "length" ? "length (output token limit reached)" : stopReason;
+}
+
+export interface AsyncBashCompletionDetails {
+	pid: number;
+	command: string;
+	exitCode: number;
+}
+
+interface AsyncBashCompletionMessage extends CustomMessage<AsyncBashCompletionDetails> {
+	customType: typeof ASYNC_BASH_COMPLETION_CUSTOM_TYPE;
+	content: string;
+}
+
+export function createAsyncBashCompletionMessage(
+	details: AsyncBashCompletionDetails,
+	timestamp = Date.now(),
+): AsyncBashCompletionMessage {
+	return {
+		role: "custom",
+		customType: ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+		content: `${ASYNC_BASH_COMPLETION_PREVIEW_LABEL}.
+Source: bash
+Command completed (pid ${details.pid}, exit code ${details.exitCode}).
+Command: ${JSON.stringify(details.command)}
+
+Inspect the saved BashHandle with .poll(), .output(), or .tail(), then continue the task.`,
+		display: true,
+		details,
+		timestamp,
+	};
 }
 
 export function createRlmChildFailureMessage(

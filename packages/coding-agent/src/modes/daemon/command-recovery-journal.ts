@@ -1,12 +1,7 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
-import {
-	appendRecoveryJournalLine,
-	readAndRepairRecoveryJournal,
-	replaceRecoveryJournal,
-	withRecoveryJournalLock,
-} from "./recovery-journal-file.js";
 
 interface ReceivedRecord {
 	version: 1;
@@ -62,7 +57,7 @@ export class CommandRecoveryJournal {
 
 	constructor(private readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-		this.load(withRecoveryJournalLock(this.path, () => readAndRepairRecoveryJournal(this.path)));
+		this.load();
 	}
 
 	lookup(
@@ -131,8 +126,27 @@ export class CommandRecoveryJournal {
 		}
 	}
 
-	private load(contents: string): void {
-		for (const line of contents.split("\n")) {
+	private load(): void {
+		let contents: string;
+		try {
+			contents = readFileSync(this.path, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				return;
+			}
+			throw error;
+		}
+		const rawLines = contents.split("\n");
+		const unterminated = contents.length > 0 && !contents.endsWith("\n");
+		if (unterminated) {
+			rawLines.pop();
+			writeFileAtomicSync(this.path, rawLines.length > 0 ? `${rawLines.filter(Boolean).join("\n")}\n` : "", {
+				mode: 0o600,
+				fsync: true,
+				fsyncDir: true,
+			});
+		}
+		for (const line of rawLines) {
 			if (!line) {
 				continue;
 			}
@@ -169,10 +183,20 @@ export class CommandRecoveryJournal {
 	}
 
 	private append(record: JournalRecord): void {
-		withRecoveryJournalLock(this.path, () => {
-			readAndRepairRecoveryJournal(this.path);
-			appendRecoveryJournalLine(this.path, JSON.stringify(record));
-		});
+		const descriptor = openSync(this.path, "a", 0o600);
+		try {
+			const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error(`Short write appending to ${this.path}`);
+				offset += written;
+			}
+			fsyncSync(descriptor);
+		} finally {
+			closeSync(descriptor);
+		}
+		chmodSync(this.path, 0o600);
 		this.recordCount++;
 	}
 
@@ -190,12 +214,10 @@ export class CommandRecoveryJournal {
 				});
 			}
 		}
-		withRecoveryJournalLock(this.path, () => {
-			readAndRepairRecoveryJournal(this.path);
-			replaceRecoveryJournal(
-				this.path,
-				records.map((record) => JSON.stringify(record)),
-			);
+		writeFileAtomicSync(this.path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, {
+			mode: 0o600,
+			fsync: true,
+			fsyncDir: true,
 		});
 		this.recordCount = records.length;
 	}

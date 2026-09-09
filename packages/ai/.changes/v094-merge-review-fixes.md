@@ -1,0 +1,1 @@
+- Fixed Codex flat streaming usage-limit errors not showing the friendly rate-limit message and retry delay.

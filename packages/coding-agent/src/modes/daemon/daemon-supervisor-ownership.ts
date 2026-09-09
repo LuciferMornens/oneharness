@@ -1,25 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
 	chmodSync,
-	closeSync,
 	existsSync,
-	fsyncSync,
 	lstatSync,
 	mkdirSync,
-	openSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
-	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import lockfile from "proper-lockfile";
 import { APP_NAME } from "../../config.js";
 import { getProcessStartId } from "../../core/session-lease.js";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
+import { isZombieProcess, processIdExists } from "../../utils/child-process.js";
 import { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 import { canonicalizeDaemonFilesystemPath, defaultDaemonSocketDir } from "./daemon-paths.js";
 
@@ -1045,7 +1043,7 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		typeof current.processStartId !== "string" ||
 		current.processStartId !== owner.processStartId ||
 		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
-		!isProcessAlive(current.pid)
+		!isOwnerProcessAlive(current.pid)
 	) {
 		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
 	}
@@ -1621,7 +1619,7 @@ export async function waitForDaemonStartupFence(
 }
 
 function isProcessIdentityAlive(identity: ProcessIdentity): boolean {
-	if (!isProcessAlive(identity.pid)) {
+	if (!isOwnerProcessAlive(identity.pid)) {
 		return false;
 	}
 	if (!identity.processStartId) {
@@ -1632,18 +1630,36 @@ function isProcessIdentityAlive(identity: ProcessIdentity): boolean {
 }
 
 function matchesExactProcessIdentity(identity: ProcessIdentity): boolean {
-	if (!isProcessAlive(identity.pid)) {
+	if (!isOwnerProcessAlive(identity.pid)) {
 		return false;
 	}
 	return typeof identity.processStartId === "string" && getProcessStartId(identity.pid) === identity.processStartId;
 }
 
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+// The 250ms fence poll must not spawn `ps` (macOS/BSD zombie check) per tick; existence stays kill(0)-checked every tick.
+const OWNER_ZOMBIE_CONFIRM_INTERVAL_MS = 5000;
+const ownerZombieConfirmations = new Map<number, number>();
+
+function isOwnerProcessAlive(pid: number): boolean {
+	if (!processIdExists(pid)) {
+		ownerZombieConfirmations.delete(pid);
+		return false;
 	}
+	const now = Date.now();
+	const confirmedAt = ownerZombieConfirmations.get(pid);
+	if (confirmedAt !== undefined && now - confirmedAt < OWNER_ZOMBIE_CONFIRM_INTERVAL_MS) {
+		return true;
+	}
+	if (isZombieProcess(pid)) {
+		ownerZombieConfirmations.delete(pid);
+		return false;
+	}
+	for (const [staleOwnerPid, staleConfirmedAt] of ownerZombieConfirmations) {
+		if (now - staleConfirmedAt >= OWNER_ZOMBIE_CONFIRM_INTERVAL_MS) {
+			ownerZombieConfirmations.delete(staleOwnerPid);
+		}
+	}
+	ownerZombieConfirmations.set(pid, now);
 	return true;
 }
 
@@ -1848,7 +1864,7 @@ function daemonAgentDirFromOwner(
 }
 
 function isUnverifiedLegacyOwnerActive(owner: PersistedDaemonSupervisorOwnerRecord): boolean {
-	if (!isProcessAlive(owner.pid)) {
+	if (!isOwnerProcessAlive(owner.pid)) {
 		return false;
 	}
 	if (owner.processStartId) {
@@ -2068,23 +2084,7 @@ function readShutdownAdmission(path: string): DaemonShutdownAdmissionRecord | un
 }
 
 function writeJsonAtomically(path: string, value: unknown): void {
-	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	let descriptor: number | undefined;
-	try {
-		descriptor = openSync(tempPath, "wx", 0o600);
-		writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-		fsyncSync(descriptor);
-		closeSync(descriptor);
-		descriptor = undefined;
-		renameSync(tempPath, path);
-		if (process.platform !== "win32") {
-			descriptor = openSync(dirname(path), "r");
-			fsyncSync(descriptor);
-		}
-	} finally {
-		if (descriptor !== undefined) closeSync(descriptor);
-		rmSync(tempPath, { force: true });
-	}
+	writeFileAtomicSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
 function startupFencePath(directory: string, socketPath: string): string {

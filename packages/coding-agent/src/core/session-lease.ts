@@ -1,9 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
-import { WINDOWS_POWERSHELL_EXECUTABLES } from "../utils/child-process.js";
+import { execFileSyncHidden, isProcessAlive, WINDOWS_POWERSHELL_EXECUTABLES } from "../utils/child-process.js";
 
 export const SESSION_LEASES_ENABLED_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
 export const SESSION_LEASE_OWNER_ID_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
@@ -51,8 +50,8 @@ export class SessionLease {
 		try {
 			withLeaseGuard(this.directory, () => {
 				const owner = readLeaseOwner(this.directory);
-				if (owner?.token === this.token) {
-					rmSync(this.directory, { recursive: true, force: true });
+				if (typeof owner === "object" && owner.token === this.token) {
+					reclaimStaleLease(this.directory);
 				}
 			});
 		} catch {
@@ -84,9 +83,17 @@ export function canonicalSessionPath(sessionPath: string): string {
 	}
 }
 
-function readLeaseOwner(directory: string): SessionLeaseOwner | undefined {
+// An unreadable owner may hold a live lease. Only a missing owner is safely absent.
+function readLeaseOwner(directory: string): SessionLeaseOwner | "absent" | "unreadable" {
+	const ownerPath = join(directory, "owner.json");
+	let raw: string;
 	try {
-		const parsed = JSON.parse(readFileSync(join(directory, "owner.json"), "utf8")) as Partial<SessionLeaseOwner>;
+		raw = readFileSync(ownerPath, "utf8");
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
+	}
+	try {
+		const parsed = JSON.parse(raw) as Partial<SessionLeaseOwner>;
 		if (
 			parsed.version !== 1 ||
 			typeof parsed.token !== "string" ||
@@ -94,20 +101,14 @@ function readLeaseOwner(directory: string): SessionLeaseOwner | undefined {
 			typeof parsed.sessionPath !== "string" ||
 			typeof parsed.createdAt !== "string"
 		) {
-			return undefined;
+			throw new TypeError(`Corrupt session lease owner file: ${ownerPath} (missing or invalid required fields)`);
 		}
 		return parsed as SessionLeaseOwner;
-	} catch {
-		return undefined;
-	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
+		if (error instanceof SyntaxError || error instanceof TypeError) {
+			throw new Error(`Corrupt session lease owner file: ${ownerPath} - ${error.message}`);
+		}
+		throw error;
 	}
 }
 
@@ -118,10 +119,9 @@ interface ProcessQueryOptions {
 type ProcessQuery = (command: string, args: string[], options?: ProcessQueryOptions) => string;
 
 function runProcessQuery(command: string, args: string[], options?: ProcessQueryOptions): string {
-	return execFileSync(command, args, {
+	return execFileSyncHidden(command, args, {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
-		windowsHide: true,
 		env: options?.env,
 	});
 }
@@ -254,25 +254,49 @@ function withLeaseGuard<T>(directory: string, action: () => T): T {
 	}
 }
 
-function isOccupiedLeaseDestination(error: unknown, directory: string): boolean {
-	if (existsSync(directory)) {
+export function isRenameTargetContention(
+	directory: string,
+	code: string | undefined,
+	platform: string = process.platform,
+): boolean {
+	// POSIX: renameSync into an existing directory raises EEXIST or ENOTEMPTY.
+	if (code === "EEXIST" || code === "ENOTEMPTY") {
 		return true;
 	}
-	const code = (error as NodeJS.ErrnoException).code;
-	return code === "EEXIST" || code === "ENOTEMPTY";
+	// Windows: renameSync into an existing directory raises EPERM or EACCES
+	// instead of EEXIST.  Only treat them as contention when the target
+	// actually exists so real permission errors still propagate.
+	if ((code === "EPERM" || code === "EACCES") && platform === "win32") {
+		try {
+			return existsSync(directory);
+		} catch {
+			return false;
+		}
+	}
+	return false;
 }
 
-function reclaimStaleLease(directory: string): void {
+function reclaimStaleLease(directory: string): boolean {
 	const stalePath = `${directory}.stale-${process.pid}-${randomUUID()}`;
-	try {
-		renameSync(directory, stalePath);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-			return;
+	const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+	for (let attempt = 1; ; attempt++) {
+		try {
+			renameSync(directory, stalePath);
+			break;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") return true;
+			const transient = process.platform === "win32" && (code === "EBUSY" || code === "EPERM" || code === "EACCES");
+			if (!transient || attempt >= 8) return false;
+			Atomics.wait(sleepBuffer, 0, 0, 10 * attempt);
 		}
-		throw new Error(`Could not reclaim stale session lease: ${directory}`, { cause: error });
 	}
-	rmSync(stalePath, { recursive: true, force: true });
+	try {
+		rmSync(stalePath, { recursive: true, force: true, maxRetries: 8, retryDelay: 10 });
+	} catch {
+		// The quarantined directory no longer owns the lease path.
+	}
+	return true;
 }
 
 export function acquireSessionLease(
@@ -309,20 +333,34 @@ export function acquireSessionLease(
 				renameSync(candidateDirectory, directory);
 				return new SessionLease(canonicalPath, directory, token);
 			} catch (error) {
+				const err = error as NodeJS.ErrnoException;
 				rmSync(candidateDirectory, { recursive: true, force: true });
-				if (!isOccupiedLeaseDestination(error, directory)) {
-					throw error;
+				if (err.code === "ENOENT") {
+					// Candidate vanished - treat as retryable race.
+					continue;
 				}
-				const existingOwner = readLeaseOwner(directory);
-				if (existingOwner && isLeaseOwnerAlive(existingOwner)) {
-					throw new SessionAlreadyActiveError(canonicalPath, existingOwner.activeSessionId);
+				if (
+					isRenameTargetContention(directory, err.code) ||
+					((err.code === "EPERM" || err.code === "EACCES") && existsSync(directory))
+				) {
+					const existingOwner = readLeaseOwner(directory);
+					if (existingOwner === "unreadable") {
+						continue;
+					}
+					if (existingOwner !== "absent" && isLeaseOwnerAlive(existingOwner)) {
+						throw new SessionAlreadyActiveError(canonicalPath, existingOwner.activeSessionId);
+					}
+					if (!reclaimStaleLease(directory)) {
+						throw new Error(`Could not reclaim stale session lease: ${directory}`, { cause: error });
+					}
+					continue;
 				}
-				reclaimStaleLease(directory);
+				throw error;
 			}
 		}
 
 		const owner = existsSync(directory) ? readLeaseOwner(directory) : undefined;
-		if (owner && isLeaseOwnerAlive(owner)) {
+		if (typeof owner === "object" && isLeaseOwnerAlive(owner)) {
 			throw new SessionAlreadyActiveError(canonicalPath, owner.activeSessionId);
 		}
 		throw new Error(`Could not acquire session lease: ${canonicalPath}`);

@@ -6,7 +6,7 @@
  * try to refresh tokens simultaneously.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
 	findEnvKeys,
 	getEnvApiKey,
@@ -15,21 +15,11 @@ import {
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
 import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import {
-	chmodSync,
-	closeSync,
-	existsSync,
-	fsyncSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	renameSync,
-	rmSync,
-	writeFileSync,
-} from "fs";
+import { closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, writeSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
+import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import {
 	clearPrimeCliCredentials,
 	getPrimeCliConfigPath,
@@ -83,10 +73,6 @@ export type AuthStorageOptions = {
 	usePrimeCliConfig?: boolean;
 };
 
-export type AuthStorageMutationResult = {
-	legacyCleanupError?: Error;
-};
-
 type LockResult<T> = {
 	result: T;
 	next?: string;
@@ -115,28 +101,11 @@ type AuthApiKeyResult = {
 	sourceToken?: AuthSourceToken;
 };
 
-type OAuthTokenRefreshResult = { apiKey: string; newCredentials: OAuthCredentials };
-type OAuthRefreshPreparation =
-	| { currentData: AuthStorageData; status: "missing" }
-	| { currentData: AuthStorageData; status: "fresh"; credentials: OAuthCredential }
-	| {
-			currentData: AuthStorageData;
-			status: "expired";
-			credentials: OAuthCredential;
-			oauthCreds: Record<string, OAuthCredentials>;
-	  };
-type OAuthRefreshCommit = { currentData: AuthStorageData; refreshed: OAuthTokenRefreshResult | null };
-
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
-	/**
-	 * Optionally serialize refreshes for one provider across every storage user.
-	 * When omitted, AuthStorage runs the entire refresh transaction through the
-	 * backend's existing withLockAsync implementation, including the network call.
-	 * Implement this method to use a provider-scoped primitive instead.
-	 */
-	withRefreshLock?<T>(providerId: string, fn: () => Promise<T>): Promise<T>;
+	/** Serialize OAuth refreshes per provider without holding the storage lock across the network call. */
+	withRefreshLock<T>(providerId: string, fn: () => Promise<T>): Promise<T>;
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
@@ -150,42 +119,27 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 
 	private ensureFileExists(): void {
-		if (existsSync(this.authPath)) {
+		let descriptor: number;
+		try {
+			// Exclusive create: a racing initializer must never replace saved credentials.
+			descriptor = openSync(this.authPath, "wx", 0o600);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				throw error;
+			}
 			return;
 		}
-		this.writeAtomically("{}");
-	}
-
-	private writeDurableTempFile(tempPath: string, content: string): void {
-		let descriptor: number | undefined;
 		try {
-			descriptor = openSync(tempPath, "wx", 0o600);
-			writeFileSync(descriptor, content, "utf-8");
-			fsyncSync(descriptor);
-		} finally {
-			if (descriptor !== undefined) {
-				closeSync(descriptor);
+			const bytes = Buffer.from("{}");
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error(`Short write initializing ${this.authPath}`);
+				offset += written;
 			}
-		}
-	}
-
-	private writeAtomically(content: string): void {
-		const tempPath = `${this.authPath}.${process.pid}.${randomUUID()}.tmp`;
-		try {
-			this.writeDurableTempFile(tempPath, content);
-			chmodSync(tempPath, 0o600);
-			renameSync(tempPath, this.authPath);
-			if (process.platform !== "win32") {
-				let directoryDescriptor: number | undefined;
-				try {
-					directoryDescriptor = openSync(dirname(this.authPath), "r");
-					fsyncSync(directoryDescriptor);
-				} finally {
-					if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
-				}
-			}
+			fchmodSync(descriptor, 0o600); // Exact bits despite the umask.
 		} finally {
-			rmSync(tempPath, { force: true });
+			closeSync(descriptor);
 		}
 	}
 
@@ -230,15 +184,15 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		this.ensureParentDir();
+		this.ensureFileExists();
 
 		let release: (() => void) | undefined;
 		try {
 			release = this.acquireLockSyncWithRetry(this.authPath);
-			this.ensureFileExists();
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				this.writeAtomically(next);
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
 			}
 			return result;
 		} finally {
@@ -250,6 +204,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 	async withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
 		this.ensureParentDir();
+		this.ensureFileExists();
 
 		let release: (() => Promise<void>) | undefined;
 		let lockCompromised = false;
@@ -278,12 +233,11 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			});
 
 			throwIfCompromised();
-			this.ensureFileExists();
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				this.writeAtomically(next);
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
 			}
 			throwIfCompromised();
 			return result;
@@ -319,7 +273,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 				},
 				stale: 30000,
 				onCompromised: (error) => {
-					lockCompromisedError = error;
+					lockCompromisedError ??= error;
 				},
 			});
 			throwIfCompromised();
@@ -328,11 +282,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			return result;
 		} finally {
 			if (release) {
-				try {
-					await release();
-				} catch {
-					// Ignore unlock errors when lock is compromised.
-				}
+				await release().catch(() => undefined);
 			}
 		}
 	}
@@ -340,7 +290,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	private value: string | undefined;
-	private refreshLocks = new Map<string, Promise<void>>();
+	private refreshLocks: Map<string, Promise<void>> = new Map();
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		const { result, next } = fn(this.value);
@@ -739,6 +689,11 @@ export class AuthStorage {
 		return true;
 	}
 
+	/** Forget every stale marking for a provider (explicit user re-selection). */
+	clearAuthStale(provider: string): void {
+		this.staleAuthSources.delete(provider);
+	}
+
 	private clearStaleAuthSource(provider: string, source: ActiveAuthStatusSource): void {
 		const stale = this.staleAuthSources.get(provider);
 		if (!stale) {
@@ -779,7 +734,7 @@ export class AuthStorage {
 
 	private persistProviderChange(provider: string, credential: AuthCredential | undefined): void {
 		if (this.loadError) {
-			throw this.loadError;
+			return;
 		}
 
 		try {
@@ -795,7 +750,6 @@ export class AuthStorage {
 			});
 		} catch (error) {
 			this.recordError(error);
-			throw error;
 		}
 	}
 
@@ -810,34 +764,22 @@ export class AuthStorage {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
-		try {
-			this.setPersisted(provider, credential);
-		} catch {
-			// Compatibility path: persistence errors remain available through drainErrors().
-		}
+		this.clearStaleAuthSource(provider, "stored");
+		this.data[provider] = credential;
+		this.persistProviderChange(provider, credential);
 	}
 
 	setPersisted(provider: string, credential: AuthCredential): void {
-		this.persistProviderChange(provider, credential);
-		this.data[provider] = credential;
-		this.clearStaleAuthSource(provider, "stored");
+		this.set(provider, credential);
 	}
 
 	/**
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
-		try {
-			this.removePersisted(provider);
-		} catch {
-			// Compatibility path: persistence errors remain available through drainErrors().
-		}
-	}
-
-	removePersisted(provider: string): void {
-		this.persistProviderChange(provider, undefined);
-		delete this.data[provider];
 		this.clearStaleAuthSource(provider, "stored");
+		delete this.data[provider];
+		this.persistProviderChange(provider, undefined);
 	}
 
 	/**
@@ -911,15 +853,14 @@ export class AuthStorage {
 		}
 
 		const credentials = await provider.login(callbacks);
-		this.setPersisted(providerId, { type: "oauth", ...credentials });
+		this.set(providerId, { type: "oauth", ...credentials });
 	}
 
 	/**
 	 * Logout from a provider.
 	 */
-	logout(provider: string): AuthStorageMutationResult {
+	logout(provider: string): void {
 		if (provider === PRIME_INFERENCE_PROVIDER_ID && this.isPrimeCliConfigEnabled()) {
-			this.removePersisted(provider);
 			try {
 				clearPrimeCliCredentials(this.getEnabledPrimeCliConfigPath());
 				this.clearStaleAuthSource(provider, "prime_cli");
@@ -927,151 +868,75 @@ export class AuthStorage {
 				this.recordError(error);
 				throw error;
 			}
-			return {};
 		}
-		this.removePersisted(provider);
-		return {};
+		this.remove(provider);
 	}
 
 	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
 	 */
-	private async refreshOAuthTokenWithLock(providerId: OAuthProviderId): Promise<OAuthTokenRefreshResult | null> {
+	private async refreshOAuthTokenWithLock(
+		providerId: OAuthProviderId,
+	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			return null;
 		}
 
-		if (!this.storage.withRefreshLock) {
-			const committed = await this.storage.withLockAsync<OAuthRefreshCommit>(async (current) => {
-				const currentData = this.parseStorageData(current);
-				const currentCredential = currentData[providerId];
-				if (currentCredential?.type !== "oauth") {
-					return { result: { currentData, refreshed: null } };
-				}
-				if (Date.now() < currentCredential.expires) {
-					return {
-						result: {
-							currentData,
-							refreshed: {
-								apiKey: provider.getApiKey(currentCredential),
-								newCredentials: currentCredential,
-							},
-						},
-					};
-				}
-
-				const oauthCreds: Record<string, OAuthCredentials> = {};
-				for (const [key, value] of Object.entries(currentData)) {
-					if (value.type === "oauth") {
-						oauthCreds[key] = value;
-					}
-				}
-				const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-				if (!refreshed) {
-					return { result: { currentData, refreshed: null } };
-				}
-
-				const merged: AuthStorageData = {
-					...currentData,
-					[providerId]: { type: "oauth", ...refreshed.newCredentials },
-				};
-				return {
-					result: { currentData: merged, refreshed },
-					next: JSON.stringify(merged, null, 2),
-				};
-			});
-			this.data = committed.currentData;
+		type RefreshResult = { apiKey: string; newCredentials: OAuthCredentials } | null;
+		const readCurrent = (
+			current: string | undefined,
+		): { currentData: AuthStorageData; cred?: OAuthCredential; fresh?: RefreshResult } => {
+			const currentData = this.parseStorageData(current);
+			this.data = currentData;
 			this.loadError = null;
-			return committed.refreshed;
-		}
+			const cred = currentData[providerId];
+			if (cred?.type !== "oauth") {
+				return { currentData, fresh: null };
+			}
+			if (Date.now() < cred.expires) {
+				return { currentData, cred, fresh: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
+			}
+			return { currentData, cred };
+		};
 
+		// The provider-scoped refresh lock serializes refreshes; the storage lock is
+		// only held for the short read and commit steps, never across the network call.
 		return this.storage.withRefreshLock(providerId, async () => {
-			const prepared = this.storage.withLock<OAuthRefreshPreparation>((current) => {
-				const currentData = this.parseStorageData(current);
-				const cred = currentData[providerId];
-				if (cred?.type !== "oauth") {
-					return { result: { currentData, status: "missing" as const } };
-				}
-
-				if (Date.now() < cred.expires) {
-					return {
-						result: {
-							currentData,
-							status: "fresh" as const,
-							credentials: cred,
-						},
-					};
-				}
-
-				const oauthCreds: Record<string, OAuthCredentials> = {};
-				for (const [key, value] of Object.entries(currentData)) {
-					if (value.type === "oauth") {
-						oauthCreds[key] = value;
-					}
-				}
-				return {
-					result: {
-						currentData,
-						status: "expired" as const,
-						credentials: cred,
-						oauthCreds,
-					},
-				};
-			});
-
-			this.data = prepared.currentData;
-			this.loadError = null;
-			if (prepared.status === "missing") {
-				return null;
-			}
-			if (prepared.status === "fresh") {
-				return { apiKey: provider.getApiKey(prepared.credentials), newCredentials: prepared.credentials };
+			const prepared = this.storage.withLock((current) => ({ result: readCurrent(current) }));
+			if (prepared.fresh !== undefined) {
+				return prepared.fresh;
 			}
 
-			const refreshed = await getOAuthApiKey(providerId, prepared.oauthCreds);
+			const oauthCreds: Record<string, OAuthCredentials> = {};
+			for (const [key, value] of Object.entries(prepared.currentData)) {
+				if (value.type === "oauth") {
+					oauthCreds[key] = value;
+				}
+			}
+
+			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
 			if (!refreshed) {
-				const currentData = this.storage.withLock<AuthStorageData>((current) => ({
-					result: this.parseStorageData(current),
-				}));
-				this.data = currentData;
-				this.loadError = null;
 				return null;
 			}
 
-			const committed = this.storage.withLock<OAuthRefreshCommit>((current) => {
-				const currentData = this.parseStorageData(current);
-				const currentCredential = currentData[providerId];
-				if (currentCredential?.type !== "oauth") {
-					return { result: { currentData, refreshed: null } };
+			return this.storage.withLockAsync<RefreshResult>(async (current) => {
+				const latest = readCurrent(current);
+				if (latest.fresh !== undefined) {
+					return { result: latest.fresh };
 				}
-				if (Date.now() < currentCredential.expires) {
-					return {
-						result: {
-							currentData,
-							refreshed: {
-								apiKey: provider.getApiKey(currentCredential),
-								newCredentials: currentCredential,
-							},
-						},
-					};
-				}
-				if (JSON.stringify(currentCredential) !== JSON.stringify(prepared.credentials)) {
-					return { result: { currentData, refreshed: null } };
+				if (JSON.stringify(latest.cred) !== JSON.stringify(prepared.cred)) {
+					return { result: null };
 				}
 				const merged: AuthStorageData = {
-					...currentData,
+					...latest.currentData,
 					[providerId]: { type: "oauth", ...refreshed.newCredentials },
 				};
-				return {
-					result: { currentData: merged, refreshed },
-					next: JSON.stringify(merged, null, 2),
-				};
+				this.data = merged;
+				this.loadError = null;
+				return { result: refreshed, next: JSON.stringify(merged, null, 2) };
 			});
-			this.data = committed.currentData;
-			this.loadError = null;
-			return committed.refreshed;
 		});
 	}
 
@@ -1247,13 +1112,13 @@ export class AuthStorage {
 		if (credential?.type !== "api_key") {
 			return;
 		}
-		this.setPersisted(PRIME_INFERENCE_PROVIDER_ID, {
+		this.set(PRIME_INFERENCE_PROVIDER_ID, {
 			...credential,
 			primeTeam: team ? this.toPrimeTeamCredential(team) : null,
 		});
 	}
 
-	setPrimeInferenceApiKey(apiKey: string): AuthStorageMutationResult {
+	setPrimeInferenceApiKey(apiKey: string): { legacyCleanupError?: Error } {
 		if (this.isPrimeCliConfigEnabled()) {
 			try {
 				const configPath = this.getEnabledPrimeCliConfigPath();
@@ -1272,7 +1137,7 @@ export class AuthStorage {
 			}
 			if (this.data[PRIME_INFERENCE_PROVIDER_ID]) {
 				try {
-					this.removePersisted(PRIME_INFERENCE_PROVIDER_ID);
+					this.removeVerified(PRIME_INFERENCE_PROVIDER_ID);
 				} catch (error) {
 					return { legacyCleanupError: error instanceof Error ? error : new Error(String(error)) };
 				}
@@ -1282,7 +1147,7 @@ export class AuthStorage {
 
 		const existingCredential = this.data[PRIME_INFERENCE_PROVIDER_ID];
 		const existingPrimeTeam = existingCredential?.type === "api_key" ? existingCredential.primeTeam : undefined;
-		this.setPersisted(PRIME_INFERENCE_PROVIDER_ID, {
+		this.set(PRIME_INFERENCE_PROVIDER_ID, {
 			type: "api_key",
 			key: apiKey,
 			...(existingPrimeTeam !== undefined ? { primeTeam: existingPrimeTeam } : {}),
@@ -1304,7 +1169,8 @@ export class AuthStorage {
 		if (authSource === "runtime" || authSource === "environment") {
 			return undefined;
 		}
-		if (authSource === "prime_cli") {
+		// A stale CLI key must not erase the selected team used to validate cached model access.
+		if (authSource === "prime_cli" || (authSource === "stale" && config?.apiKey)) {
 			if (credential?.type === "api_key" && credential.primeTeam === null) {
 				return null;
 			}

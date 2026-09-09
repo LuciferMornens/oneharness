@@ -1,4 +1,4 @@
-import { type ChildProcess, type ChildProcessByStdio, spawn, spawnSync } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -23,12 +23,16 @@ function getEnv(): NodeJS.ProcessEnv {
 }
 
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { Readable } from "node:stream";
 import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
-import { prepareWindowsShellCommand, waitForChildProcess } from "../utils/child-process.js";
+import {
+	prepareWindowsShellCommand,
+	spawnHidden,
+	spawnSyncHidden,
+	waitForChildProcess,
+} from "../utils/child-process.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
 import { canonicalizePath, isLocalPath } from "../utils/paths.js";
 import {
@@ -2366,16 +2370,15 @@ export class DefaultPackageManager implements PackageManager {
 		command: string,
 		args: string[],
 		options?: { cwd?: string; env?: Record<string, string> },
-	): ChildProcessByStdio<null, Readable, Readable> {
+	): ChildProcess {
 		const baseEnv = getEnv();
 		const launch = prepareWindowsShellCommand(command, args);
-		return spawn(launch.command, launch.args, {
+		return spawnHidden(launch.command, launch.args, {
 			cwd: options?.cwd,
 			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 			env: options?.env ? { ...baseEnv, ...options.env } : baseEnv,
 			windowsVerbatimArguments: launch.windowsVerbatimArguments,
-			windowsHide: true,
 		});
 	}
 
@@ -2458,12 +2461,11 @@ export class DefaultPackageManager implements PackageManager {
 
 	private runCommandSync(command: string, args: string[]): string {
 		const launch = prepareWindowsShellCommand(command, args);
-		const result = spawnSync(launch.command, launch.args, {
+		const result = spawnSyncHidden(launch.command, launch.args, {
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf-8",
 			env: getEnv(),
 			windowsVerbatimArguments: launch.windowsVerbatimArguments,
-			windowsHide: true,
 		});
 		if (result.error || result.status !== 0) {
 			throw new Error(

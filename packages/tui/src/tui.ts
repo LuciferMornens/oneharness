@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { withFullscreenImageFallback } from "./components/image.js";
 import { FullscreenViewport, type ScrollInfo, type SelectionScrollDirection } from "./fullscreen.js";
 import { getKeybindings } from "./keybindings.js";
@@ -316,6 +317,8 @@ export class TUI extends Container {
 	public onCopy?: (text: string) => void;
 	/** Opens hyperlinks clicked in the fullscreen viewport; when unset, the platform opener is used. */
 	public onOpenUrl?: (url: string) => void;
+	/** Directory a file: hyperlink must stay within before the platform opener runs; when unset, file: links are ignored. */
+	public getFileLinkRoot?: () => string | undefined;
 	private renderRequested = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
@@ -765,18 +768,20 @@ export class TUI extends Container {
 	// so clicks the TUI consumes must open OSC 8 hyperlinks itself.
 	private openHyperlink(url: string): void {
 		if (/\p{Cc}/u.test(url)) return;
-		let href: string;
+		let parsed: URL;
 		try {
-			const parsed = new URL(url);
-			if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
-			href = parsed.href;
+			parsed = new URL(url);
 		} catch {
 			return;
 		}
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "file:") return;
+		const href = parsed.href;
 		if (this.onOpenUrl) {
 			this.onOpenUrl(href);
 			return;
 		}
+		// Rendered content is untrusted: the platform opener only gets files under the caller's root.
+		if (parsed.protocol === "file:" && !this.isFileLinkWithinRoot(parsed)) return;
 		const [command, ...args] =
 			process.platform === "darwin"
 				? ["open", href]
@@ -788,6 +793,22 @@ export class TUI extends Container {
 						]
 					: ["xdg-open", href];
 		execFile(command, args, { windowsHide: true }, () => {});
+	}
+
+	private isFileLinkWithinRoot(url: URL): boolean {
+		const root = this.getFileLinkRoot?.();
+		if (!root) return false;
+		// Real paths only: a symlink inside the root must not escape it.
+		let realRoot: string;
+		let realFile: string;
+		try {
+			realRoot = fs.realpathSync(root);
+			realFile = fs.realpathSync(fileURLToPath(url));
+		} catch {
+			return false;
+		}
+		const relative = path.relative(realRoot, realFile);
+		return !relative.startsWith("..") && !path.isAbsolute(relative);
 	}
 
 	private copySelection(text: string): void {

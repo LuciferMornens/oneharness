@@ -20,6 +20,7 @@ import {
 	getKernelVenvDir,
 	getKernelVenvsRoot,
 	type KernelPythonSkill,
+	kernelVenvPython,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
 import { getCurrentProcessStartId } from "../src/core/session-lease.js";
@@ -861,5 +862,11 @@ dependencies = ["httpx"]
 		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
 
 		await expect(ensureKernelPython()).rejects.toThrow(/PRIME_AGENT_KERNEL_PYTHON points to a Python missing/);
+	});
+
+	it("resolves the venv python under Scripts\\python.exe on win32 (uv layout)", () => {
+		const venv = join(tempDir, "kernel-venv");
+		expect(kernelVenvPython(venv, "win32")).toBe(join(venv, "Scripts", "python.exe"));
+		expect(kernelVenvPython(venv, "linux")).toBe(join(venv, "bin", "python"));
 	});
 });

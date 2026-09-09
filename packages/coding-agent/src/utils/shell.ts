@@ -1,12 +1,13 @@
 import { existsSync } from "node:fs";
-import { delimiter } from "node:path";
-import { type ChildProcess, spawnSync } from "child_process";
+import { delimiter, win32 } from "node:path";
+import type { ChildProcess } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
 import {
 	inspectUnixProcessSessionByIdentity,
 	signalProcessGroupOrProcess,
+	spawnSyncHidden,
 	terminateUnixProcessGroupByIdentity,
 	terminateWindowsProcessTreeByIdentity,
 } from "./child-process.js";
@@ -34,6 +35,14 @@ function cacheAutomaticShellConfig(key: string, config: ShellConfig): ShellConfi
 	return config;
 }
 
+/** System32\bash.exe is the WSL launcher (runs Linux-side), so %SystemRoot% matches are only a last resort. */
+export function orderWindowsBashCandidates(matches: readonly string[], systemRoot: string | undefined): string[] {
+	if (!systemRoot) return [...matches];
+	const prefix = win32.join(systemRoot, "\\").toLowerCase();
+	const underSystemRoot = (match: string) => win32.normalize(match).toLowerCase().startsWith(prefix);
+	return [...matches.filter((match) => !underSystemRoot(match)), ...matches.filter(underSystemRoot)];
+}
+
 /**
  * Find bash executable on PATH (cross-platform)
  */
@@ -47,13 +56,17 @@ function findExecutableOnWindowsPath(
 	isUsable: (path: string) => boolean = () => true,
 ): string | null {
 	try {
-		const result = spawnSync("where.exe", [executable], {
+		const result = spawnSyncHidden("where.exe", [executable], {
 			encoding: "utf-8",
 			timeout: 5000,
-			windowsHide: true,
 		});
 		if (result.status === 0 && result.stdout) {
-			for (const match of result.stdout.trim().split(/\r?\n/)) {
+			const matches = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+			const ordered =
+				executable.toLowerCase() === "bash.exe"
+					? orderWindowsBashCandidates(matches, process.env.SystemRoot)
+					: matches;
+			for (const match of ordered) {
 				if (match && existsSync(match) && isUsable(match)) {
 					return match;
 				}
@@ -72,10 +85,9 @@ function findBashOnPath(): string | null {
 
 	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
 	try {
-		const result = spawnSync("which", ["bash"], {
+		const result = spawnSyncHidden("which", ["bash"], {
 			encoding: "utf-8",
 			timeout: 5000,
-			windowsHide: true,
 		});
 		if (result.status === 0 && result.stdout) {
 			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];

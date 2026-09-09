@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -9,7 +9,7 @@ import { getPackageDir, isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
-import { waitForChildProcess } from "../../utils/child-process.js";
+import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import {
 	killProcessTreeByIdentity,
 	reconcileTrackedDetachedChildAfterExit,
@@ -442,7 +442,7 @@ export class DaemonCatalogClient {
 			args = launch.args;
 			environment = createCliSubprocessEnv(environment, catalogEntry, execArgs);
 		}
-		const child = spawn(command, args, {
+		const child = spawnHidden(command, args, {
 			cwd: process.cwd(),
 			detached: process.platform !== "win32",
 			env: environment,
