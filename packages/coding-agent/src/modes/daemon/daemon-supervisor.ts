@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
 	chmodSync,
@@ -61,10 +61,12 @@ import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } fr
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import {
 	isProcessAlive,
 	processIdExists,
 	signalProcessGroupOrProcess,
+	spawnHidden,
 	terminateUnixProcessGroupByIdentity,
 	terminateWindowsProcessTreeByIdentity,
 } from "../../utils/child-process.js";
@@ -187,7 +189,18 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
-const WORKER_CONNECT_TIMEOUT_MS = 30_000;
+// Windows antivirus scanning can delay worker startup beyond 30 seconds.
+const WORKER_CONNECT_TIMEOUT_MS = process.platform === "win32" ? 90_000 : 30_000;
+const WORKER_CONNECT_PROBE_MS = process.platform === "win32" ? 2_000 : 500;
+const WORKER_PROBE_BACKOFF_MIN_MS = 25;
+const WORKER_PROBE_BACKOFF_MAX_MS = process.platform === "win32" ? 2_000 : 25;
+
+/** Per-attempt handshake waits consume the remaining outer connect budget; a smaller fixed clock makes a consistently slow (win32) handshake fail every retry. */
+export function handshakeBudgetMs(deadline: number, now = Date.now()): number {
+	const remaining = deadline - now;
+	if (remaining <= 0) throw new DaemonWorkerProbeTimeoutError("Worker connection deadline elapsed");
+	return remaining;
+}
 const ROSTER_WATCHDOG_INTERVAL_MS = 15_000;
 const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
 const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -1443,10 +1456,7 @@ export class DaemonSupervisor {
 			socketPath: this.socketPath,
 			defaultSessionConfig: durableAgentSessionRuntimeConfig(this.defaultSessionConfig),
 		};
-		const tempPath = `${this.supervisorConfigPath}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, this.supervisorConfigPath);
+		writeFileAtomicSync(this.supervisorConfigPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
 	}
 
 	private hasPersistedWorkerDescriptors(): boolean {
@@ -1459,10 +1469,7 @@ export class DaemonSupervisor {
 	private persistWorker(worker: ResidentWorker): void {
 		worker.descriptor.updatedAt = new Date().toISOString();
 		const persisted = durableDaemonWorkerDescriptor(worker.descriptor);
-		const tempPath = `${worker.descriptorPath}.${process.pid}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
-		chmodSync(tempPath, 0o600);
-		renameSync(tempPath, worker.descriptorPath);
+		writeFileAtomicSync(worker.descriptorPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
 	}
 
 	private deleteWorkerDescriptor(worker: { descriptorPath: string; descriptor: DaemonWorkerDescriptor }): void {
@@ -3169,14 +3176,11 @@ export class DaemonSupervisor {
 		});
 		delete workerEnvironment.RLM_DEPTH;
 		await this.assertRecoveryAllowed();
-		const child: ChildProcess = spawn(launch.command, launch.args, {
+		const child: ChildProcess = spawnHidden(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
 			env: workerEnvironment,
 			stdio: ["ignore", "ignore", "pipe", "pipe"],
-			// Detached workers have no console to inherit; without this Windows
-			// pops a visible console window for node.exe. No-op on POSIX.
-			windowsHide: true,
 		});
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
@@ -3392,12 +3396,13 @@ export class DaemonSupervisor {
 	private async connectWorker(worker: ResidentWorker, timeoutMs: number): Promise<DaemonWorkerClient> {
 		const deadline = Date.now() + timeoutMs;
 		let lastError: unknown;
+		let backoffMs = WORKER_PROBE_BACKOFF_MIN_MS;
 		while (Date.now() < deadline) {
 			await this.assertRecoveryAllowed();
 			const client = new DaemonWorkerClient(worker.descriptor.socketPath);
 			try {
-				await client.connect(Math.min(500, Math.max(50, deadline - Date.now())));
-				const hello = await client.waitForHello(1000);
+				await client.connect(Math.min(WORKER_CONNECT_PROBE_MS, handshakeBudgetMs(deadline)));
+				const hello = await client.waitForHello(handshakeBudgetMs(deadline));
 				const helloSocketMatches =
 					process.platform === "win32"
 						? hello.socketPath.toLowerCase() === worker.descriptor.socketPath.toLowerCase()
@@ -3418,7 +3423,7 @@ export class DaemonSupervisor {
 								? { workerInstanceId: worker.descriptor.workerInstanceId }
 								: {}),
 						},
-						1000,
+						handshakeBudgetMs(deadline),
 					);
 					await this.assertRecoveryAllowed();
 					if (!workerAuthAdvertisesRoster(authResponse.data)) {
@@ -3442,7 +3447,10 @@ export class DaemonSupervisor {
 				) {
 					throw error;
 				}
-				await delay(25);
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) break;
+				await delay(Math.min(backoffMs, remaining));
+				backoffMs = Math.min(backoffMs * 2, WORKER_PROBE_BACKOFF_MAX_MS);
 			}
 		}
 		throw new DaemonWorkerProbeTimeoutError(`Timed out connecting to daemon session worker: ${String(lastError)}`);
@@ -7018,14 +7026,11 @@ export class DaemonSupervisor {
 			delete environment[ORPHAN_PROCESS_JOURNAL_ENV];
 			delete environment[SESSION_LEASES_ENABLED_ENV];
 			delete environment[SESSION_LEASE_OWNER_ID_ENV];
-			const replacement = spawn(launch.command, launch.args, {
+			const replacement = spawnHidden(launch.command, launch.args, {
 				cwd: this.defaultSessionConfig.cwd ?? process.cwd(),
 				detached: true,
 				env: environment,
 				stdio: "ignore",
-				// The replacement outlives this process; keep it console-less on
-				// Windows like the daemon-mode.ts supervisor relaunch. No-op on POSIX.
-				windowsHide: true,
 			});
 			replacement.unref();
 		}

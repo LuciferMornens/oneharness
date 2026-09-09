@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -39,7 +38,11 @@ import {
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
 import { preserveUncertainWorkerOperations, WorkerRecoveryJournal } from "../modes/daemon/worker-recovery-journal.js";
 import {
+	isProcessAlive,
+	processGroupHasLiveMember,
+	processIdExists,
 	signalProcessGroupOrProcess,
+	spawnSyncHidden,
 	terminateUnixProcessGroupByIdentity,
 	terminateWindowsProcessTreeByIdentity,
 } from "../utils/child-process.js";
@@ -200,18 +203,18 @@ function scanListeningDaemons(): DiscoveredDaemonProcess[] {
 	if (process.platform === "win32") {
 		return [];
 	}
-	const ss = spawnSync("ss", ["-lxp"], { encoding: "utf8" });
+	const ss = spawnSyncHidden("ss", ["-lxp"], { encoding: "utf8" });
 	if (!ss.error && ss.status === 0 && typeof ss.stdout === "string") {
 		return enrichUptimes(parseSsListeners(ss.stdout, APP_NAME));
 	}
-	const lsof = spawnSync("lsof", ["-nP", "-F", "pn", "-U", "-a", "-c", APP_NAME], { encoding: "utf8" });
+	const lsof = spawnSyncHidden("lsof", ["-nP", "-F", "pn", "-U", "-a", "-c", APP_NAME], { encoding: "utf8" });
 	const byName = !lsof.error && typeof lsof.stdout === "string" ? parseLsofListeners(lsof.stdout) : [];
 	let byPid: DiscoveredDaemonProcess[] = [];
-	const ps = spawnSync("ps", ["-axo", "pid=,comm=,args="], { encoding: "utf8" });
+	const ps = spawnSyncHidden("ps", ["-axo", "pid=,comm=,args="], { encoding: "utf8" });
 	if (!ps.error && ps.status === 0 && typeof ps.stdout === "string") {
 		const pids = parsePrimeAgentProcessIds(ps.stdout, APP_NAME);
 		if (pids.length > 0) {
-			const lsofByPid = spawnSync("lsof", ["-nP", "-F", "pn", "-U", "-a", "-p", pids.join(",")], {
+			const lsofByPid = spawnSyncHidden("lsof", ["-nP", "-F", "pn", "-U", "-a", "-p", pids.join(",")], {
 				encoding: "utf8",
 			});
 			if (!lsofByPid.error && typeof lsofByPid.stdout === "string") {
@@ -240,7 +243,7 @@ function enrichUptimes(daemons: DiscoveredDaemonProcess[]): DiscoveredDaemonProc
 	if (pids.length === 0) {
 		return daemons;
 	}
-	const ps = spawnSync("ps", ["-o", "pid=,etimes=", "-p", pids.join(",")], { encoding: "utf8" });
+	const ps = spawnSyncHidden("ps", ["-o", "pid=,etimes=", "-p", pids.join(",")], { encoding: "utf8" });
 	if (ps.error || typeof ps.stdout !== "string") {
 		return daemons;
 	}
@@ -1159,7 +1162,7 @@ function recordResidualListenerFailures(
 	}
 }
 function describeDaemonParent(pid: number): string {
-	const result = spawnSync("ps", ["-o", "ppid=,tty=,command=", "-p", String(pid)], { encoding: "utf8" });
+	const result = spawnSyncHidden("ps", ["-o", "ppid=,tty=,command=", "-p", String(pid)], { encoding: "utf8" });
 	if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
 		return "";
 	}
@@ -1579,25 +1582,35 @@ async function stopTrackedProcess(
 		await assertAdmission();
 		return terminateWindowsProcessTreeAndWait(pid, expectedStartId, trackedDescendants, true);
 	}
-	if (!expectedStartId) {
+	if (!expectedStartId || !trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
 	if (processAlive) {
-		if (getProcessStartId(pid) !== expectedStartId) {
-			return false;
-		}
 		await assertAdmission();
 		if (getProcessStartId(pid) !== expectedStartId || !signalProcessGroupOrProcess(pid, "SIGTERM")) {
 			return false;
 		}
 		const deadline = Date.now() + 500;
-		while (isProcessAlive(pid) && Date.now() < deadline) {
+		while (!trackedProcessStopped(pid) && Date.now() < deadline) {
 			await delay(25);
 		}
 	}
 	await assertAdmission();
 	const result = await terminateUnixProcessGroupByIdentity(pid, expectedStartId, getProcessStartId);
 	return result === "terminated" || result === "not-found";
+}
+
+/** A GROUP stop completes when the leader is gone AND no live member remains; unreaped zombies do not block it. */
+function trackedProcessStopped(pid: number): boolean {
+	return !isProcessAlive(pid) && !processGroupHasLiveMember(pid);
+}
+
+/** Identity gates guard pid reuse, so they apply only while the leader exists; a pgid cannot be reused while members hold it. */
+function trackedLeaderIdentityCurrent(pid: number, expectedStartId: string): boolean {
+	if (!processIdExists(pid)) {
+		return true;
+	}
+	return getProcessStartId(pid) === expectedStartId;
 }
 
 export async function runReap(json: boolean, force: boolean): Promise<void> {
@@ -1777,15 +1790,6 @@ async function terminateWindowsProcessTreeAndWait(
 		await delay(25);
 	}
 	return getProcessStartId(pid) !== expectedProcessStartId;
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
 }
 
 function delay(ms: number): Promise<void> {

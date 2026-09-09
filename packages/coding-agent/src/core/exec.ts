@@ -2,8 +2,7 @@
  * Shared command execution utilities for extensions and custom tools.
  */
 
-import { spawn } from "node:child_process";
-import { waitForChildProcess } from "../utils/child-process.js";
+import { spawnHidden, waitForChildProcess } from "../utils/child-process.js";
 import {
 	killProcessTreeByIdentity,
 	reconcileTrackedDetachedChildAfterExit,
@@ -65,7 +64,7 @@ export async function execCommand(
 	options?: ExecOptions,
 ): Promise<ExecResult> {
 	return new Promise((resolve) => {
-		const proc = spawn(command, args, {
+		const proc = spawnHidden(command, args, {
 			cwd,
 			detached: process.platform !== "win32",
 			shell: false,

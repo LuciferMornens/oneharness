@@ -273,7 +273,6 @@ describe("grok-responses provider", () => {
 
 		const result = await streamGrokResponses(model, buildContext(), {
 			apiKey: "grok-oauth-token",
-			maxRetries: 0,
 		}).result();
 
 		expect(result.stopReason).toBe("error");

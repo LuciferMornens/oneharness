@@ -1,4 +1,3 @@
-import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import {
 	accessSync,
@@ -13,9 +12,9 @@ import {
 	statSync,
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { basename, dirname, join, posix, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
-import { prepareWindowsShellCommand } from "./utils/child-process.js";
+import { prepareWindowsShellCommand, spawnSyncHidden } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
 
 // =============================================================================
@@ -217,11 +216,10 @@ function readCommandOutput(
 	options: { requireSuccess?: boolean } = {},
 ): string | undefined {
 	const launch = prepareWindowsShellCommand(command, args);
-	const result = spawnSync(launch.command, launch.args, {
+	const result = spawnSyncHidden(launch.command, launch.args, {
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsVerbatimArguments: launch.windowsVerbatimArguments,
-		windowsHide: true,
 	});
 	if (result.status === 0) return result.stdout.trim() || undefined;
 	if (options.requireSuccess) {
@@ -527,10 +525,10 @@ export const ENV_AGENT_DIR = `${envPrefix}_CODING_AGENT_DIR`;
 export const ENV_SESSION_DIR = `${envPrefix}_SESSION_DIR`;
 export const ENV_LEGACY_SESSION_DIR = `${envPrefix}_CODING_AGENT_SESSION_DIR`;
 
-export function expandTildePath(path: string): string {
+export function expandTildePath(path: string, platform: NodeJS.Platform = process.platform): string {
 	if (path === "~") return homedir();
-	if (path.startsWith("~/") || path.startsWith("~\\")) {
-		return join(homedir(), path.slice(2));
+	if (path.startsWith("~/") || (platform === "win32" && path.startsWith("~\\"))) {
+		return (platform === "win32" ? win32 : posix).join(homedir(), path.slice(2));
 	}
 	return path;
 }

@@ -14,7 +14,7 @@ import { isPrivatePrimeInferenceModel } from "./prime-inference-models.js";
 
 const log = getLogger("coding-agent.model-resolver");
 
-export const PRIME_INFERENCE_DEFAULT_MODEL_ID = "z-ai/glm-5.2";
+export const PRIME_INFERENCE_DEFAULT_MODEL_ID = "z-ai/glm-5.3";
 
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
@@ -37,7 +37,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	grok: "grok-4.6",
 	groq: "openai/gpt-oss-120b",
 	cerebras: "gpt-oss-120b",
-	zai: "glm-5.1",
+	zai: "glm-5.3",
 	mistral: "devstral-medium-latest",
 	minimax: "MiniMax-M2.7",
 	"minimax-cn": "MiniMax-M2.7",

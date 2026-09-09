@@ -5,7 +5,6 @@
  * the heavy main module graph loads. main.ts reuses the same memoized promise.
  */
 
-import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { appendRotatingLog, expandTildePath, getClientErrorLogPath, getDaemonLogPath, VERSION } from "../config.js";
@@ -30,6 +29,7 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
+import { spawnHidden } from "../utils/child-process.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec, formatCurrentCliCommand } from "./subprocess-launch.js";
 
@@ -480,7 +480,7 @@ Then retry the original command.`,
 
 	const logOffset = currentDaemonLogSize(socketPath);
 	const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", socketPath]);
-	const child = spawn(launch.command, launch.args, {
+	const child = spawnHidden(launch.command, launch.args, {
 		cwd: spawnCwd ?? process.cwd(),
 		detached: true,
 		env,
@@ -488,7 +488,6 @@ Then retry the original command.`,
 		// (EPIPE once it exits); crash details come from the daemon log,
 		// which the supervisor writes to before rethrowing startup errors.
 		stdio: "ignore",
-		windowsHide: true,
 	});
 	let childFailure:
 		| { type: "error"; error: Error }

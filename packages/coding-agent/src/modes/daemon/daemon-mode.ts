@@ -1266,7 +1266,35 @@ export class AgentDaemon {
 				sessionId: parentState.runtime.session.sessionId,
 				sessionFile: parentFile,
 			});
-		} else if (edges.length === 0) {
+		} else if (edges.length > 0) {
+			// Only tombstoned edges: the tombstones are already durable, nothing
+			// to re-append. A prior deletion may have crashed before its artifact
+			// sweep. Restore the display tombstone before sweeping artifacts.
+			for (const tombstoned of edges) {
+				try {
+					const currentDisplay = await readRlmSubagentDisplayEntry(dirname(tombstoned.child));
+					if (!currentDisplay || currentDisplay.status !== "deleted") {
+						writeRlmSubagentDisplayEntry({
+							type: "rlm_subagent",
+							childId,
+							sessionName: currentDisplay?.sessionName ?? tombstoned.name,
+							sessionDir: dirname(tombstoned.child),
+							sessionFile: currentDisplay?.sessionFile ?? tombstoned.child,
+							...rlmSubagentMetadataFields(currentDisplay ?? {}),
+							status: "deleted",
+							createdAt: currentDisplay?.createdAt ?? 0,
+							updatedAt: new Date().toISOString(),
+						});
+					}
+				} catch {
+					// Best-effort: the ledger tombstone is the authority; the display
+					// file is display-grade and the sweep below will remove artifacts.
+					this.log(`failed to reconcile display entry for tombstoned RLM subagent ${childId}`);
+				}
+				await this.deleteRlmSubagentArtifacts(childId, tombstoned.child);
+			}
+			return;
+		} else {
 			// No edge at all. A pre-ledger child the seed missed may still exist
 			// in the legacy registry; an unreadable registry means the durable
 			// deletion boundary cannot be established, so the deletion fails.

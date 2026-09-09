@@ -137,7 +137,6 @@ export const streamGrokResponses: StreamFunction<"grok-responses", GrokResponses
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
 			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
@@ -221,6 +220,7 @@ function createClient(model: Model<"grok-responses">, apiKey: string, options?: 
 		baseURL: model.baseUrl || GROK_CLI_BASE_URL,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders: headers,
+		maxRetries: 0,
 	});
 }
 

@@ -4,7 +4,7 @@
  * Spawns the agent in RPC mode and provides a typed API for all operations.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
@@ -19,7 +19,7 @@ import type {
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { getProcessStartId } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import { waitForChildProcess } from "../../utils/child-process.js";
+import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import {
 	killProcessTreeByIdentity,
 	reconcileTrackedDetachedChildAfterExit,
@@ -111,12 +111,11 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		const child = spawn("node", [cliPath, ...args], {
+		const child = spawnHidden("node", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			detached: process.platform !== "win32",
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
-			windowsHide: true,
 		});
 		this.process = child;
 		this.processStartId = trackChildProcess(child, {
