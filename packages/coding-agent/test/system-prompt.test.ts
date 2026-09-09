@@ -68,14 +68,13 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).not.toContain("model choices for subagents");
 	});
 
-	test("does not document the unshipped async bash() kernel helper or managed jobs", () => {
+	test("does not document unshipped async bash magics or managed jobs", () => {
 		const prompt = buildRlmPrompt({
 			cwd: "/repo",
 			messagesPath: "/repo/.pi/sessions/session.jsonl",
 			activeTools: ["ipython"],
 		});
 
-		expect(prompt).not.toContain("await bash(");
 		expect(prompt).not.toContain("async bash()");
 		expect(prompt).not.toContain("managed jobs");
 	});

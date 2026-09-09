@@ -339,7 +339,10 @@ export function acquireSessionLease(
 					// Candidate vanished - treat as retryable race.
 					continue;
 				}
-				if (isRenameTargetContention(directory, err.code)) {
+				if (
+					isRenameTargetContention(directory, err.code) ||
+					((err.code === "EPERM" || err.code === "EACCES") && existsSync(directory))
+				) {
 					const existingOwner = readLeaseOwner(directory);
 					if (existingOwner === "unreadable") {
 						continue;
@@ -347,7 +350,9 @@ export function acquireSessionLease(
 					if (existingOwner !== "absent" && isLeaseOwnerAlive(existingOwner)) {
 						throw new SessionAlreadyActiveError(canonicalPath, existingOwner.activeSessionId);
 					}
-					reclaimStaleLease(directory);
+					if (!reclaimStaleLease(directory)) {
+						throw new Error(`Could not reclaim stale session lease: ${directory}`, { cause: error });
+					}
 					continue;
 				}
 				throw error;

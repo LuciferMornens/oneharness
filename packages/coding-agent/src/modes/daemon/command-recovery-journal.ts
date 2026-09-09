@@ -136,7 +136,17 @@ export class CommandRecoveryJournal {
 			}
 			throw error;
 		}
-		for (const line of contents.split("\n")) {
+		const rawLines = contents.split("\n");
+		const unterminated = contents.length > 0 && !contents.endsWith("\n");
+		if (unterminated) {
+			rawLines.pop();
+			writeFileAtomicSync(this.path, rawLines.length > 0 ? `${rawLines.filter(Boolean).join("\n")}\n` : "", {
+				mode: 0o600,
+				fsync: true,
+				fsyncDir: true,
+			});
+		}
+		for (const line of rawLines) {
 			if (!line) {
 				continue;
 			}
