@@ -1,0 +1,4 @@
+- Fixed the `--no-session` interactive worker console being hidden on Windows.
+- Fixed OAuth token refresh blocking other credential reads and writes for the whole network call.
+- Fixed a failed legacy Prime credential cleanup being reported as successful after saving a Prime API key.
+- Fixed bash tool partial output advertising a full-output file before it was completely written.

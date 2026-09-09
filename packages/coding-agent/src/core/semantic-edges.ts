@@ -339,7 +339,7 @@ export class SemanticEdgeRecorder {
 		}
 		if (this._eventLog) {
 			try {
-				this._eventLog.appendSync([event]);
+				this._eventLog.appendSync([event], { durable: true });
 			} catch (error) {
 				this._disable(error);
 				return false;

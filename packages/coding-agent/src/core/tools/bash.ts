@@ -362,11 +362,11 @@ export function createBashToolDefinition(
 				updateDirty = false;
 				lastUpdateAt = Date.now();
 				const snapshot = output.snapshot();
+				// The spill path is only advertised once closeTempFile() settled it.
 				onUpdate({
 					content: [{ type: "text", text: snapshot.content || "" }],
 					details: {
 						truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
-						fullOutputPath: snapshot.fullOutputPath,
 					},
 				});
 			};

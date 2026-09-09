@@ -1156,6 +1156,7 @@ export class InteractiveMode {
 		this.ui.onCopy = (text) => {
 			void this.copyFullscreenSelection(text);
 		};
+		this.ui.getFileLinkRoot = () => this.getCurrentCwd();
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();

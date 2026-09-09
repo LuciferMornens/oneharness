@@ -184,6 +184,7 @@ class HarnessStateTest(unittest.TestCase):
 
             self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
     def test_save_preserves_restrictive_file_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
@@ -194,6 +195,7 @@ class HarnessStateTest(unittest.TestCase):
 
             self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
     def test_save_temp_file_is_never_looser_than_the_destination(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
@@ -217,6 +219,7 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(observed_modes, [0o600])
             self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
 
+    @unittest.skipIf(os.name == "nt", "symlink creation needs a privilege on Windows")
     def test_save_writes_through_a_symlinked_state_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             real_path = Path(temp_dir) / "real_state.json"

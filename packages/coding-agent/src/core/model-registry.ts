@@ -986,11 +986,15 @@ export class ModelRegistry {
 			if (cachePath) {
 				void refreshPrimeInferenceModels(cachePath, this.bundledPrimeInferenceModels(), {
 					offline: isOfflineModeEnabled(),
-				}).then((models) => {
-					if (!models) return;
-					this.livePrimeInferenceModels = models;
-					this.reloadModelsAfterCatalogChange();
-				});
+				})
+					.then((models) => {
+						if (!models) return;
+						this.livePrimeInferenceModels = models;
+						this.reloadModelsAfterCatalogChange();
+					})
+					.catch(() => {
+						// Background catalog refresh must never surface as an unhandled rejection.
+					});
 			}
 			await this.refreshPrivatePrimeInferenceAuthorization(
 				previousPrivateModelIds,

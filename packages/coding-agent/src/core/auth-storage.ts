@@ -104,6 +104,8 @@ type AuthApiKeyResult = {
 export interface AuthStorageBackend {
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T;
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T>;
+	/** Serialize OAuth refreshes per provider without holding the storage lock across the network call. */
+	withRefreshLock<T>(providerId: string, fn: () => Promise<T>): Promise<T>;
 }
 
 export class FileAuthStorageBackend implements AuthStorageBackend {
@@ -215,6 +217,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 
 		try {
 			release = await lockfile.lock(this.authPath, {
+				realpath: false,
 				retries: {
 					retries: 10,
 					factor: 2,
@@ -245,10 +248,49 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			}
 		}
 	}
+
+	async withRefreshLock<T>(providerId: string, fn: () => Promise<T>): Promise<T> {
+		this.ensureParentDir();
+		const providerHash = createHash("sha256").update(providerId).digest("hex");
+		const refreshLockPath = `${this.authPath}.${providerHash}.refresh`;
+		let release: (() => Promise<void>) | undefined;
+		let lockCompromisedError: Error | undefined;
+		const throwIfCompromised = () => {
+			if (lockCompromisedError) {
+				throw lockCompromisedError;
+			}
+		};
+
+		try {
+			release = await lockfile.lock(refreshLockPath, {
+				realpath: false,
+				retries: {
+					retries: 10,
+					factor: 2,
+					minTimeout: 100,
+					maxTimeout: 10000,
+					randomize: true,
+				},
+				stale: 30000,
+				onCompromised: (error) => {
+					lockCompromisedError ??= error;
+				},
+			});
+			throwIfCompromised();
+			const result = await fn();
+			throwIfCompromised();
+			return result;
+		} finally {
+			if (release) {
+				await release().catch(() => undefined);
+			}
+		}
+	}
 }
 
 export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	private value: string | undefined;
+	private refreshLocks: Map<string, Promise<void>> = new Map();
 
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		const { result, next } = fn(this.value);
@@ -264,6 +306,25 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 			this.value = next;
 		}
 		return result;
+	}
+
+	async withRefreshLock<T>(providerId: string, fn: () => Promise<T>): Promise<T> {
+		const previous = this.refreshLocks.get(providerId) ?? Promise.resolve();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const current = previous.then(() => gate);
+		this.refreshLocks.set(providerId, current);
+		await previous;
+		try {
+			return await fn();
+		} finally {
+			release();
+			if (this.refreshLocks.get(providerId) === current) {
+				this.refreshLocks.delete(providerId);
+			}
+		}
 	}
 }
 
@@ -823,22 +884,33 @@ export class AuthStorage {
 			return null;
 		}
 
-		const result = await this.storage.withLockAsync(async (current) => {
+		type RefreshResult = { apiKey: string; newCredentials: OAuthCredentials } | null;
+		const readCurrent = (
+			current: string | undefined,
+		): { currentData: AuthStorageData; cred?: OAuthCredential; fresh?: RefreshResult } => {
 			const currentData = this.parseStorageData(current);
 			this.data = currentData;
 			this.loadError = null;
-
 			const cred = currentData[providerId];
 			if (cred?.type !== "oauth") {
-				return { result: null };
+				return { currentData, fresh: null };
 			}
-
 			if (Date.now() < cred.expires) {
-				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
+				return { currentData, cred, fresh: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
+			}
+			return { currentData, cred };
+		};
+
+		// The provider-scoped refresh lock serializes refreshes; the storage lock is
+		// only held for the short read and commit steps, never across the network call.
+		return this.storage.withRefreshLock(providerId, async () => {
+			const prepared = this.storage.withLock((current) => ({ result: readCurrent(current) }));
+			if (prepared.fresh !== undefined) {
+				return prepared.fresh;
 			}
 
 			const oauthCreds: Record<string, OAuthCredentials> = {};
-			for (const [key, value] of Object.entries(currentData)) {
+			for (const [key, value] of Object.entries(prepared.currentData)) {
 				if (value.type === "oauth") {
 					oauthCreds[key] = value;
 				}
@@ -846,19 +918,26 @@ export class AuthStorage {
 
 			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
 			if (!refreshed) {
-				return { result: null };
+				return null;
 			}
 
-			const merged: AuthStorageData = {
-				...currentData,
-				[providerId]: { type: "oauth", ...refreshed.newCredentials },
-			};
-			this.data = merged;
-			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
+			return this.storage.withLockAsync<RefreshResult>(async (current) => {
+				const latest = readCurrent(current);
+				if (latest.fresh !== undefined) {
+					return { result: latest.fresh };
+				}
+				if (JSON.stringify(latest.cred) !== JSON.stringify(prepared.cred)) {
+					return { result: null };
+				}
+				const merged: AuthStorageData = {
+					...latest.currentData,
+					[providerId]: { type: "oauth", ...refreshed.newCredentials },
+				};
+				this.data = merged;
+				this.loadError = null;
+				return { result: refreshed, next: JSON.stringify(merged, null, 2) };
+			});
 		});
-
-		return result;
 	}
 
 	/**
@@ -1058,7 +1137,7 @@ export class AuthStorage {
 			}
 			if (this.data[PRIME_INFERENCE_PROVIDER_ID]) {
 				try {
-					this.remove(PRIME_INFERENCE_PROVIDER_ID);
+					this.removeVerified(PRIME_INFERENCE_PROVIDER_ID);
 				} catch (error) {
 					return { legacyCleanupError: error instanceof Error ? error : new Error(String(error)) };
 				}

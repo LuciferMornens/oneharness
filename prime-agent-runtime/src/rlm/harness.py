@@ -27,6 +27,20 @@ _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Make a rename durable; best-effort because some platforms cannot open directories."""
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -310,11 +324,14 @@ class HarnessState:
             descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             with os.fdopen(descriptor, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             if existing_mode is not None:
                 os.chmod(temp_path, existing_mode)
             os.replace(temp_path, target_path)
         finally:
             temp_path.unlink(missing_ok=True)
+        _fsync_directory(target_path.parent)
         self._loaded_mtime = self._disk_mtime()
         return self
 

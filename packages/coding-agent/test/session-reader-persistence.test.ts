@@ -100,7 +100,8 @@ describe("session catalog cache and standalone export", () => {
 		expect(appended?.usage).toEqual({ inputTokens: count + 1, outputTokens: (count + 1) * 2, cost: (count + 1) * 3 });
 	});
 
-	it.each([2, 3])(
+	// Symlink creation needs a privilege on Windows; the case is symlink-specific.
+	it.skipIf(process.platform === "win32").each([2, 3])(
 		"exports a damaged version %s transcript through a symlink without changing the input",
 		async (version) => {
 			const path = join(dir, "damaged.jsonl");

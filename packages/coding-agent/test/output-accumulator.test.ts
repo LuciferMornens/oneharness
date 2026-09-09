@@ -7,22 +7,30 @@ import type { BashOperations } from "../src/core/tools/bash.js";
 import { OutputAccumulator } from "../src/core/tools/output-accumulator.js";
 
 describe("OutputAccumulator temp spill", () => {
-	let realTmp: string | undefined;
+	const TMP_ENV_VARS = ["TMPDIR", "TEMP", "TMP"] as const;
+	let realTmp: Record<string, string | undefined>;
 	let scratch: string;
+
+	// os.tmpdir() reads TMPDIR on POSIX and TEMP/TMP on Windows.
+	const setTmpDir = (dir: string) => {
+		for (const name of TMP_ENV_VARS) process.env[name] = dir;
+	};
 
 	beforeEach(() => {
 		scratch = mkdtempSync(join(tmpdir(), "pi-accumulator-"));
-		realTmp = process.env.TMPDIR;
+		realTmp = Object.fromEntries(TMP_ENV_VARS.map((name) => [name, process.env[name]]));
 	});
 
 	afterEach(() => {
-		if (realTmp === undefined) delete process.env.TMPDIR;
-		else process.env.TMPDIR = realTmp;
+		for (const name of TMP_ENV_VARS) {
+			if (realTmp[name] === undefined) delete process.env[name];
+			else process.env[name] = realTmp[name];
+		}
 		rmSync(scratch, { recursive: true, force: true });
 	});
 
 	it("degrades a failed spill to the in-memory tail without failing the close", async () => {
-		process.env.TMPDIR = join(scratch, "does-not-exist");
+		setTmpDir(join(scratch, "does-not-exist"));
 		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
 		accumulator.append(Buffer.from("0123456789abcdef\n"));
 		accumulator.append(Buffer.from("tail\n"));
@@ -39,7 +47,7 @@ describe("OutputAccumulator temp spill", () => {
 		// TMPDIR is a FILE: the open fails ENOTDIR and so does the cleanup rm.
 		const blocker = join(scratch, "not-a-dir");
 		writeFileSync(blocker, "x");
-		process.env.TMPDIR = blocker;
+		setTmpDir(blocker);
 		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
 		accumulator.append(Buffer.from("0123456789abcdef\n"));
 		accumulator.append(Buffer.from("tail\n"));

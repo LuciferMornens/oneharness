@@ -185,7 +185,13 @@ export class CommandRecoveryJournal {
 	private append(record: JournalRecord): void {
 		const descriptor = openSync(this.path, "a", 0o600);
 		try {
-			writeSync(descriptor, `${JSON.stringify(record)}\n`);
+			const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error(`Short write appending to ${this.path}`);
+				offset += written;
+			}
 			fsyncSync(descriptor);
 		} finally {
 			closeSync(descriptor);

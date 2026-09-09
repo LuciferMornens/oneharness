@@ -5151,7 +5151,13 @@ export class DaemonSupervisor {
 					if (!descriptorWorker.launchEnv) {
 						throw new Error("Client-owned session recovery requires the owning client environment");
 					}
-					await this.retryWorkerRecovery(descriptorWorker);
+					// A stopping worker must finish stopping; requireAvailableWorkerClient reports it below.
+					if (
+						(this.workerStopCounts?.get(descriptorWorker) ?? 0) === 0 &&
+						!this.isWorkerStopping(descriptorWorker)
+					) {
+						await this.retryWorkerRecovery(descriptorWorker);
+					}
 				}
 			} else if (this.canRetryFailedWorker(descriptorWorker)) {
 				await this.retryWorkerRecovery(descriptorWorker);

@@ -71,7 +71,11 @@ export function writeFileAtomicSync(path: string, data: string, options: WriteFi
 		options.beforeRename?.(tempPath);
 		renameOntoSync(tempPath, path);
 	} finally {
-		rmSync(tempPath, { force: true });
+		try {
+			rmSync(tempPath, { force: true });
+		} catch {
+			// Litter only: a cleanup failure must not mask the write outcome.
+		}
 	}
 	if (options.fsyncDir) {
 		try {

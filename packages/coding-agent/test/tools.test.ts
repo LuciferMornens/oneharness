@@ -429,8 +429,10 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("omits the full-output pointer and still succeeds when the spill degrades", async () => {
-			const realTmp = process.env.TMPDIR;
-			process.env.TMPDIR = join(testDir, "no-such-tmp");
+			// os.tmpdir() reads TMPDIR on POSIX and TEMP/TMP on Windows.
+			const tmpEnvVars = ["TMPDIR", "TEMP", "TMP"] as const;
+			const realTmp = Object.fromEntries(tmpEnvVars.map((name) => [name, process.env[name]]));
+			for (const name of tmpEnvVars) process.env[name] = join(testDir, "no-such-tmp");
 			try {
 				const operations: BashOperations = {
 					exec: async (_command, _cwd, { onData }) => {
@@ -450,8 +452,10 @@ describe("Coding Agent Tools", () => {
 				expect(output).toMatch(/\[Showing lines \d+-\d+ of \d+\]/);
 				expect(output).toContain("3000");
 			} finally {
-				if (realTmp === undefined) delete process.env.TMPDIR;
-				else process.env.TMPDIR = realTmp;
+				for (const name of tmpEnvVars) {
+					if (realTmp[name] === undefined) delete process.env[name];
+					else process.env[name] = realTmp[name];
+				}
 			}
 		});
 

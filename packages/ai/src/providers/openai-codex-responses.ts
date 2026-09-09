@@ -470,7 +470,7 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 			const statusCode = (event as { status_code?: unknown }).status_code;
 			const status = typeof statusCode === "number" ? statusCode : undefined;
 			const code = flatCode || nested?.code || nested?.type || undefined;
-			const usageLimit = nested ? codexUsageLimitMessage(nested, status) : undefined;
+			const usageLimit = codexUsageLimitMessage(nested ?? (event as CodexErrorPayload), status);
 			const message = flatMessage || nested?.message || "";
 			throw new CodexApiError(
 				usageLimit?.friendlyMessage ?? `Codex error: ${message || code || JSON.stringify(event)}`,

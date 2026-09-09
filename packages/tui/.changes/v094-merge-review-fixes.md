@@ -1,0 +1,1 @@
+- Changed clicked `file:` hyperlinks to open with the platform opener only when they resolve inside the caller-supplied root directory.

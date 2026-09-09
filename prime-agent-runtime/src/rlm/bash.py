@@ -83,13 +83,15 @@ def _completion_reaches(
     """Follow asyncio's wrapper and TaskGroup ownership callbacks."""
     pending = [start]
     seen_futures: set[int] = set()
-    seen_values: set[int] = set()
+    seen_values: set[tuple[int, int]] = set()
 
     def collect(value: Any, depth: int = 0) -> None:
         if isinstance(value, asyncio.Future):
             pending.append(value)
             return
-        identity = id(value)
+        # Keyed by depth: a value first met near the cutoff still gets explored
+        # fully when a shallower path reaches it later.
+        identity = (id(value), depth)
         if depth >= 4 or identity in seen_values:
             return
         seen_values.add(identity)

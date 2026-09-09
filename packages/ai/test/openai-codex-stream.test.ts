@@ -1214,6 +1214,29 @@ describe("openai-codex streaming", () => {
 		expect(details?.retryAfterMs).toBeLessThanOrEqual(2 * 3600 * 1000 + 1000);
 	});
 
+	it("maps flat streaming usage-limit error payloads to a friendly rate-limit failure", async () => {
+		const resetsAt = Math.round(Date.now() / 1000) + 2 * 3600;
+		const sse = `data: ${JSON.stringify({
+			type: "error",
+			code: "usage_limit_reached",
+			message: "Usage limit reached",
+			plan_type: "Plus",
+			resets_at: resetsAt,
+		})}\n\n`;
+		stubCodexFetch(() => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }));
+
+		const result = await runCodexErrorTurn();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(
+			"You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min.",
+		);
+		const details = failureDetails(result);
+		expect(details?.kind).toBe("rate_limit");
+		expect(details?.retryAfterMs).toBeGreaterThan(0);
+		expect(details?.retryAfterMs).toBeLessThanOrEqual(2 * 3600 * 1000 + 1000);
+	});
+
 	it("waits for the longer of Retry-After header and usage-limit reset", async () => {
 		const resetsAt = Math.round(Date.now() / 1000) + 10;
 		stubCodexFetch(
