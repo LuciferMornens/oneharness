@@ -798,13 +798,16 @@ export class TUI extends Container {
 	private isFileLinkWithinRoot(url: URL): boolean {
 		const root = this.getFileLinkRoot?.();
 		if (!root) return false;
-		let filePath: string;
+		// Real paths only: a symlink inside the root must not escape it.
+		let realRoot: string;
+		let realFile: string;
 		try {
-			filePath = fileURLToPath(url);
+			realRoot = fs.realpathSync(root);
+			realFile = fs.realpathSync(fileURLToPath(url));
 		} catch {
 			return false;
 		}
-		const relative = path.relative(path.resolve(root), path.resolve(filePath));
+		const relative = path.relative(realRoot, realFile);
 		return !relative.startsWith("..") && !path.isAbsolute(relative);
 	}
 
