@@ -1631,12 +1631,7 @@ describe("openai-completions tool_choice", () => {
 			payload = params;
 		};
 
-		for (const model of [
-			getModel("moonshotai", "kimi-k2.5"),
-			getModel("moonshotai", "kimi-k2.6"),
-			getModel("moonshotai-cn", "kimi-k2.5"),
-			getModel("moonshotai-cn", "kimi-k2.6"),
-		]) {
+		for (const model of [getModel("moonshotai", "kimi-k2.6"), getModel("moonshotai-cn", "kimi-k2.6")]) {
 			expect(model.reasoningCapabilities).toEqual({
 				control: "toggle",
 				levels: {

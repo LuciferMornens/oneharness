@@ -37,7 +37,7 @@ const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: 
 async function payload(
 	provider: "deepseek" | "openrouter" | "prime-inference" | "xai" | "zai",
 	modelId: string,
-	reasoning?: "off" | "low" | "medium" | "high" | "xhigh" | "max",
+	reasoning?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
 ) {
 	let captured: unknown;
 	await streamSimple(getModel(provider, modelId as never), context, {
@@ -85,6 +85,26 @@ describe("reasoning capability payloads", () => {
 		const params = await payload("deepseek", "deepseek-v4-flash", "off");
 		expect(params.thinking).toEqual({ type: "disabled" });
 		expect(params.reasoning_effort).toBeUndefined();
+	});
+
+	it.each(["minimal", "low", "medium", "high", "xhigh", "max"] as const)(
+		"serializes DeepSeek V4.1 Flash %s as an exact native effort",
+		async (level) => {
+			expect(await payload("deepseek", "deepseek-flash", level)).toMatchObject({
+				thinking: { type: "enabled" },
+				reasoning_effort: level,
+			});
+		},
+	);
+
+	it("uses OpenRouter's reasoning object for the DeepSeek V4.1 Flash route", async () => {
+		const enabled = await payload("openrouter", "deepseek/deepseek-v4.1-flash", "max");
+		expect(enabled.reasoning).toEqual({ effort: "max" });
+		expect(enabled.thinking).toBeUndefined();
+		expect(enabled.reasoning_effort).toBeUndefined();
+
+		const disabled = await payload("openrouter", "deepseek/deepseek-v4.1-flash", "off");
+		expect(disabled.reasoning).toEqual({ effort: "none" });
 	});
 
 	it("uses OpenRouter's reasoning object for preserved DeepSeek V4 routes", async () => {

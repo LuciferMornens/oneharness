@@ -1,0 +1,1 @@
+- Added DeepSeek V4.1 Flash: the native `deepseek-flash` route on the DeepSeek API with all seven reasoning efforts (off, minimal, low, medium, high, xhigh, max), vision input, 1M context, and the `deepseek/deepseek-v4.1-flash` route on OpenRouter.

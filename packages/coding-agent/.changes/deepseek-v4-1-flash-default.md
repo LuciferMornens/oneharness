@@ -1,0 +1,1 @@
+- Changed the default DeepSeek model to `deepseek-flash` (DeepSeek V4.1 Flash), which serves `deepseek-v4-pro` traffic anyway but adds vision input and bills at Flash rates.

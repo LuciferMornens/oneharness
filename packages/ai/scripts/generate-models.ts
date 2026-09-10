@@ -110,6 +110,19 @@ const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	max: "max",
 } as const;
 
+// DeepSeek-V4.1-Flash accepts every named effort its deserializer knows about
+// (none, minimal, low, medium, high, xhigh, max); the API folds minimal into
+// low and medium/xhigh into high instead of rejecting them.
+const DEEPSEEK_FLASH_THINKING_LEVEL_MAP = {
+	off: "off",
+	minimal: "minimal",
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: "max",
+} as const;
+
 const ZAI_TOGGLE_THINKING_LEVEL_MAP = {
 	off: "off",
 	minimal: null,
@@ -629,19 +642,30 @@ function applyProviderSpecificReasoningMetadata(model: Model<any>): boolean {
 	return true;
 }
 
+// DeepSeek-V4.1-Flash is served under the bare `deepseek-flash` id on the direct
+// API, so family detection cannot rely on the `deepseek-v4` marker alone.
+function isDeepSeekV4FamilyId(modelId: string): boolean {
+	const id = modelId.toLowerCase();
+	return id.includes("deepseek-v4") || id.includes("deepseek-flash");
+}
+
+function getDeepSeekNativeThinkingLevelMap(
+	modelId: string,
+): typeof DEEPSEEK_V4_THINKING_LEVEL_MAP | typeof DEEPSEEK_FLASH_THINKING_LEVEL_MAP {
+	return modelId.toLowerCase().includes("deepseek-flash")
+		? DEEPSEEK_FLASH_THINKING_LEVEL_MAP
+		: DEEPSEEK_V4_THINKING_LEVEL_MAP;
+}
+
 function isOpenRouterDeepSeekV4Route(model: Model<any>): boolean {
 	return (
-		model.provider === "openrouter" &&
-		model.api === "openai-completions" &&
-		model.id.toLowerCase().includes("deepseek-v4")
+		model.provider === "openrouter" && model.api === "openai-completions" && isDeepSeekV4FamilyId(model.id)
 	);
 }
 
 function isPrimeDeepSeekV4Route(model: Model<any>): boolean {
 	return (
-		model.provider === "prime-inference" &&
-		model.api === "openai-completions" &&
-		model.id.toLowerCase().includes("deepseek-v4")
+		model.provider === "prime-inference" && model.api === "openai-completions" && isDeepSeekV4FamilyId(model.id)
 	);
 }
 
@@ -667,6 +691,10 @@ const OPENROUTER_DEEPSEEK_V4_REASONING_SCHEMA: Record<string, unknown> = {
 		reasoning: { mandatory: false, supported_efforts: ["max", "high", "low"] },
 	},
 	"~deepseek/deepseek-v4-flash-latest": {
+		supported_parameters: ["reasoning"],
+		reasoning: { mandatory: false, supported_efforts: ["max", "high", "low"] },
+	},
+	"deepseek/deepseek-v4.1-flash": {
 		supported_parameters: ["reasoning"],
 		reasoning: { mandatory: false, supported_efforts: ["max", "high", "low"] },
 	},
@@ -815,7 +843,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { minimal: null, max: "max" });
 	}
 	// gpt-6 reasoning is mandatory with no minimal effort; xhigh/max are supported (OpenRouter capability data).
-	if (model.id.includes("gpt-6")) {
+	// Bedrock Converse only exposes named effort on Claude and Nova 2 Lite routes, so its OpenAI-hosted
+	// gpt-6 entries stay on the fixed contract instead of claiming effort selection.
+	if (model.id.includes("gpt-6") && model.api !== "bedrock-converse-stream") {
 		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
 	}
 	if (
@@ -854,8 +884,8 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (nativeAnthropicRoute && model.id.includes("mythos-preview")) {
 		mergeThinkingLevelMap(model, { off: null, max: "max" });
 	}
-	if (model.provider === "deepseek" && model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
-		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+	if (model.provider === "deepseek" && model.api === "openai-completions" && isDeepSeekV4FamilyId(model.id)) {
+		mergeThinkingLevelMap(model, getDeepSeekNativeThinkingLevelMap(model.id));
 	}
 	if (model.compat?.thinkingFormat === "zai" && model.reasoning) {
 		const supportsEffort = /(?:^|\/)glm-5\.2(?:-|$)/.test(model.id.toLowerCase());
@@ -3164,6 +3194,25 @@ async function generateModels() {
 
 	const deepseekV4Models: Model<"openai-completions">[] = [
 		{
+			id: "deepseek-flash",
+			name: "DeepSeek V4.1 Flash",
+			api: "openai-completions",
+			baseUrl: "https://api.deepseek.com",
+			provider: "deepseek",
+			reasoning: true,
+			input: ["text", "image"],
+			// Peak tariff; DeepSeek halves every rate off-peak.
+			cost: {
+				input: 0.3,
+				output: 1.2,
+				cacheRead: 0.006,
+				cacheWrite: 0,
+			},
+			contextWindow: 1048576,
+			maxTokens: 393216,
+			compat: DEEPSEEK_V4_COMPAT,
+		},
+		{
 			id: "deepseek-v4-flash",
 			name: "DeepSeek V4 Flash",
 			api: "openai-completions",
@@ -3203,7 +3252,7 @@ async function generateModels() {
 	allModels.push(...deepseekV4Models);
 
 	for (const candidate of allModels) {
-		if (candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
+		if (candidate.api === "openai-completions" && isDeepSeekV4FamilyId(candidate.id)) {
 			candidate.compat = {
 				...candidate.compat,
 				...(candidate.provider === "openrouter"
@@ -3215,7 +3264,7 @@ async function generateModels() {
 					: DEEPSEEK_V4_COMPAT),
 			};
 			if (candidate.provider === "deepseek") {
-				mergeThinkingLevelMap(candidate, DEEPSEEK_V4_THINKING_LEVEL_MAP);
+				mergeThinkingLevelMap(candidate, getDeepSeekNativeThinkingLevelMap(candidate.id));
 			} else if (
 				!isOpenRouterDeepSeekV4Route(candidate) &&
 				!isPrimeDeepSeekV4Route(candidate) &&

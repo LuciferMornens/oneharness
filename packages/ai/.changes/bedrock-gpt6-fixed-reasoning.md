@@ -1,0 +1,2 @@
+- Fixed catalog generation failing when Bedrock exposes an OpenAI gpt-6 route: Bedrock Converse gpt-6 entries now use the fixed reasoning contract instead of an unsupported effort contract.
+- Refreshed the generated model catalog from the live provider sources, adding Bedrock regional routes, Qwen 3.5, and GPT-6 Astra entries, and dropping models the providers retired.

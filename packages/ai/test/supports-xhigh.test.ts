@@ -110,6 +110,12 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "low", "high", "max"]);
 	});
 
+	it("exposes every native DeepSeek V4.1 Flash effort on the DeepSeek provider", () => {
+		const model = getModel("deepseek", "deepseek-flash");
+		expect(model).toBeDefined();
+		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+	});
+
 	it("keeps unclassified opencode-go DeepSeek controls fixed", () => {
 		const model = getModel("opencode-go", "deepseek-v4-flash");
 		expect(model).toBeDefined();
@@ -120,6 +126,12 @@ describe("getSupportedThinkingLevels", () => {
 		const model = getModel("openrouter", "deepseek/deepseek-v4-flash");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "high", "xhigh"]);
+	});
+
+	it("preserves OpenRouter-published DeepSeek V4.1 Flash efforts", () => {
+		const model = getModel("openrouter", "deepseek/deepseek-v4.1-flash");
+		expect(model).toBeDefined();
+		expect(getSupportedThinkingLevels(model!)).toEqual(["off", "low", "high", "max"]);
 	});
 
 	it("gives every generated reasoning model at least one selectable level", () => {
