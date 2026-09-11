@@ -143,6 +143,14 @@ describe("Tool Call Without Result Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ADVERSERIAL_API_KEY)("Adverserial AI Provider", () => {
+		const model = getModel("adverserial", "lordx64/cyberkimi");
+
+		it("should filter out tool calls without corresponding tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testToolCallWithoutResult(model);
+		});
+	});
+
 	describe.skipIf(!process.env.ABLITERATION_API_KEY)("abliteration.ai Provider", () => {
 		const model = getModel("abliteration", "abliterated-model-large-v2");
 

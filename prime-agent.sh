@@ -26,6 +26,7 @@ if [[ "$NO_ENV" == "true" ]]; then
   unset ANTHROPIC_API_KEY
   unset ANTHROPIC_OAUTH_TOKEN
   unset ABLITERATION_API_KEY
+  unset ADVERSERIAL_API_KEY
   unset AUDN_API_KEY
   unset OPENAI_API_KEY
   unset PRIME_API_KEY

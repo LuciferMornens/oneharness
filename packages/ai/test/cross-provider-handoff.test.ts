@@ -68,6 +68,8 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "groq", model: "openai/gpt-oss-120b", label: "groq-gpt-oss-120b" },
 	{ provider: "audn", model: "pingu-unchained-10", label: "audn-pingu-unchained-10" },
 	{ provider: "audn", model: "necromicon", label: "audn-necromicon" },
+	{ provider: "adverserial", model: "lordx64/cyberkimi", label: "adverserial-cyberkimi" },
+	{ provider: "adverserial", model: "lordx64/cyberglm", label: "adverserial-cyberglm" },
 	{ provider: "abliteration", model: "abliterated-model-large-v2", label: "abliteration-large-v2" },
 	{ provider: "abliteration", model: "abliterated-model", label: "abliteration-base" },
 	{ provider: "orcarouter", model: "orcarouter/auto", label: "orcarouter-auto" },

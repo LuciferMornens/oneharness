@@ -21,6 +21,7 @@ export type KnownProvider =
 	| "amazon-bedrock"
 	| "anthropic"
 	| "abliteration"
+	| "adverserial"
 	| "audn"
 	| "google"
 	| "google-vertex"

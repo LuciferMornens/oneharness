@@ -59,6 +59,7 @@ prime-agent
 | Provider | Environment Variable | `auth.json` key |
 |----------|----------------------|------------------|
 | abliteration.ai | `ABLITERATION_API_KEY` | `abliteration` |
+| Adverserial AI | `ADVERSERIAL_API_KEY` | `adverserial` |
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | audn.ai | `AUDN_API_KEY` | `audn` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
@@ -99,6 +100,7 @@ Store credentials in `~/.prime/agent/auth.json`:
 ```json
 {
   "anthropic": { "type": "api_key", "key": "sk-ant-..." },
+  "adverserial": { "type": "api_key", "key": "sk-..." },
   "audn": { "type": "api_key", "key": "sk_live_..." },
   "openai": { "type": "api_key", "key": "sk-..." },
   "prime-inference": { "type": "api_key", "key": "..." },
@@ -138,6 +140,12 @@ OAuth credentials are also stored here after `/login` and managed automatically.
 ### Prime Inference
 
 Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.
+
+### Adverserial AI
+
+Adverserial AI is an OpenAI-compatible API at `https://api.adverserial.ai/v1`. Set `ADVERSERIAL_API_KEY` or store a key under `adverserial` via `/login`. Keys are created in the billing dashboard at [billing.adverserial.ai](https://billing.adverserial.ai) and debit a prepaid wallet in real time. The default model is `lordx64/cyberkimi` (CyberKimi, 750K context, Kimi K3-based security fine-tune); `lordx64/cyberglm` (CyberGLM, 131K context) is the GLM-5.3-Flash budget tier. Both models always think and return the trace in `reasoning_content`; `/effort` maps to the full native `reasoning_effort` range `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`, and `none` disables thinking. Reasoning can consume the whole output budget — if a reply ends early with no content, raise the max tokens.
+
+See [https://adverserial.ai/docs.html](https://adverserial.ai/docs.html).
 
 ### audn.ai
 

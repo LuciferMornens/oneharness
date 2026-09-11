@@ -107,6 +107,7 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		openai: "OPENAI_API_KEY",
 		"azure-openai-responses": "AZURE_OPENAI_API_KEY",
 		abliteration: "ABLITERATION_API_KEY",
+		adverserial: "ADVERSERIAL_API_KEY",
 		audn: "AUDN_API_KEY",
 		"prime-inference": "PRIME_API_KEY",
 		deepseek: "DEEPSEEK_API_KEY",

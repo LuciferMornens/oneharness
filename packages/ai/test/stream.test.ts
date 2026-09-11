@@ -647,6 +647,33 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ADVERSERIAL_API_KEY)(
+		"Adverserial AI Provider (lordx64/cyberkimi via OpenAI Completions)",
+		() => {
+			const llm = getModel("adverserial", "lordx64/cyberkimi");
+
+			it("should complete basic text generation", { retry: 3 }, async () => {
+				await basicTextGeneration(llm);
+			});
+
+			it("should handle tool calling", { retry: 3 }, async () => {
+				await handleToolCall(llm);
+			});
+
+			it("should handle streaming", { retry: 3 }, async () => {
+				await handleStreaming(llm);
+			});
+
+			it("should handle thinking mode", { retry: 3 }, async () => {
+				await handleThinking(llm, { reasoningEffort: "medium" });
+			});
+
+			it("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+				await multiTurn(llm, { reasoningEffort: "medium" });
+			});
+		},
+	);
+
 	describe.skipIf(!process.env.ABLITERATION_API_KEY)(
 		"abliteration.ai Provider (abliterated-model-large-v2 via OpenAI Responses)",
 		() => {

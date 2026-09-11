@@ -235,6 +235,26 @@ describe("totalTokens field", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ADVERSERIAL_API_KEY)("Adverserial AI", () => {
+		it("lordx64/cyberkimi - should return totalTokens equal to sum of components", {
+			retry: 3,
+			timeout: 60000,
+		}, async () => {
+			const llm = getModel("adverserial", "lordx64/cyberkimi");
+
+			console.log(`\nAdverserial AI / ${llm.id}:`);
+			const { first, second } = await testTotalTokensWithCache(llm, {
+				apiKey: process.env.ADVERSERIAL_API_KEY,
+			});
+
+			logUsage("First request", first);
+			logUsage("Second request", second);
+
+			assertTotalTokensEqualsComponents(first);
+			assertTotalTokensEqualsComponents(second);
+		});
+	});
+
 	describe.skipIf(!process.env.ABLITERATION_API_KEY)("abliteration.ai", () => {
 		it("abliterated-model-large-v2 - should return totalTokens equal to sum of components", {
 			retry: 3,

@@ -1,0 +1,1 @@
+- Added Adverserial AI API-key login and the built-in adverserial catalog, defaulting to CyberKimi (`lordx64/cyberkimi`).

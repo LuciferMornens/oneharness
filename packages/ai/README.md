@@ -69,6 +69,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **DeepSeek**
 - **Anthropic**
 - **abliteration.ai** (OpenAI Responses-compatible API)
+- **Adverserial AI** (OpenAI-compatible API)
 - **audn.ai** (OpenAI-compatible API)
 - **Google**
 - **Vertex AI** (Gemini via Vertex AI)
@@ -1099,6 +1100,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.openai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Supports `*.openai.azure.com` and `*.cognitiveservices.azure.com`; root endpoints auto-normalize to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
 | Anthropic | `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN` |
 | abliteration.ai | `ABLITERATION_API_KEY` |
+| Adverserial AI | `ADVERSERIAL_API_KEY` |
 | audn.ai | `AUDN_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | Google | `GEMINI_API_KEY` |
@@ -1289,6 +1291,8 @@ const response = await complete(model, {
 **Prime Inference**: Uses the OpenAI-compatible API at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or pass an API key explicitly.
 
 **abliteration.ai**: Uses the OpenAI Responses-compatible API at `https://api.abliteration.ai/v1`. Set `ABLITERATION_API_KEY` or pass an API key explicitly. Keys start with `ak_`. The catalog includes `abliterated-model-large-v2` (1M context, text-only, GLM-5.3, native `low` / `high` / `max` reasoning effort via `reasoning.effort`, default `max`), `abliterated-model-large` (1M context, text-only, GLM-5.2, native `high` / `max`), and `abliterated-model` (262K context, text+image, `none`–`xhigh`). All models reason by default and return the trace as a `reasoning` item.
+
+**Adverserial AI**: Uses the OpenAI-compatible API at `https://api.adverserial.ai/v1`. Set `ADVERSERIAL_API_KEY` or pass an API key explicitly. Keys are created in the billing dashboard at [billing.adverserial.ai](https://billing.adverserial.ai) and draw from a prepaid wallet. The catalog includes CyberKimi (`lordx64/cyberkimi`, 750K context, Kimi K3-based security fine-tune, default) and CyberGLM (`lordx64/cyberglm`, 131K context, GLM-5.3-Flash budget tier). Both always think and return the trace in `reasoning_content`; `/effort` maps to the full native `reasoning_effort` range `none`–`max` (`none` disables thinking).
 
 **audn.ai**: Uses the OpenAI-compatible API at `https://platform.audn.ai/api/v1`. Set `AUDN_API_KEY` or pass an API key explicitly. Keys start with `sk_live_`. The catalog includes Necromicon (`necromicon`, 1M context, Kimi K3 `low` / `high` / `max` reasoning effort via `reasoning_effort`, trace in `reasoning_content`), Bartzabel (`bartzabel`, 262K context, Qwen3.8 chain that always thinks server-side and returns the trace in `reasoning_content`), and Pingu Unchained 10 (`pingu-unchained-10`, the function-calling model). Reasoning models can take tens of seconds to minutes.
 

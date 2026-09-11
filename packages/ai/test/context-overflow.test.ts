@@ -226,6 +226,17 @@ describe("Context overflow error handling", () => {
 		}, 120000);
 	});
 
+	describe.skipIf(!process.env.ADVERSERIAL_API_KEY)("Adverserial AI", () => {
+		it("lordx64/cyberglm - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("adverserial", "lordx64/cyberglm");
+			const result = await testContextOverflow(model, process.env.ADVERSERIAL_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
 	describe.skipIf(!process.env.ABLITERATION_API_KEY)("abliteration.ai", () => {
 		it("abliterated-model-large-v2 - should detect overflow via isContextOverflow", async () => {
 			const model = getModel("abliteration", "abliterated-model-large-v2");

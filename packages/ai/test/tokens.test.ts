@@ -159,6 +159,14 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ADVERSERIAL_API_KEY)("Adverserial AI Provider", () => {
+		const llm = getModel("adverserial", "lordx64/cyberkimi");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
 	describe.skipIf(!process.env.ABLITERATION_API_KEY)("abliteration.ai Provider", () => {
 		const llm = getModel("abliteration", "abliterated-model-large-v2");
 

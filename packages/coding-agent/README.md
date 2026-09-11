@@ -85,6 +85,7 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 **API keys:**
 - Anthropic
 - abliteration.ai
+- Adverserial AI
 - audn.ai
 - OpenAI
 - Prime Inference

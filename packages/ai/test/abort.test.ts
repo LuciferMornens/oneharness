@@ -197,6 +197,18 @@ describe("AI Providers Abort Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.ADVERSERIAL_API_KEY)("Adverserial AI Provider Abort", () => {
+		const llm = getModel("adverserial", "lordx64/cyberkimi");
+
+		it("should abort mid-stream", { retry: 3 }, async () => {
+			await testAbortSignal(llm);
+		});
+
+		it("should handle immediate abort", { retry: 3 }, async () => {
+			await testImmediateAbort(llm);
+		});
+	});
+
 	describe.skipIf(!process.env.ABLITERATION_API_KEY)("abliteration.ai Provider Abort", () => {
 		const llm = getModel("abliteration", "abliterated-model-large-v2");
 

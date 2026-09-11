@@ -2731,6 +2731,70 @@ function getAudnModels(): Model<"openai-completions">[] {
 	];
 }
 
+const ADVERSERIAL_BASE_URL = "https://api.adverserial.ai/v1";
+const ADVERSERIAL_COMPAT: OpenAICompletionsCompat = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: true,
+	maxTokensField: "max_tokens",
+	supportsStrictMode: false,
+	requiresReasoningContentOnAssistantMessages: true,
+	thinkingFormat: "openai",
+};
+
+// The sglang backend validates reasoning_effort against
+// ['none','minimal','low','medium','high','xhigh','max'] — a full pass-through.
+const ADVERSERIAL_EFFORT_LEVEL_MAP = {
+	off: "none",
+	minimal: "minimal",
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: "max",
+} as const;
+
+/**
+ * adverserial.ai OpenAI-compatible catalog. Not on models.dev; sourced from
+ * https://adverserial.ai/docs.html. Both models are always-thinking security
+ * fine-tunes that return the trace in `reasoning_content` and accept the full
+ * reasoning_effort range ("none" disables thinking). Context budgets are the
+ * client windows documented by Adverserial (750K CyberKimi / 131K CyberGLM).
+ */
+function getAdverserialModels(): Model<"openai-completions">[] {
+	return [
+		{
+			id: "lordx64/cyberkimi",
+			name: "CyberKimi",
+			api: "openai-completions",
+			provider: "adverserial",
+			baseUrl: ADVERSERIAL_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "effort", levels: { ...ADVERSERIAL_EFFORT_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 8, output: 30, cacheRead: 0.8, cacheWrite: 0 },
+			contextWindow: 750000,
+			maxTokens: 131072,
+			featured: true,
+			compat: { ...ADVERSERIAL_COMPAT },
+		},
+		{
+			id: "lordx64/cyberglm",
+			name: "CyberGLM",
+			api: "openai-completions",
+			provider: "adverserial",
+			baseUrl: ADVERSERIAL_BASE_URL,
+			reasoning: true,
+			reasoningCapabilities: { control: "effort", levels: { ...ADVERSERIAL_EFFORT_LEVEL_MAP } },
+			input: ["text"],
+			cost: { input: 4, output: 15, cacheRead: 0.8, cacheWrite: 0 },
+			contextWindow: 131072,
+			maxTokens: 32768,
+			compat: { ...ADVERSERIAL_COMPAT },
+		},
+	];
+}
+
 function getAbliterationModels(): Model<"openai-responses">[] {
 	const baseUrl = "https://api.abliteration.ai/v1";
 	return [
@@ -2838,6 +2902,7 @@ function mergeStaticCatalogModels(allModels: Model<any>[]): void {
 	mergeCatalogModels(allModels, [
 		...getGrokSubscriptionModels(),
 		...getAudnModels(),
+		...getAdverserialModels(),
 		...getAbliterationModels(),
 		getOrcaRouterAutoModel(),
 	]);
