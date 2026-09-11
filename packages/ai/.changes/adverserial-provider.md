@@ -1,1 +1,1 @@
-- Added the Adverserial AI OpenAI-compatible provider with CyberKimi (`lordx64/cyberkimi`) and CyberGLM (`lordx64/cyberglm`), with `ADVERSERIAL_API_KEY` auth.
+- Added the Adverserial AI OpenAI-compatible provider with CyberKimi (`lordx64/cyberkimi`, image input) and CyberGLM (`lordx64/cyberglm`), with `ADVERSERIAL_API_KEY` auth.

@@ -2771,7 +2771,7 @@ function getAdverserialModels(): Model<"openai-completions">[] {
 			baseUrl: ADVERSERIAL_BASE_URL,
 			reasoning: true,
 			reasoningCapabilities: { control: "effort", levels: { ...ADVERSERIAL_EFFORT_LEVEL_MAP } },
-			input: ["text"],
+			input: ["text", "image"],
 			cost: { input: 8, output: 30, cacheRead: 0.8, cacheWrite: 0 },
 			contextWindow: 750000,
 			maxTokens: 131072,
@@ -2892,8 +2892,13 @@ function getOrcaRouterAutoModel(): Model<"openai-completions"> {
 
 function mergeCatalogModels(allModels: Model<any>[], extra: Model<any>[]): void {
 	for (const model of extra) {
-		if (!allModels.some((existing) => existing.provider === model.provider && existing.id === model.id)) {
+		const existingIndex = allModels.findIndex(
+			(existing) => existing.provider === model.provider && existing.id === model.id,
+		);
+		if (existingIndex === -1) {
 			allModels.push(model);
+		} else {
+			allModels[existingIndex] = model;
 		}
 	}
 }
@@ -3546,6 +3551,7 @@ async function generateModels() {
 	// xAI Grok subscription models (OAuth via the Grok CLI proxy)
 	allModels.push(...getGrokSubscriptionModels());
 	allModels.push(...getAudnModels());
+	allModels.push(...getAdverserialModels());
 	allModels.push(...getAbliterationModels());
 
 	// Add missing Grok models

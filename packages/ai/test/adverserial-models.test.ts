@@ -37,7 +37,7 @@ describe("adverserial.ai models", () => {
 		expect(getSupportedThinkingLevels(model)).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 		expect(clampThinkingLevel(model, "medium")).toBe("medium");
 		expect(clampThinkingLevel(model, "max")).toBe("max");
-		expect(model.input).toEqual(["text"]);
+		expect(model.input).toEqual(["text", "image"]);
 		expect(model.contextWindow).toBe(750000);
 		expect(model.maxTokens).toBe(131072);
 		expect(model.featured).toBe(true);

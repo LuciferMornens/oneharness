@@ -95,7 +95,7 @@ export const MODELS = {
 			reasoning: true,
 			thinkingLevelMap: {"off":"none","minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 			reasoningCapabilities: {"control":"effort","levels":{"off":"none","minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"}},
-			input: ["text"],
+			input: ["text", "image"],
 			cost: {
 				input: 8,
 				output: 30,
