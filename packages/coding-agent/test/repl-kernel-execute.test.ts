@@ -8,14 +8,16 @@ import {
 	AGENT_MESSAGE_DISPLAY_MIME,
 	ATTACHMENT_DISPLAY_MIME,
 	DIFF_DISPLAY_MIME,
+	type ExecuteResult,
 	type HostRequestHandlers,
 	ReplKernelManager,
 } from "../src/core/kernel/index.js";
+import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
 function resolveReplPython(): string | null {
 	const candidates = [
 		process.env.PRIME_AGENT_KERNEL_PYTHON,
-		resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv", "bin", "python"),
+		kernelVenvPython(resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv")),
 		kernelVenvPython(resolveKernelVenvDirSync()),
 	].filter((p): p is string => Boolean(p));
 	for (const python of candidates) {
@@ -161,5 +163,65 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		expect(second.stdout).toContain("own-output");
 		expect(second.stdout).not.toContain("SECRET-thread");
 		expect(second.backgroundOutput ?? "").toContain("SECRET-thread");
+	}, 30_000);
+});
+
+const inheritedShellPath = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh";
+
+/** Runs a provisioner cell with the host's own PRIME_AGENT_BASH_SHELL* variables set to the given values. */
+async function executeWithInheritedShellEnv(
+	dir: string,
+	inherited: { shell?: string; issue?: string },
+	options: { kernelShellPath?: string },
+	code: string,
+): Promise<ExecuteResult> {
+	const saved = { shell: process.env.PRIME_AGENT_BASH_SHELL, issue: process.env.PRIME_AGENT_BASH_SHELL_ISSUE };
+	process.env.PRIME_AGENT_BASH_SHELL = inherited.shell;
+	process.env.PRIME_AGENT_BASH_SHELL_ISSUE = inherited.issue;
+	const provisioner = new IpythonKernelProvisioner(dir, { python: python as string, ...options });
+	try {
+		const client = await provisioner.ensure();
+		return await client.execute(code);
+	} finally {
+		process.env.PRIME_AGENT_BASH_SHELL = saved.shell;
+		process.env.PRIME_AGENT_BASH_SHELL_ISSUE = saved.issue;
+		await provisioner.dispose();
+	}
+}
+
+describeIf("IpythonKernelProvisioner kernel shell env (real runtime)", () => {
+	let dir = "";
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "prime-agent-provisioner-shell-"));
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("removes an inherited shell so a rejected kernelShellPath cannot be bypassed", async () => {
+		const missingShell = join(dir, "missing-shell");
+		const result = await executeWithInheritedShellEnv(
+			dir,
+			{ shell: inheritedShellPath },
+			{ kernelShellPath: missingShell },
+			'import os\nprint(repr(os.environ.get("PRIME_AGENT_BASH_SHELL")))\nbash("echo bypass")',
+		);
+		expect(result.stdout).toContain("None");
+		expect(result.status).toBe("error");
+		expect(result.error?.ename).toBe("RuntimeError");
+		expect(result.error?.evalue).toContain(`kernelShellPath does not exist: ${missingShell}`);
+	}, 30_000);
+
+	it("removes an inherited issue so a resolved shell still runs commands", async () => {
+		const result = await executeWithInheritedShellEnv(
+			dir,
+			{ issue: "stale issue from another process" },
+			{},
+			'print((await bash("echo resolved")).output)',
+		);
+		expect(result.status).toBe("ok");
+		expect(result.stdout).toContain("resolved");
 	}, 30_000);
 });

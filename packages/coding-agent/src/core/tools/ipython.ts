@@ -483,11 +483,14 @@ export class IpythonKernelProvisioner {
 			const m = new ReplKernelManager({
 				python: this.options?.python,
 				cwd: this.cwd,
-				// bash() reads these to pick its shell and command prefix.
+				// bash() reads these to pick its shell and command prefix. Both shell
+				// keys are always set so values inherited from the host's own
+				// environment can neither bypass a rejected setting nor poison a
+				// valid one.
 				env: {
 					...this.options?.env,
-					...(kernelShell.shell ? { PRIME_AGENT_BASH_SHELL: kernelShell.shell } : {}),
-					...(kernelShell.issue ? { PRIME_AGENT_BASH_SHELL_ISSUE: kernelShell.issue } : {}),
+					PRIME_AGENT_BASH_SHELL: kernelShell.shell,
+					PRIME_AGENT_BASH_SHELL_ISSUE: kernelShell.issue,
 					...(commandPrefix ? { PRIME_AGENT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
 				},
 				sessionId: this.options?.sessionId,

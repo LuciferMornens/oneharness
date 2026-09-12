@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -21,9 +22,18 @@ class ShellResolutionTest(unittest.TestCase):
     def test_absolute_override_wins(self):
         shell = r"C:\Git\bin\bash.exe" if os.name == "nt" else "/opt/bin/bash"
         os.environ["PRIME_AGENT_BASH_SHELL"] = shell
-        os.environ["PRIME_AGENT_BASH_SHELL_ISSUE"] = "ignored when a shell is injected"
 
         self.assertEqual(bash_module._shell(), shell)
+
+    def test_host_issue_beats_inherited_override(self):
+        # A rejected setting must not be bypassed by a shell path inherited
+        # from a parent process that resolved one.
+        issue = "kernelShellPath must be a POSIX shell; bash() cannot run under PowerShell"
+        os.environ["PRIME_AGENT_BASH_SHELL"] = "/bin/bash"
+        os.environ["PRIME_AGENT_BASH_SHELL_ISSUE"] = issue
+
+        with self.assertRaisesRegex(RuntimeError, re.escape(issue)):
+            bash_module._shell()
 
     def test_relative_override_rejected(self):
         os.environ["PRIME_AGENT_BASH_SHELL"] = "bash"

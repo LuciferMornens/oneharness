@@ -9,12 +9,14 @@
  * the whole process chain: supervisor -> worker -> kernel. The worker's parent
  * is the supervisor; the kernel names its owning worker through the
  * PRIME_AGENT_KERNEL_OWNER_PID contract because a Windows venv launcher sits
- * between the worker and the interpreter.
+ * between the worker and the interpreter. Every kernel waits at a file
+ * barrier until all expected kernels have arrived, so distinct pids alone
+ * cannot pass: the kernels must execute at the same time.
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -224,6 +226,8 @@ function finalAssistantText(events: SessionEvent[]): string {
 interface ProcessChain {
 	kernelPid: number;
 	kernelOwnerPid: number;
+	/** Kernels registered at the barrier when this kernel stopped waiting. */
+	barrierArrived: number;
 	python: string;
 	workerPid: number;
 	supervisorPid: number;
@@ -232,7 +236,7 @@ interface ProcessChain {
 function parseProcessChain(stdout: string): ProcessChain {
 	const events = parseSessionEvents(stdout);
 	const kernelText = ipythonResultText(events);
-	const kernelMatch = /KERNEL_PID=(\d+) KERNEL_OWNER_PID=(\d+) PY=(.+)/.exec(kernelText);
+	const kernelMatch = /KERNEL_PID=(\d+) KERNEL_OWNER_PID=(\d+) BARRIER_ARRIVED=(\d+) PY=(.+)/.exec(kernelText);
 	expect(kernelMatch, `kernel identity missing from ipython result:\n${kernelText}`).not.toBeNull();
 	const workerText = finalAssistantText(events);
 	const workerMatch = /WORKER_PID=(\d+) SUPERVISOR_PID=(\d+)/.exec(workerText);
@@ -240,7 +244,8 @@ function parseProcessChain(stdout: string): ProcessChain {
 	return {
 		kernelPid: Number(kernelMatch?.[1]),
 		kernelOwnerPid: Number(kernelMatch?.[2]),
-		python: (kernelMatch?.[3] ?? "").trim(),
+		barrierArrived: Number(kernelMatch?.[3]),
+		python: (kernelMatch?.[4] ?? "").trim(),
 		workerPid: Number(workerMatch?.[1]),
 		supervisorPid: Number(workerMatch?.[2]),
 	};
@@ -252,12 +257,16 @@ interface DaemonFixture {
 	socketPath: string;
 }
 
-function createDaemonFixture(): DaemonFixture {
+/** Every kernel of the fixture waits at `<root>/barrier` until `expectedKernels` have arrived. */
+function createDaemonFixture(expectedKernels: number): DaemonFixture {
 	const root = mkdtempSync(join(tmpdir(), "prime-agent-kernel-concurrency-"));
 	chmodSync(root, 0o700);
 	tempRoots.add(root);
 	const agentDir = join(root, "agent");
 	mkdirSync(agentDir, { recursive: true });
+	const barrierDir = join(root, "barrier");
+	mkdirSync(barrierDir, { recursive: true });
+	writeFileSync(join(barrierDir, "expected"), String(expectedKernels));
 	const socketPath = daemonSocketPathFor(root);
 	daemonSockets.add(socketPath);
 	return { agentDir, root, socketPath };
@@ -326,9 +335,12 @@ async function expectSingleSupervisor(fixture: DaemonFixture, chains: ProcessCha
 	await expect(readSupervisorPidFromHello(fixture.socketPath)).resolves.toBe(supervisorPid);
 }
 
-function expectKernelOnOverridePython(chain: ProcessChain): void {
+function expectKernelOnOverridePython(chain: ProcessChain, expectedKernels: number): void {
 	expect(chain.kernelPid).toBeGreaterThan(0);
 	expect(chain.kernelOwnerPid).toBe(chain.workerPid);
+	// A kernel only leaves the barrier once every expected kernel has registered,
+	// so a full count proves the kernels were alive at the same time.
+	expect(chain.barrierArrived, "kernel left the barrier before every kernel arrived").toBe(expectedKernels);
 	expect(normalizeExecutablePath(chain.python)).toBe(normalizeExecutablePath(replPython as string));
 }
 
@@ -341,9 +353,9 @@ describeWithKernel(
 		it(
 			"runs one session with its kernel on the override python",
 			async () => {
-				const fixture = createDaemonFixture();
+				const fixture = createDaemonFixture(1);
 				const chain = await runKernelSession(fixture, 0);
-				expectKernelOnOverridePython(chain);
+				expectKernelOnOverridePython(chain, 1);
 				await expectSingleSupervisor(fixture, [chain]);
 			},
 			TEST_TIMEOUT_MS,
@@ -352,12 +364,12 @@ describeWithKernel(
 		it(
 			"runs concurrent sessions on one supervisor and one python with a kernel per session",
 			async () => {
-				const fixture = createDaemonFixture();
+				const fixture = createDaemonFixture(CONCURRENT_SESSION_COUNT);
 				const chains = await Promise.all(
 					Array.from({ length: CONCURRENT_SESSION_COUNT }, (_, index) => runKernelSession(fixture, index)),
 				);
 				for (const chain of chains) {
-					expectKernelOnOverridePython(chain);
+					expectKernelOnOverridePython(chain, CONCURRENT_SESSION_COUNT);
 				}
 				expect(new Set(chains.map((chain) => chain.kernelPid)).size).toBe(CONCURRENT_SESSION_COUNT);
 				expect(new Set(chains.map((chain) => chain.workerPid)).size).toBe(CONCURRENT_SESSION_COUNT);

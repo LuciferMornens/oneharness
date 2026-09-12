@@ -888,16 +888,17 @@ def bash(command: str) -> BashHandle:
 
 def _shell() -> str:
     # Read per call so env changes made in the REPL apply to later commands.
+    # The host explains a rejected or missing shell setting here. It wins over
+    # any shell path: the host never sets both, so a shell alongside an issue
+    # was inherited from another process and must not bypass the rejection.
+    issue = os.environ.get("PRIME_AGENT_BASH_SHELL_ISSUE")
+    if issue:
+        raise RuntimeError(f"bash() has no shell: {issue}")
     override = os.environ.get("PRIME_AGENT_BASH_SHELL")
     if override:
         if not os.path.isabs(override):
             raise ValueError("PRIME_AGENT_BASH_SHELL must be an absolute path")
         return override
-    # The host explains a rejected or missing shell setting here; a PATH
-    # fallback would hide that misconfiguration.
-    issue = os.environ.get("PRIME_AGENT_BASH_SHELL_ISSUE")
-    if issue:
-        raise RuntimeError(f"bash() has no shell: {issue}")
     if not _IS_POSIX:
         # Never consult PATH on Windows: a repo-controlled PATH could supply
         # the shell. The host injects PRIME_AGENT_BASH_SHELL when one exists.
