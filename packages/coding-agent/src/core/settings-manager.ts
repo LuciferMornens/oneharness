@@ -159,6 +159,7 @@ export interface Settings {
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
+	kernelShellPath?: string; // POSIX shell for the Python kernel's bash() when shellPath is PowerShell or Git Bash is not in its default location
 	quietStartup?: boolean;
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
@@ -996,6 +997,10 @@ export class SettingsManager {
 		this.globalSettings.shellPath = path;
 		this.markModified("shellPath");
 		this.save();
+	}
+
+	getKernelShellPath(): string | undefined {
+		return this.settings.kernelShellPath;
 	}
 
 	getQuietStartup(): boolean {

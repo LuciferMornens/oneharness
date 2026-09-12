@@ -888,6 +888,12 @@ def bash(command: str) -> BashHandle:
 
 def _shell() -> str:
     # Read per call so env changes made in the REPL apply to later commands.
+    # The host explains a rejected or missing shell setting here. It wins over
+    # any shell path: the host never sets both, so a shell alongside an issue
+    # was inherited from another process and must not bypass the rejection.
+    issue = os.environ.get("PRIME_AGENT_BASH_SHELL_ISSUE")
+    if issue:
+        raise RuntimeError(f"bash() has no shell: {issue}")
     override = os.environ.get("PRIME_AGENT_BASH_SHELL")
     if override:
         if not os.path.isabs(override):

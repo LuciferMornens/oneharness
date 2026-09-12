@@ -4,7 +4,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
-import { resolveKernelBashShell } from "../../utils/shell.js";
+import { resolveKernelShell } from "../../utils/shell.js";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
@@ -282,7 +282,9 @@ export interface IpythonToolOptions {
 	env?: Record<string, string>;
 	/** Command prefix prepended to every bash() command. */
 	commandPrefix?: string;
-	/** Shell used by bash(). */
+	/** Shell for bash() only; must be a POSIX shell. */
+	kernelShellPath?: string;
+	/** Shell shared with the bash tool; bash() uses it only when it is a POSIX shell. */
 	shellPath?: string;
 	sessionId?: string;
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
@@ -470,18 +472,25 @@ export class IpythonKernelProvisioner {
 				);
 			}
 			const snapshotDir = this.options?.snapshotDir;
-			// Always inject an absolute trusted shell (undefined only on win32
-			// without bash, where the runtime's teaching error fires instead).
-			const shellPath = resolveKernelBashShell(this.options?.shellPath);
+			// Always inject an absolute trusted shell; without one the runtime's
+			// bash() raises the resolution issue instead of failing kernel startup.
+			const kernelShell = resolveKernelShell({
+				kernelShellPath: this.options?.kernelShellPath,
+				shellPath: this.options?.shellPath,
+			});
 			const commandPrefix = this.options?.commandPrefix;
 			const bootstrapCode = buildRlmBootstrapCode(this.options?.pythonSkills);
 			const m = new ReplKernelManager({
 				python: this.options?.python,
 				cwd: this.cwd,
-				// bash() reads these to pick its shell and command prefix.
+				// bash() reads these to pick its shell and command prefix. Both shell
+				// keys are always set so values inherited from the host's own
+				// environment can neither bypass a rejected setting nor poison a
+				// valid one.
 				env: {
 					...this.options?.env,
-					...(shellPath ? { PRIME_AGENT_BASH_SHELL: shellPath } : {}),
+					PRIME_AGENT_BASH_SHELL: kernelShell.shell,
+					PRIME_AGENT_BASH_SHELL_ISSUE: kernelShell.issue,
 					...(commandPrefix ? { PRIME_AGENT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
 				},
 				sessionId: this.options?.sessionId,

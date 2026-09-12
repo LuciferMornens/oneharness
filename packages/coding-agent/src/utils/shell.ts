@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter, win32 } from "node:path";
+import { delimiter, posix, win32 } from "node:path";
 import type { ChildProcess } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
@@ -200,28 +200,89 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 // input, the same trust-laundering class as PATH.
 const WINDOWS_GIT_BASH_PATHS = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe"];
 
+export interface KernelShellSettings {
+	/** Shell for the kernel's bash() only. Must be a POSIX shell. */
+	kernelShellPath?: string;
+	/** Shell shared with the bash tool; used by the kernel only when it is a POSIX shell. */
+	shellPath?: string;
+}
+
+export type KernelShellSource = "kernelShellPath" | "shellPath" | "system" | "git-bash" | "none";
+
+export interface KernelShellResolution {
+	/** Absolute shell path, or undefined when bash() has no usable shell. */
+	shell: string | undefined;
+	source: KernelShellSource;
+	/** Why no shell was selected. Set only when shell is undefined. */
+	issue?: string;
+}
+
+function isWindowsCmdShell(shellPath: string): boolean {
+	const executable = shellPath.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
+	return executable === "cmd" || executable === "cmd.exe";
+}
+
+function kernelShellSettingIssue(settingName: string, shellPath: string): string | undefined {
+	const pathModule = process.platform === "win32" ? win32 : posix;
+	if (!pathModule.isAbsolute(shellPath)) {
+		return `${settingName} must be an absolute path: ${shellPath}`;
+	}
+	if (!existsSync(shellPath)) {
+		return `${settingName} does not exist: ${shellPath}`;
+	}
+	if (isPowerShellShell(shellPath) || isWindowsCmdShell(shellPath)) {
+		return `${settingName} must be a POSIX shell; bash() cannot run under PowerShell or cmd.exe: ${shellPath}`;
+	}
+	return undefined;
+}
+
+function kernelShellFromSetting(
+	settingName: "kernelShellPath" | "shellPath",
+	shellPath: string,
+): KernelShellResolution {
+	const issue = kernelShellSettingIssue(settingName, shellPath);
+	if (issue) {
+		return { shell: undefined, source: "none", issue };
+	}
+	return { shell: shellPath, source: settingName };
+}
+
 /**
- * Absolute default shell for the kernel's bash(): explicit shellPath wins; POSIX
- * uses /bin/bash else /bin/sh (absolute, never PATH — the kernel inherits a
- * user-influenced PATH); win32 uses only the canonical Git Bash install paths,
- * never PATH (a repo-controlled PATH/where.exe must not pick the kernel shell).
- * undefined = no shell found: kernel startup must not fail, bash() raises its
- * teaching error.
+ * Absolute shell for the kernel's bash(). kernelShellPath wins, then a POSIX
+ * shellPath; both are validated and fail closed so a misconfiguration is
+ * reported instead of silently replaced. Without a setting, POSIX uses
+ * /bin/bash else /bin/sh (absolute, never PATH: the kernel inherits a
+ * user-influenced PATH) and win32 uses only the canonical Git Bash install
+ * paths, never PATH (a repo-controlled PATH/where.exe must not pick the shell).
+ * shell undefined never fails kernel startup: bash() raises the issue instead.
  */
-export function resolveKernelBashShell(customShellPath?: string): string | undefined {
-	const explicit = customShellPath?.trim();
-	if (explicit) {
-		return explicit;
+export function resolveKernelShell(settings: KernelShellSettings): KernelShellResolution {
+	const kernelShellPath = settings.kernelShellPath?.trim();
+	if (kernelShellPath) {
+		return kernelShellFromSetting("kernelShellPath", kernelShellPath);
+	}
+	const sharedShellPath = settings.shellPath?.trim();
+	if (sharedShellPath && !isPowerShellShell(sharedShellPath) && !isWindowsCmdShell(sharedShellPath)) {
+		return kernelShellFromSetting("shellPath", sharedShellPath);
 	}
 	if (process.platform !== "win32") {
-		return existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
+		return { shell: existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh", source: "system" };
 	}
 	for (const path of WINDOWS_GIT_BASH_PATHS) {
 		if (existsSync(path)) {
-			return path;
+			return { shell: path, source: "git-bash" };
 		}
 	}
-	return undefined;
+	const sharedShellNote = sharedShellPath
+		? ` shellPath (${sharedShellPath}) serves the bash tool only; bash() needs a POSIX shell.`
+		: "";
+	return {
+		shell: undefined,
+		source: "none",
+		issue:
+			"No POSIX shell for bash(): install Git for Windows in its default location " +
+			`or set kernelShellPath in settings.json.${sharedShellNote}`,
+	};
 }
 
 export function getShellEnv(): NodeJS.ProcessEnv {

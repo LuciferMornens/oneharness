@@ -9,7 +9,7 @@ Prime Agent supports native Windows execution from PowerShell, Command Prompt, a
 - npm
 - PowerShell 5.1 or newer; PowerShell 7 (`pwsh`) is preferred
 
-Git for Windows is recommended for projects that use Bash scripts, but Prime Agent can use PowerShell when Bash is not installed.
+Git for Windows is recommended. The command tool can fall back to PowerShell when Bash is not installed, but the Python kernel's `bash()` always needs a POSIX shell (see [Shell Selection](#shell-selection)).
 
 ## Install
 
@@ -80,6 +80,31 @@ or:
 ```
 
 When PowerShell is selected, Prime Agent uses non-interactive `-Command` execution, describes the command tool with PowerShell-native examples, and maps every `%%bash` cell to the configured PowerShell interpreter.
+
+### Kernel Shell
+
+`bash()` inside the Python kernel runs a POSIX shell script and cannot use PowerShell or `cmd.exe`. The kernel resolves its shell separately from the command tool:
+
+1. `kernelShellPath` in `settings.json` (must be an absolute path to an existing POSIX shell)
+2. `shellPath`, when it is a POSIX shell (a PowerShell `shellPath` serves the command tool only)
+3. Git Bash at `C:\Program Files\Git\bin\bash.exe` or `C:\Program Files (x86)\Git\bin\bash.exe`
+
+The kernel never searches `PATH`, `%ProgramFiles%`, or `%LOCALAPPDATA%` for a shell: those are influenced by the environment of the project being worked on. Git installed elsewhere (winget user scope, Scoop, MSYS2) needs an explicit setting:
+
+```json
+{
+  "shellPath": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  "kernelShellPath": "C:\\Users\\you\\scoop\\apps\\git\\current\\bin\\bash.exe"
+}
+```
+
+An invalid `kernelShellPath` (relative, missing, or PowerShell/cmd) is not replaced by a fallback: `bash()` raises an error that names the problem. `prime-agent doctor` prints the resolved kernel shell and its source, or the reason none was found.
+
+Windows `bash()` limits compared to POSIX:
+
+- Command exit draining is best-effort. There is no status channel, so a command that leaves background jobs holding the output pipe can end with truncated output.
+- Cancellation cannot interrupt a cell that blocks the event loop in synchronous Python code; it cancels the active task instead. Interrupt-safe cells use `await` points.
+- Job-object containment covers `bash()` children and their descendants. Subprocesses started directly from Python (for example with `subprocess.Popen`) are not contained.
 
 ## IPython Runtime
 

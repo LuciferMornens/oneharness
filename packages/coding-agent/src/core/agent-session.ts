@@ -9370,6 +9370,7 @@ export class AgentSession {
 			this._ipythonKernelProvisioner = new IpythonKernelProvisioner(this._cwd, {
 				env: this._rlmKernelEnv(),
 				commandPrefix: this.settingsManager.getShellCommandPrefix(),
+				kernelShellPath: this.settingsManager.getKernelShellPath(),
 				shellPath: this.settingsManager.getShellPath(),
 				sessionId: this.sessionId,
 				hostHandlers: this._createKernelHostHandlers(),

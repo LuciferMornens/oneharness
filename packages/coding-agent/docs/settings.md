@@ -181,6 +181,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows) |
+| `kernelShellPath` | string | - | Absolute POSIX shell for the Python kernel's `bash()`; use when `shellPath` is PowerShell or Git Bash is outside its default location |
 | `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
 | `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
 
