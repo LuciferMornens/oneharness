@@ -168,6 +168,15 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 
 const inheritedShellPath = process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\bash.exe" : "/bin/sh";
 
+// Assigning undefined to process.env stores the string "undefined".
+function setHostEnv(name: string, value: string | undefined): void {
+	if (value === undefined) {
+		delete process.env[name];
+	} else {
+		process.env[name] = value;
+	}
+}
+
 /** Runs a provisioner cell with the host's own PRIME_AGENT_BASH_SHELL* variables set to the given values. */
 async function executeWithInheritedShellEnv(
 	dir: string,
@@ -176,15 +185,15 @@ async function executeWithInheritedShellEnv(
 	code: string,
 ): Promise<ExecuteResult> {
 	const saved = { shell: process.env.PRIME_AGENT_BASH_SHELL, issue: process.env.PRIME_AGENT_BASH_SHELL_ISSUE };
-	process.env.PRIME_AGENT_BASH_SHELL = inherited.shell;
-	process.env.PRIME_AGENT_BASH_SHELL_ISSUE = inherited.issue;
+	setHostEnv("PRIME_AGENT_BASH_SHELL", inherited.shell);
+	setHostEnv("PRIME_AGENT_BASH_SHELL_ISSUE", inherited.issue);
 	const provisioner = new IpythonKernelProvisioner(dir, { python: python as string, ...options });
 	try {
 		const client = await provisioner.ensure();
 		return await client.execute(code);
 	} finally {
-		process.env.PRIME_AGENT_BASH_SHELL = saved.shell;
-		process.env.PRIME_AGENT_BASH_SHELL_ISSUE = saved.issue;
+		setHostEnv("PRIME_AGENT_BASH_SHELL", saved.shell);
+		setHostEnv("PRIME_AGENT_BASH_SHELL_ISSUE", saved.issue);
 		await provisioner.dispose();
 	}
 }
