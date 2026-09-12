@@ -34,7 +34,7 @@
 		"prepare": "husky"
 	},
 	"devDependencies": {
-		"@anthropic-ai/sandbox-runtime": "^0.0.55",
+		"@anthropic-ai/sandbox-runtime": "^0.0.75",
 		"@biomejs/biome": "2.5.5",
 		"@types/node": "^22.10.5",
 		"@typescript/native-preview": "7.0.0-dev.20260120.1",
