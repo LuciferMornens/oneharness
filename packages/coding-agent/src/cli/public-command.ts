@@ -4,6 +4,7 @@ import { AuthStorage } from "../core/auth-storage.js";
 import { runMcpManagementCommand } from "../core/mcp/mcp-command.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
+import { type KernelShellResolution, resolveKernelShell } from "../utils/shell.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
 import {
 	findCommandSuggestion,
@@ -252,13 +253,30 @@ async function runStatus(args: string[]): Promise<PublicCommandResult> {
 	return HANDLED;
 }
 
+function formatKernelShellReport(resolution: KernelShellResolution): string {
+	if (!resolution.shell) {
+		return chalk.red(`Kernel shell: none. ${resolution.issue}`);
+	}
+	return `Kernel shell: ${resolution.shell} ${chalk.dim(`(${resolution.source})`)}`;
+}
+
 async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	const options = parseBooleanOptions(args, new Set(["--fix", "--json"]), "doctor");
 	if (!options) return HANDLED;
+	const json = options.has("--json");
+	// JSON output stays the service report alone; the shell check is a human diagnostic.
+	if (!json) {
+		const settingsManager = SettingsManager.create(process.cwd());
+		const resolution = resolveKernelShell({
+			kernelShellPath: settingsManager.getKernelShellPath(),
+			shellPath: settingsManager.getShellPath(),
+		});
+		console.log(formatKernelShellReport(resolution));
+	}
 	if (options.has("--fix")) {
-		await runReap(options.has("--json"), false);
+		await runReap(json, false);
 	} else {
-		await runPs(options.has("--json"));
+		await runPs(json);
 	}
 	return HANDLED;
 }

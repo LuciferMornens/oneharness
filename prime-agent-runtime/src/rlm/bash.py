@@ -893,6 +893,11 @@ def _shell() -> str:
         if not os.path.isabs(override):
             raise ValueError("PRIME_AGENT_BASH_SHELL must be an absolute path")
         return override
+    # The host explains a rejected or missing shell setting here; a PATH
+    # fallback would hide that misconfiguration.
+    issue = os.environ.get("PRIME_AGENT_BASH_SHELL_ISSUE")
+    if issue:
+        raise RuntimeError(f"bash() has no shell: {issue}")
     if not _IS_POSIX:
         # Never consult PATH on Windows: a repo-controlled PATH could supply
         # the shell. The host injects PRIME_AGENT_BASH_SHELL when one exists.

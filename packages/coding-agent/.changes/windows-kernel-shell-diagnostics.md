@@ -1,0 +1,1 @@
+- Added the `kernelShellPath` setting for the Python kernel's `bash()`, validated with a fail-closed error naming the problem, and `doctor` now prints the resolved kernel shell. Documented Windows `bash()` limits for PowerShell, output draining, cancellation, and process containment.

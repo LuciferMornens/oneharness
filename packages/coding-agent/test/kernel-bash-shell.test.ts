@@ -17,7 +17,7 @@ vi.mock("child_process", async (importOriginal) => {
 	return { ...actual, spawnSync: mocks.spawnSync };
 });
 
-import { orderWindowsBashCandidates, resolveKernelBashShell } from "../src/utils/shell.js";
+import { orderWindowsBashCandidates, resolveKernelShell } from "../src/utils/shell.js";
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
@@ -33,32 +33,82 @@ afterEach(() => {
 	mocks.spawnSync.mockClear();
 });
 
-describe("resolveKernelBashShell on win32", () => {
-	it("returns undefined without consulting PATH when no Git Bash is installed", () => {
+describe("resolveKernelShell on win32", () => {
+	const canonical = "C:\\Program Files\\Git\\bin\\bash.exe";
+	const pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+
+	it("reports an issue without consulting PATH when no Git Bash is installed", () => {
 		stubWin32();
 		mocks.existsSync.mockReturnValue(false);
 
-		expect(resolveKernelBashShell()).toBeUndefined();
-		// The old fallback shelled out to `where bash.exe`; a repo-controlled
-		// PATH/where.exe must never pick the kernel shell.
+		const resolution = resolveKernelShell({});
+		expect(resolution.shell).toBeUndefined();
+		expect(resolution.source).toBe("none");
+		expect(resolution.issue).toContain("kernelShellPath");
+		// A repo-controlled PATH/where.exe must never pick the kernel shell.
 		expect(mocks.spawnSync).not.toHaveBeenCalled();
 	});
 
 	it("returns the canonical Git Bash install path when present", () => {
 		stubWin32();
-		const canonical = "C:\\Program Files\\Git\\bin\\bash.exe";
 		mocks.existsSync.mockImplementation((path: string) => path === canonical);
 
-		expect(resolveKernelBashShell()).toBe(canonical);
+		expect(resolveKernelShell({})).toEqual({ shell: canonical, source: "git-bash" });
 		expect(mocks.spawnSync).not.toHaveBeenCalled();
 	});
 
-	it("returns an explicit shellPath as-is", () => {
+	it("prefers an existing absolute kernelShellPath over Git Bash", () => {
+		stubWin32();
+		mocks.existsSync.mockReturnValue(true);
+
+		expect(resolveKernelShell({ kernelShellPath: "D:\\tools\\bash.exe", shellPath: pwsh })).toEqual({
+			shell: "D:\\tools\\bash.exe",
+			source: "kernelShellPath",
+		});
+	});
+
+	it("uses a POSIX shellPath for the kernel", () => {
+		stubWin32();
+		mocks.existsSync.mockReturnValue(true);
+
+		expect(resolveKernelShell({ shellPath: "D:\\msys64\\usr\\bin\\bash.exe" })).toEqual({
+			shell: "D:\\msys64\\usr\\bin\\bash.exe",
+			source: "shellPath",
+		});
+	});
+
+	it("skips a PowerShell shellPath and explains it when no Git Bash exists", () => {
 		stubWin32();
 		mocks.existsSync.mockReturnValue(false);
 
-		expect(resolveKernelBashShell("D:\\tools\\bash.exe")).toBe("D:\\tools\\bash.exe");
-		expect(mocks.existsSync).not.toHaveBeenCalled();
+		const resolution = resolveKernelShell({ shellPath: pwsh });
+		expect(resolution.shell).toBeUndefined();
+		expect(resolution.issue).toContain(pwsh);
+		expect(resolution.issue).toContain("bash tool only");
+	});
+
+	it("falls through a PowerShell shellPath to Git Bash", () => {
+		stubWin32();
+		mocks.existsSync.mockImplementation((path: string) => path === canonical);
+
+		expect(resolveKernelShell({ shellPath: pwsh })).toEqual({ shell: canonical, source: "git-bash" });
+	});
+
+	it.each([
+		["a relative path", "tools\\bash.exe", true, "absolute"],
+		["a missing file", "D:\\missing\\bash.exe", false, "does not exist"],
+		["PowerShell", pwsh, true, "POSIX shell"],
+		["cmd.exe", "C:\\Windows\\System32\\cmd.exe", true, "POSIX shell"],
+	])("fails closed when kernelShellPath is %s", (_label, kernelShellPath, exists, expectedIssue) => {
+		stubWin32();
+		mocks.existsSync.mockReturnValue(exists);
+
+		const resolution = resolveKernelShell({ kernelShellPath });
+		expect(resolution.shell).toBeUndefined();
+		expect(resolution.source).toBe("none");
+		expect(resolution.issue).toContain("kernelShellPath");
+		expect(resolution.issue).toContain(expectedIssue);
+		expect(mocks.spawnSync).not.toHaveBeenCalled();
 	});
 });
 
