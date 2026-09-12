@@ -7067,7 +7067,7 @@ export class DaemonSupervisor {
 			await Promise.all(
 				[...this.workers.values()].map(async (worker) => {
 					try {
-						await this.stopWorker(worker, true, forceWorkers, true);
+						await this.stopWorker(worker, true, forceWorkers);
 					} catch (error) {
 						if (!(error instanceof WorkerStopTimeoutError)) {
 							throw error;

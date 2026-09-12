@@ -1,0 +1,2 @@
+- Fixed conversations disappearing from the agents view after shutdown, including forced shutdown, and kept registered heartbeats available after restart.
+- Fixed saved conversation history and session resumption failing on Windows when running from source.

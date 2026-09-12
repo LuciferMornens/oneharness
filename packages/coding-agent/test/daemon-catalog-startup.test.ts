@@ -1,5 +1,7 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const spawnState = vi.hoisted(() => ({
@@ -50,6 +52,19 @@ describe("daemon catalog startup", () => {
 		await vi.advanceTimersByTimeAsync(6000);
 		spawnState.child?.emit("message", { type: "ready" });
 		await expect(starting).resolves.toBeUndefined();
+	});
+
+	it("loads TypeScript through a file URL, including Windows paths with spaces", async () => {
+		vi.useFakeTimers();
+		const client = new DaemonCatalogClient(() => {});
+		const starting = client.start();
+		spawnState.child?.emit("message", { type: "ready" });
+		await starting;
+
+		const loaderPath = createRequire(import.meta.url).resolve("tsx");
+		const importIndex = spawnState.args.lastIndexOf("--import");
+		expect(importIndex).toBeGreaterThanOrEqual(0);
+		expect(spawnState.args[importIndex + 1]).toBe(pathToFileURL(loaderPath).href);
 	});
 
 	it("rejects immediately when the catalog exits during startup", async () => {

@@ -6,6 +6,8 @@ Prime Agent saves conversations as sessions so you can continue work, branch fro
 
 Sessions auto-save to `~/.prime/agent/sessions/`. Each session is a JSONL file with a tree structure.
 
+Stopping the background services with `prime-agent shutdown`, including `--force`, keeps saved conversations visible in the agents view and resume picker. Restart Prime Agent and reopen a session to continue with its saved history. Registered heartbeats remain saved and can resume when the services start again.
+
 ```bash
 prime-agent --continue          # Continue the most recent session
 prime-agent --resume [path|id]  # Browse past sessions or resume one directly

@@ -2,8 +2,8 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import { getPackageDir, isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
@@ -24,7 +24,7 @@ const CATALOG_SHUTDOWN_TIMEOUT_MS = 2000;
 const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
 
 export function isDaemonCatalogSourcePath(modulePath: string, packageDir: string): boolean {
-	return modulePath.startsWith(`${join(packageDir, "src")}${sep}`);
+	return resolve(modulePath).startsWith(`${resolve(packageDir, "src")}${sep}`);
 }
 
 function resolveDaemonCatalogEntrypoint(): string {
@@ -434,9 +434,11 @@ export class DaemonCatalogClient {
 			args = launch.args;
 		} else {
 			const catalogEntry = resolveDaemonCatalogEntrypoint();
-			const execArgs = catalogEntry.endsWith(".ts")
-				? [...process.execArgv, "--import", createRequire(import.meta.url).resolve("tsx")]
-				: process.execArgv;
+			const execArgs = [...process.execArgv];
+			if (catalogEntry.endsWith(".ts")) {
+				const loaderUrl = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+				execArgs.push("--import", loaderUrl);
+			}
 			const launch = createCliSubprocessLaunchSpec([], undefined, execArgs, catalogEntry);
 			command = launch.command;
 			args = launch.args;

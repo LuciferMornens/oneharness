@@ -265,6 +265,37 @@ function requireSessionList(responseData: unknown): SessionSummary[] {
 	return sessions as SessionSummary[];
 }
 
+async function expectSavedConversationResumes(client: DaemonClient, summary: SessionSummary): Promise<void> {
+	const listed = await client.request({ type: "list", all: true, cwd: summary.cwd });
+	if (!listed.success) throw new Error(listed.error);
+	expect(requireSessionList(listed.data)).toEqual([
+		expect.objectContaining({
+			sessionId: summary.sessionId,
+			sessionName: "shutdown conversation",
+			lifecycle: "live",
+			messageCount: 1,
+		}),
+	]);
+	expect(requireSessionList(listed.data)[0]?.activeSessionId).toBeUndefined();
+	const resumed = await client.request({
+		type: "create",
+		sessionPath: summary.sessionId,
+		config: { cwd: summary.cwd, noTools: true, noExtensions: true },
+	});
+	if (!resumed.success) throw new Error(resumed.error);
+	const restored = requireSummary(resumed.data);
+	if (!restored.workerPid) throw new Error("Resumed worker did not expose its pid");
+	workerPids.add(restored.workerPid);
+	expect(restored.sessionId).toBe(summary.sessionId);
+	const connection = await DaemonAgentConnection.attach(client, restored.activeSessionId ?? restored.id);
+	try {
+		const snapshot = await connection.getInitialSnapshot();
+		expect(snapshot.messages).toEqual([expect.objectContaining({ role: "user", content: "stop with daemon" })]);
+	} finally {
+		await connection.dispose();
+	}
+}
+
 async function waitForExit(child: ChildProcess): Promise<void> {
 	if (child.exitCode !== null || child.signalCode !== null) {
 		return;
@@ -391,7 +422,7 @@ describe("daemon supervisor resident workers", () => {
 			socket.write(
 				encodePrivateFrame<DaemonWorkerFrameHeader>(
 					{ kind: "outbound", outboundType: "daemon_hello" },
-					Buffer.from(`${JSON.stringify({ type: "daemon_hello" })}\n`),
+					Buffer.from(`${JSON.stringify({ type: "daemon_hello", socketPath: workerSocketPath })}\n`),
 				),
 			);
 			socket.on("data", (chunk: Buffer) => {
@@ -465,7 +496,7 @@ describe("daemon supervisor resident workers", () => {
 		// Once the supervisor kills the old pid, its socket goes quiet exactly like a dead worker's.
 		legacyProcess.once("exit", () => {
 			fakeWorker.close();
-			rmSync(workerSocketPath, { force: true });
+			if (process.platform !== "win32") rmSync(workerSocketPath, { force: true });
 		});
 		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
@@ -953,75 +984,83 @@ describe("daemon supervisor resident workers", () => {
 		await waitForSocketGone(socketPath);
 	});
 
-	it("archives resident roots and cancels their heartbeats on explicit daemon shutdown", async () => {
-		const root = tempDir();
-		const agentDir = join(root, "agent");
-		const projectDir = join(root, "project");
-		const sessionDir = join(agentDir, "sessions");
-		const socketPath = testSocketPath("shutdown");
-		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "stop with daemon", timestamp: 1 });
-		sessionManager.appendSessionState({ status: "active" });
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) {
-			throw new Error("Fixture session did not persist");
-		}
+	it.each([false, true])(
+		"preserves conversations and heartbeats on shutdown (force=%s)",
+		async (force) => {
+			const root = tempDir();
+			const agentDir = join(root, "agent");
+			const projectDir = join(root, "project");
+			const sessionDir = join(agentDir, "sessions");
+			const socketPath = testSocketPath("shutdown");
+			mkdirSync(projectDir, { recursive: true });
+			const sessionManager = SessionManager.create(projectDir, sessionDir);
+			sessionManager.appendMessage({ role: "user", content: "stop with daemon", timestamp: 1 });
+			sessionManager.appendSessionInfo("shutdown conversation");
+			sessionManager.appendSessionState({ status: "active" });
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) {
+				throw new Error("Fixture session did not persist");
+			}
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
-		const client = await connectEventually(socketPath, supervisor);
-		const created = await client.request({
-			type: "create",
-			sessionPath: sessionFile,
-			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
-		});
-		if (!created.success) {
-			throw new Error(created.error);
-		}
-		const summary = requireSummary(created.data);
-		if (!summary.workerPid) {
-			throw new Error("Resident worker did not expose its pid");
-		}
-		workerPids.add(summary.workerPid);
-		const heartbeatResponse = await client.request({
-			type: "heartbeat_set",
-			activeSessionId: summary.activeSessionId ?? summary.id,
-			schedule: "every 1h",
-			prompt: "continue old work",
-		});
-		if (!heartbeatResponse.success || !heartbeatResponse.data || typeof heartbeatResponse.data !== "object") {
-			throw new Error(heartbeatResponse.success ? "Heartbeat response was missing data" : heartbeatResponse.error);
-		}
-		const heartbeat = (heartbeatResponse.data as { heartbeat: { id: string } }).heartbeat;
-		const cronStore = AgentCronJobStore.forSessionArtifacts();
-		cronStore.registerSessionArtifact(summary.sessionId, sessionManager.getSessionArtifactDir()!);
-		const observer = await connectEventually(socketPath, supervisor);
-		const observerClosed = new Promise<Error>((resolveClose) => observer.onClose(resolveClose));
+			const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+			const client = await connectEventually(socketPath, supervisor);
+			const created = await client.request({
+				type: "create",
+				sessionPath: sessionFile,
+				config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+			});
+			if (!created.success) {
+				throw new Error(created.error);
+			}
+			const summary = requireSummary(created.data);
+			if (!summary.workerPid) {
+				throw new Error("Resident worker did not expose its pid");
+			}
+			workerPids.add(summary.workerPid);
+			const heartbeatResponse = await client.request({
+				type: "heartbeat_set",
+				activeSessionId: summary.activeSessionId ?? summary.id,
+				schedule: "every 1h",
+				prompt: "continue old work",
+			});
+			if (!heartbeatResponse.success || !heartbeatResponse.data || typeof heartbeatResponse.data !== "object") {
+				throw new Error(
+					heartbeatResponse.success ? "Heartbeat response was missing data" : heartbeatResponse.error,
+				);
+			}
+			const heartbeat = (heartbeatResponse.data as { heartbeat: { id: string } }).heartbeat;
+			const cronStore = AgentCronJobStore.forSessionArtifacts();
+			cronStore.registerSessionArtifact(summary.sessionId, sessionManager.getSessionArtifactDir()!);
+			const observer = await connectEventually(socketPath, supervisor);
+			const observerClosed = new Promise<Error>((resolveClose) => observer.onClose(resolveClose));
 
-		expect((await client.request({ type: "shutdown" })).success).toBe(true);
-		client.close();
-		expect(getDaemonSocketCloseReason(await observerClosed)).toBe("shutdown");
-		observer.close();
-		await waitForSocketGone(socketPath);
-		await waitForProcessGone(summary.workerPid);
-		workerPids.delete(summary.workerPid);
-		expect(countWorkerDescriptors(agentDir)).toBe(0);
-		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
-		expect(cronStore.list().find((job) => job.id === heartbeat.id)).toMatchObject({ status: "cancelled" });
+			expect((await client.request({ type: "shutdown", force })).success).toBe(true);
+			client.close();
+			expect(getDaemonSocketCloseReason(await observerClosed)).toBe("shutdown");
+			observer.close();
+			await waitForSocketGone(socketPath);
+			await waitForProcessGone(summary.workerPid);
+			workerPids.delete(summary.workerPid);
+			expect(countWorkerDescriptors(agentDir)).toBe(0);
+			expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "active" });
+			expect(cronStore.list().find((job) => job.id === heartbeat.id)).toMatchObject({ status: "active" });
 
-		const replacement = spawnSupervisor(agentDir, socketPath, projectDir);
-		const replacementClient = await connectEventually(socketPath, replacement);
-		const listed = await replacementClient.request({ type: "list" });
-		expect(listed.success).toBe(true);
-		expect(
-			requireSessionList(listed.success ? listed.data : undefined).filter(
-				(session) => session.activeSessionId || session.workerPid,
-			),
-		).toEqual([]);
-		await replacementClient.request({ type: "shutdown" });
-		replacementClient.close();
-		await waitForSocketGone(socketPath);
-	}, 30_000);
+			const replacement = spawnSupervisor(agentDir, socketPath, projectDir);
+			const replacementClient = await connectEventually(socketPath, replacement);
+			const listed = await replacementClient.request({ type: "list" });
+			expect(listed.success).toBe(true);
+			expect(
+				requireSessionList(listed.success ? listed.data : undefined).filter(
+					(session) => session.activeSessionId || session.workerPid,
+				),
+			).toEqual([]);
+			await expectSavedConversationResumes(replacementClient, summary);
+			await replacementClient.request({ type: "shutdown" });
+			replacementClient.close();
+			await waitForSocketGone(socketPath);
+		},
+		60_000,
+	);
 
 	it("finalizes a timed-out worker stop by force-stopping the process and removing its registration", {
 		tags: ["process-stress"],
@@ -1610,8 +1649,12 @@ describe("daemon supervisor resident workers", () => {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
 		}
 		expect(connectionEvents).toContain("connection_status:reconnecting");
-		// The direct worker link held through the supervisor swap, so no resync is warranted.
-		expect(connectionEvents).not.toContain("session_resynced");
+		// Windows uses the supervisor transport and resyncs after reconnecting.
+		if (process.platform === "win32") {
+			expect(connectionEvents).toContain("session_resynced");
+		} else {
+			expect(connectionEvents).not.toContain("session_resynced");
+		}
 		expect(connectionEvents).toContain("connection_status:connected");
 		expect(connectionEvents).not.toContain("closed");
 		await expect(connection.getState()).resolves.toMatchObject({
