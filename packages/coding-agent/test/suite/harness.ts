@@ -8,14 +8,19 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@earendil-works/pi-ai";
-import { defaultServiceTierForModel, registerFauxProvider } from "@earendil-works/pi-ai";
+import {
+	defaultServiceTierForModel,
+	getApiProvider,
+	registerFauxProvider,
+	unregisterApiProviders,
+} from "@earendil-works/pi-ai";
 import type { AgentSessionMessageController } from "../../src/core/agent-messages.js";
 import type { AgentObserveController } from "../../src/core/agent-observe.js";
 import { AgentSession, type AgentSessionEvent, type AutoRefineReviewer } from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { AgentAutonomousConfig } from "../../src/core/autonomous.js";
 import type { ExtensionRunner } from "../../src/core/extensions/index.js";
-import { convertToLlm } from "../../src/core/messages.js";
+import { convertToLlm, HARNESS_DIGEST_CUSTOM_TYPE } from "../../src/core/messages.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import { SessionManager } from "../../src/core/session-manager.js";
@@ -47,6 +52,13 @@ export function getMessageText(message: unknown): string {
 		.join("\n");
 }
 
+/** Session messages without the session-start harness digest injected at construction. */
+export function conversationMessages(source: { messages: AgentMessage[] }): AgentMessage[] {
+	return source.messages.filter(
+		(message) => !(message.role === "custom" && message.customType === HARNESS_DIGEST_CUSTOM_TYPE),
+	);
+}
+
 export function getUserTexts(harness: Harness): string[] {
 	return harness.session.messages
 		.filter((message) => message.role === "user")
@@ -73,6 +85,8 @@ export interface HarnessOptions {
 	agentMessageController?: AgentSessionMessageController;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	persistSession?: boolean;
+	/** Resume over an existing session file, mirroring production rehydration. */
+	existingSessionFile?: string;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
 	autonomous?: AgentAutonomousConfig;
@@ -120,14 +134,18 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		registeredModel.thinkingLevelMap = definition?.thinkingLevelMap;
 	}
 	fauxProvider.setResponses([]);
+	const fauxApi = getApiProvider(fauxProvider.api);
+	if (!fauxApi) throw new Error("Faux API registration is missing");
 	const model = fauxProvider.getModel();
 	const toolMap = options.tools ? Object.fromEntries(options.tools.map((tool) => [tool.name, tool])) : undefined;
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = options.persistSession
-		? SessionManager.create(tempDir, join(tempDir, "sessions"))
-		: SessionManager.inMemory();
+	const sessionManager = options.existingSessionFile
+		? SessionManager.open(options.existingSessionFile)
+		: options.persistSession
+			? SessionManager.create(tempDir, join(tempDir, "sessions"))
+			: SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -140,6 +158,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			baseUrl: model.baseUrl,
 			apiKey: "faux-key",
 			api: fauxProvider.api,
+			streamSimple: fauxApi.streamSimple,
 			models: fauxProvider.models.map((registeredModel) => ({
 				id: registeredModel.id,
 				name: registeredModel.name,
@@ -189,6 +208,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			return runner.emitContext(messages);
 		},
 	});
+	if (options.existingSessionFile) {
+		agent.state.messages = sessionManager.buildSessionContext().messages;
+	}
 	const extensionsResult = options.extensionFactories
 		? await createTestExtensionsResult(options.extensionFactories, tempDir)
 		: undefined;
@@ -244,6 +266,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		cleanup() {
 			session.dispose();
 			fauxProvider.unregister();
+			unregisterApiProviders(`provider:${model.provider}`);
 			if (!existsSync(tempDir)) {
 				return;
 			}

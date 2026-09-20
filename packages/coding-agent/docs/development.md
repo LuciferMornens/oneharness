@@ -26,6 +26,20 @@ C:\path\to\prime-agent\prime-agent.ps1
 
 Both launchers can be called from any directory and preserve the caller's working directory. Use that behavior to run a source checkout against a separate test project.
 
+## Pre-push Guard
+
+`.husky/pre-push` runs for every `git push` and refuses mirror-like pushes and remote branch deletions to real GitHub remotes (github.com and ssh.github.com in scp, `http://`, `https://`, and `ssh://` forms, with or without credentials and ports, including `www.` and trailing-dot host spellings); local, `file://`, and other remotes are always allowed. The hook ships via husky and is active after `npm ci`.
+
+Worktrees and clones without husky's `.husky/_` shims (for example a bare `git worktree add` tree) activate the tracked hooks directly, with no npm or husky needed:
+
+```bash
+git config core.hooksPath .husky
+```
+
+The setting is shared across worktrees and the relative path resolves per tree. Running `npm ci` in any tree regenerates husky's shims and resets the shared `core.hooksPath` to `.husky/_`, which silences the tracked hooks in shimless worktrees again; re-run the one-liner after `npm ci`, or run `npx husky` inside a worktree to give it its own shims.
+
+Intentional pushes can opt out once with `PRIME_AGENT_ALLOW_MIRROR_PUSH=1 git push ...`. Pushes with more than 10 refs (a `git push --tags` release) are refused; use the escape hatch. Not caught: deletions of remote-only refs through `--mirror` pruning (git never lists them on the pre-push stdin), ssh alias remotes, `insteadOf` rewrites to a proxy, and uppercase hostnames. `git push --no-verify` bypasses pre-push hooks entirely, so this guard is advisory; server-side, GitHub branch protection rules are the real mitigation, and `main` is protected — that is what rejected the incident's force update to `main`.
+
 ## Product and Source Names
 
 Prime Agent is the product, public CLI, release artifact, and repository name. The monorepo still retains inherited `@earendil-works/pi-*` npm workspace names, a source-package `pi` bin entry, the `pi` package manifest key, and some `PI_*` compatibility environment variables. These names are source and compatibility details, not a signal that contributors should install or develop against pi-mono.
@@ -87,3 +101,15 @@ npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
 ```
 
 If you create or modify a test file, run that file and iterate until it passes. Coding-agent suite regressions belong under `test/suite/regressions/` and use the suite harness and faux provider rather than live provider credentials.
+
+## Capability Evals
+
+End-to-end capability evals live under `scripts/evals/` and are not part of CI: a real-model run is a manual step with credentials in the environment. Each harness ships model-free self-tests that validate its fixtures and rubric without any model call - run them from the eval directory:
+
+```bash
+cd scripts/evals/swarm_fanout
+uv run --locked ruff check .
+uv run --locked python -m unittest discover -s tests -v
+```
+
+See `scripts/evals/README.md` for the rubric and the real-model run instructions.

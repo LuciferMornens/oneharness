@@ -41,22 +41,12 @@ Prime Agent is an open-source coding and research agent for general and long-run
 - The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
 - The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
 
-Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
-
-- **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
-- **Subagents are built in:** `rlm(...)` spawns real child agents for parallel or background work and returns their results programmatically.
-- **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
-- **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
-- **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
-- **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
-- **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
-
-## Getting Started
+## Install
 
 Install the latest stable release on macOS or Linux:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 On Windows, run the native PowerShell installer:
@@ -65,7 +55,19 @@ On Windows, run the native PowerShell installer:
 irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
 ```
 
-The installer downloads a versioned release, verifies its SHA-256 checksum, installs the `prime-agent` command, and can prepare the Python runtime used by the agent.
+## Why Prime Agent
+
+Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
+
+- **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
+- **Subagents are built in:** `rlm.spawn(...)` spawns real child agents for parallel or background work and returns their results programmatically.
+- **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
+- **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
+- **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
+- **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
+- **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
+
+## Getting Started
 
 Start Prime Agent from the repository or directory you want it to work in:
 

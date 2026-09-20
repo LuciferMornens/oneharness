@@ -12,17 +12,17 @@ function thinkingOnlyLengthStop(): ReturnType<typeof fauxAssistantMessage> {
 	return fauxAssistantMessage([fauxThinking("still planning every edge case...")], { stopReason: "length" });
 }
 
-function terminalNotices(messages: readonly unknown[]): string[] {
-	return messages
-		.filter(
-			(message): message is { role: string; customType: string; content: string } =>
-				typeof message === "object" &&
-				message !== null &&
-				(message as { role?: unknown }).role === "custom" &&
-				(message as { customType?: unknown }).customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE &&
-				typeof (message as { content?: unknown }).content === "string",
-		)
-		.map((message) => message.content);
+type TerminalNotice = { role: string; customType: string; content: string; details: { childId?: string } };
+
+function terminalNotices(messages: readonly unknown[]): TerminalNotice[] {
+	return messages.filter(
+		(message): message is TerminalNotice =>
+			typeof message === "object" &&
+			message !== null &&
+			(message as { role?: unknown }).role === "custom" &&
+			(message as { customType?: unknown }).customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE &&
+			typeof (message as { content?: unknown }).content === "string",
+	);
 }
 
 describe("AgentSession truncated output continuation", () => {
@@ -120,8 +120,9 @@ describe("AgentSession truncated output continuation", () => {
 		await expect.poll(() => terminalNotices(parent.session.messages)).toHaveLength(1);
 
 		const notice = terminalNotices(parent.session.messages)[0]!;
-		expect(notice).toContain(spawned.rlm_child_id);
-		expect(notice).toContain("completed without sending a reply");
-		expect(notice).toContain("last stop reason: length");
+		// Upstream moved the child id out of the notice prose and into its details.
+		expect(notice.details.childId).toBe(spawned.rlm_child_id);
+		expect(notice.content).toContain("[child-exited: no-reply child:worker]");
+		expect(notice.content).toContain("Last stop reason: length (output token limit reached)");
 	});
 });

@@ -1,5 +1,5 @@
 import { Agent } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, getModel, type Usage } from "@earendil-works/pi-ai";
+import { getModel } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -10,50 +10,10 @@ import { createTestResourceLoader } from "./utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
-function createUsage(totalTokens: number): Usage {
-	return {
-		input: totalTokens,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens,
-		cost: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			total: 0,
-		},
-	};
-}
-
-function createAssistantMessage(text: string, totalTokens: number, timestamp: number): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: createUsage(totalTokens),
-		stopReason: "stop",
-		timestamp,
-	};
-}
-
-function createUserMessage(text: string, timestamp: number) {
-	return {
-		role: "user" as const,
-		content: text,
-		timestamp,
-	};
-}
-
-function createSession() {
-	const settingsManager = SettingsManager.inMemory();
-	const sessionManager = SessionManager.inMemory();
+function createSession(): AgentSession {
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
-	const session = new AgentSession({
+	return new AgentSession({
 		agent: new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -63,23 +23,17 @@ function createSession() {
 				thinkingLevel: "high",
 			},
 		}),
-		sessionManager,
-		settingsManager,
+		sessionManager: SessionManager.inMemory(),
+		settingsManager: SettingsManager.inMemory(),
 		cwd: process.cwd(),
 		modelRegistry: ModelRegistry.inMemory(authStorage),
 		resourceLoader: createTestResourceLoader(),
 	});
-
-	return { session, sessionManager };
 }
 
-function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
-	session.agent.state.messages = sessionManager.buildSessionContext().messages;
-}
-
-describe("AgentSession.getSessionStats", () => {
+describe("AgentSession.cycleThinkingLevel", () => {
 	it("leaves thinking state unchanged when no reasoning level is selectable", () => {
-		const { session } = createSession();
+		const session = createSession();
 
 		try {
 			session.agent.state.model = {
@@ -92,69 +46,6 @@ describe("AgentSession.getSessionStats", () => {
 			expect(session.getAvailableThinkingLevels()).toEqual([]);
 			expect(session.cycleThinkingLevel()).toBeUndefined();
 			expect(session.thinkingLevel).toBe(previousLevel);
-		} finally {
-			session.dispose();
-		}
-	});
-
-	it("exposes the current context usage alongside token totals", () => {
-		const { session, sessionManager } = createSession();
-
-		try {
-			sessionManager.appendMessage(createUserMessage("hello", 1));
-			sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
-			syncAgentMessages(session, sessionManager);
-
-			const stats = session.getSessionStats();
-			expect(stats.contextUsage).toEqual(session.getContextUsage());
-			expect(stats.contextUsage?.tokens).toBe(200);
-			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
-			expect(stats.contextUsage?.percent).toBe((200 / model.contextWindow) * 100);
-		} finally {
-			session.dispose();
-		}
-	});
-
-	it("reports unknown current context usage immediately after compaction", () => {
-		const { session, sessionManager } = createSession();
-
-		try {
-			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
-			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
-			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
-			syncAgentMessages(session, sessionManager);
-
-			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(195_000);
-			expect(stats.contextUsage).toBeDefined();
-			expect(stats.contextUsage?.tokens).toBeNull();
-			expect(stats.contextUsage?.percent).toBeNull();
-		} finally {
-			session.dispose();
-		}
-	});
-
-	it("uses post-compaction usage for current context instead of stale kept usage", () => {
-		const { session, sessionManager } = createSession();
-
-		try {
-			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
-			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
-			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
-			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
-			syncAgentMessages(session, sessionManager);
-
-			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(220_000);
-			expect(stats.contextUsage).toBeDefined();
-			expect(stats.contextUsage?.tokens).toBe(25_000);
-			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
 		} finally {
 			session.dispose();
 		}

@@ -10,6 +10,7 @@ import {
 	waitForActiveDaemonUpdateRestartCoordinator,
 } from "../src/cli/daemon-update-restart.js";
 import {
+	APP_NAME,
 	ENV_AGENT_DIR,
 	getDaemonUpdateRestartManifestPath,
 	getLegacyDaemonUpdateRestartManifestPath,
@@ -180,6 +181,11 @@ function useFixedOwnerHello(): void {
 
 function isNpmUpdateSpawn(call: string): boolean {
 	return call.startsWith("spawn:") && call.includes("npm") && call.includes("install");
+}
+
+// Windows npm self-updates append a step that deletes the stale PowerShell shim left behind by the old install.
+function isWindowsShimCleanupSpawn(call: string): boolean {
+	return call.startsWith("spawn:") && call.includes("rmSync(process.argv[1]") && call.endsWith(`${APP_NAME}.ps1`);
 }
 
 vi.mock("child_process", () => ({
@@ -598,6 +604,69 @@ describe("self-update daemon restart", () => {
 		expect(process.exitCode).toBe(SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE);
 		expect(mockState.calls.some(isNpmUpdateSpawn)).toBe(false);
 	});
+
+	it.each(["bad checksum", "duplicate platform"])(
+		"keeps an up-to-date npm install and daemon untouched with %s metadata",
+		async (invalidKind) => {
+			process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
+			const artifact = {
+				platform: "linux-x64",
+				file: `prime-agent-${VERSION}-linux-x64.tar.gz`,
+				sha256: "a".repeat(64),
+			};
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () =>
+					Response.json({
+						version: VERSION,
+						package: PACKAGE_NAME,
+						tarball: `https://releases.example/releases/v${VERSION}/prime-agent-${VERSION}.tgz`,
+						binaries:
+							invalidKind === "bad checksum" ? [{ ...artifact, sha256: "invalid" }] : [artifact, artifact],
+					}),
+				),
+			);
+
+			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+
+			expect(process.exitCode).toBe(SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE);
+			expect(mockState.calls).toEqual([]);
+		},
+	);
+
+	it.each(["bad checksum", "duplicate platform"])(
+		"keeps the selected npm release URL when a newer release has %s metadata",
+		async (invalidKind) => {
+			mockState.daemonProbe = { reachable: false };
+			const tarball = "https://releases.example/releases/v999.0.0/prime-agent-999.0.0.tgz";
+			const artifact = {
+				platform: "linux-x64",
+				file: "prime-agent-999.0.0-linux-x64.tar.gz",
+				sha256: "a".repeat(64),
+			};
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () =>
+					Response.json({
+						version: "999.0.0",
+						package: PACKAGE_NAME,
+						tarball,
+						binaries:
+							invalidKind === "bad checksum" ? [{ ...artifact, sha256: "invalid" }] : [artifact, artifact],
+					}),
+				),
+			);
+
+			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+
+			const spawns = mockState.calls.filter((call) => call.startsWith("spawn:"));
+			const installSpawns = spawns.filter(isNpmUpdateSpawn);
+
+			expect(installSpawns).toHaveLength(1);
+			expect(installSpawns[0]).toContain(tarball);
+			expect(spawns.filter((call) => !isNpmUpdateSpawn(call) && !isWindowsShimCleanupSpawn(call))).toEqual([]);
+		},
+	);
 
 	it("does not use the no-change sentinel when interactive self-update is cancelled", async () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";

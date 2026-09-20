@@ -80,7 +80,10 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
+- xAI Grok (eligible subscriptions)
 - xAI Grok (SuperGrok / Premium+)
+
+Select an xAI subscription entry in `/login` to sign in. The `xai` provider signs in against api.x.ai, and the `grok` provider routes SuperGrok / X Premium+ subscriptions through xAI's Grok CLI proxy. Model access depends on your xAI account entitlement. See [xAI setup](docs/providers.md#xai-grok).
 
 **API keys:**
 - Anthropic
@@ -114,6 +117,8 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 - Xiaomi MiMo Token Plan (China)
 - Xiaomi MiMo Token Plan (Amsterdam)
 - Xiaomi MiMo Token Plan (Singapore)
+
+Prime Inference credentials and teams belong to Agent's `~/.prime/agent/auth.json`. Normal use ignores Prime CLI's `~/.prime/config.json`. If you previously relied on CLI credentials, run `/login` once: Agent can import a production-compatible CLI key after production validation, without changing CLI config. `PRIME_API_KEY` still overrides the saved Agent key.
 
 See [docs/providers.md](docs/providers.md) for detailed setup instructions.
 
@@ -153,7 +158,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/login`, `/logout` | OAuth authentication |
 | `/model` | Switch models |
 | `/effort` | Set reasoning/thinking level |
-| `/scoped-models` | Enable/disable models for Ctrl+P cycling |
+| `/scoped-models` | Enable/disable models for Alt+M cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new`, `/clear` | Start a new session |
@@ -174,6 +179,8 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/changelog` | Display version history |
 | `/quit` | Quit Prime Agent |
 
+Trace uploads use environment or Agent-owned credentials, not live Prime CLI credentials. `/traces login` can reuse a CLI key only after production URL and scope validation. See [trace sharing credentials](docs/providers.md#trace-sharing-credentials).
+
 ### Keyboard Shortcuts
 
 See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json`. See [docs/keybindings.md](docs/keybindings.md).
@@ -187,9 +194,8 @@ See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json
 | Escape | Clear the input without interrupting active work |
 | Escape twice | Open `/tree` |
 | Ctrl+L | Open model selector |
-| Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
-| Ctrl+O | Collapse/expand tool output |
-| Ctrl+T | Collapse/expand thinking blocks |
+| Alt+M / Shift+Alt+M | Cycle scoped models forward/backward |
+| Ctrl+O | Cycle overview → thinking and file diffs → all output |
 
 ### Message Queue
 
@@ -385,6 +391,8 @@ export default function (pi: ExtensionAPI) {
 
 The default export can also be `async`. Prime Agent waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
 
+Schedule timers via `ctx.setTimeout`/`ctx.setInterval` (error-isolated, auto-cancelled on unload); raw global timers are unsupported for scheduling extension work.
+
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
 - Additional orchestration workflows and plan modes
@@ -561,7 +569,7 @@ cat README.md | prime-agent -p "Summarize this text"
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
+| `--models <patterns>` | Comma-separated patterns for Alt+M cycling |
 
 Use `prime-agent model list [search]` to list available models.
 
@@ -687,6 +695,9 @@ prime-agent --thinking high "Solve this complex problem"
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing if it has `agent_traces` scope |
+| `PRIME_TEAM_ID` | Override the Prime Inference team request header without changing the saved Agent team |
+| `PRIME_AGENT_INFERENCE_API_BASE_URL` | Override Agent authentication and team API URLs, not model inference URLs; defaults to production |
+| `PRIME_AGENT_INFERENCE_FRONTEND_URL` | Override the Agent login browser frontend; defaults to production |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of auto-bootstrapping a venv under `~/.prime/agent/kernel-venvs/` |

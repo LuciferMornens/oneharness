@@ -31,6 +31,7 @@ import {
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import { withOpenCodeHeaders } from "./opencode-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -102,7 +103,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, options?.sessionId);
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -183,7 +184,8 @@ function createClient(
 	context: Context,
 	apiKey?: string,
 	optionsHeaders?: Record<string, string>,
-	sessionId?: string,
+	cacheSessionId?: string,
+	conversationId?: string,
 ) {
 	if (!apiKey) {
 		if (!process.env.OPENAI_API_KEY) {
@@ -205,11 +207,11 @@ function createClient(
 		Object.assign(headers, copilotHeaders);
 	}
 
-	if (sessionId) {
+	if (cacheSessionId) {
 		if (compat.sendSessionIdHeader) {
-			headers.session_id = sessionId;
+			headers.session_id = cacheSessionId;
 		}
-		headers["x-client-request-id"] = sessionId;
+		headers["x-client-request-id"] = cacheSessionId;
 	}
 
 	if (optionsHeaders) {
@@ -229,7 +231,7 @@ function createClient(
 		apiKey,
 		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
 		dangerouslyAllowBrowser: true,
-		defaultHeaders,
+		defaultHeaders: withOpenCodeHeaders(model.provider, conversationId, defaultHeaders),
 		maxRetries: 0,
 	});
 }
@@ -270,25 +272,30 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.tools = convertResponsesTools(context.tools);
 	}
 
-	if (model.reasoning && getReasoningCapabilities(model)?.control !== "fixed") {
-		if (options?.reasoningEnabled === false) {
-			if (model.provider === "github-copilot") return params;
-			const offValue = resolveThinkingOffValue(model, "none");
-			if (typeof offValue !== "string") return params;
-			params.reasoning = {
-				effort: offValue as NonNullable<typeof params.reasoning>["effort"],
-			};
-		} else if (options?.reasoningEffort || options?.reasoningSummary) {
-			const effort = options?.reasoningEffort
-				? (options.reasoningEffortValue ??
-					resolveThinkingLevel(model, options.reasoningEffort)?.providerValue ??
-					options.reasoningEffort)
-				: "medium";
-			params.reasoning = {
-				effort: effort as NonNullable<typeof params.reasoning>["effort"],
-				summary: options?.reasoningSummary || "auto",
-			};
-			params.include = ["reasoning.encrypted_content"];
+	if (model.reasoning) {
+		// xAI only returns replayable reasoning items when encrypted content is requested, including on
+		// routes whose effort is fixed and therefore never serialized below.
+		if (model.provider === "xai") params.include = ["reasoning.encrypted_content"];
+		if (getReasoningCapabilities(model)?.control !== "fixed") {
+			if (options?.reasoningEnabled === false) {
+				if (model.provider === "github-copilot") return params;
+				const offValue = resolveThinkingOffValue(model, "none");
+				if (typeof offValue !== "string") return params;
+				params.reasoning = {
+					effort: offValue as NonNullable<typeof params.reasoning>["effort"],
+				};
+			} else if (options?.reasoningEffort || options?.reasoningSummary) {
+				const effort = options?.reasoningEffort
+					? (options.reasoningEffortValue ??
+						resolveThinkingLevel(model, options.reasoningEffort)?.providerValue ??
+						options.reasoningEffort)
+					: "medium";
+				params.reasoning = {
+					effort: effort as NonNullable<typeof params.reasoning>["effort"],
+					summary: options?.reasoningSummary || "auto",
+				};
+				params.include = ["reasoning.encrypted_content"];
+			}
 		}
 	}
 

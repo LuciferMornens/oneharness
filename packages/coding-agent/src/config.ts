@@ -16,6 +16,7 @@ import { basename, dirname, join, posix, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { prepareWindowsShellCommand, spawnSyncHidden } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
+import { getNativeInstallationTarget } from "./utils/native-installation.js";
 
 // =============================================================================
 // Package Detection
@@ -368,6 +369,7 @@ export function getSelfUpdateUnavailableInstruction(
 }
 
 export function getUpdateInstruction(packageName: string): string {
+	if (isBunBinary && getNativeInstallationTarget()) return `Run: ${APP_NAME} update`;
 	const method = detectInstallMethod();
 	const command = getSelfUpdateCommandForMethod(method, packageName);
 	if (command) {

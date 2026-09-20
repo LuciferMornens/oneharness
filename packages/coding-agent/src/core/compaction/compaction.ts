@@ -13,6 +13,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
 } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
@@ -93,6 +94,10 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 
 function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "compaction") {
+		return undefined;
+	}
+	// Harness digests are regenerated on the new compaction head; never summarizer input.
+	if (entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
 		return undefined;
 	}
 	return getMessageFromEntry(entry);
@@ -527,6 +532,7 @@ export async function generateSummary(
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
 	retry?: ProviderRetryPolicy,
+	sessionId?: string,
 ): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
@@ -550,8 +556,8 @@ export async function generateSummary(
 
 	const completionOptions =
 		model.reasoning && thinkingLevel && thinkingLevel !== "off"
-			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-			: { maxTokens, signal, apiKey, headers };
+			? { maxTokens, signal, apiKey, headers, sessionId, reasoning: thinkingLevel }
+			: { maxTokens, signal, apiKey, headers, sessionId };
 
 	const response = await completeWithProviderRetry(
 		() =>
@@ -701,6 +707,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	summaryCall: SummaryCallRunner = (call) => call(headers),
 	retry?: ProviderRetryPolicy,
+	sessionId?: string,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -731,6 +738,7 @@ export async function compact(
 							previousSummary,
 							thinkingLevel,
 							retry,
+							sessionId,
 						),
 					)
 				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
@@ -744,6 +752,7 @@ export async function compact(
 					signal,
 					thinkingLevel,
 					retry,
+					sessionId,
 				),
 			),
 		]);
@@ -762,6 +771,7 @@ export async function compact(
 				previousSummary,
 				thinkingLevel,
 				retry,
+				sessionId,
 			),
 		);
 		slices.push(result);
@@ -801,6 +811,7 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	retry?: ProviderRetryPolicy,
+	sessionId?: string,
 ): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
@@ -820,8 +831,8 @@ async function generateTurnPrefixSummary(
 				model,
 				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 				model.reasoning && thinkingLevel && thinkingLevel !== "off"
-					? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
-					: { maxTokens, signal, apiKey, headers },
+					? { maxTokens, signal, apiKey, headers, sessionId, reasoning: thinkingLevel }
+					: { maxTokens, signal, apiKey, headers, sessionId },
 			),
 		{ policy: retry, signal },
 	);

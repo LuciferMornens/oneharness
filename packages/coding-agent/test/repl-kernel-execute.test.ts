@@ -13,6 +13,7 @@ import {
 	ReplKernelManager,
 } from "../src/core/kernel/index.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import { resolveKernelShell } from "../src/utils/shell.js";
 
 function resolveReplPython(): string | null {
 	const candidates = [
@@ -125,8 +126,50 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		expect(unknown.error?.evalue).toContain('host request type "test.unknown" is not available');
 	}, 30_000);
 
+	it("spawns through rlm.spawn over the unchanged rlm.run wire type, requires a child name, and refuses a direct rlm call", async () => {
+		const requestTypes: string[] = [];
+		const hostHandlers: HostRequestHandlers = {
+			"rlm.run": async (payload) => {
+				requestTypes.push("rlm.run");
+				expect(payload.prompt).toBe("child work");
+				return {
+					rlm_child_id: "sub-a1b2c3d4",
+					name: "worker",
+					session_dir: dir,
+					model: "anthropic/claude-opus-4-7",
+				};
+			},
+		};
+		manager = new ReplKernelManager({ python: python as string, cwd: dir, hostHandlers });
+
+		const spawned = await manager.execute(
+			"import rlm\nhandle = await rlm.spawn('child work', name='worker')\nhandle.name",
+		);
+		expect(spawned.status).toBe("ok");
+		expect(spawned.result).toBe("'worker'");
+		expect(requestTypes).toEqual(["rlm.run"]);
+
+		const nameless = await manager.execute("await rlm.spawn('child work')");
+		expect(nameless.status).toBe("error");
+		expect(nameless.error?.ename).toBe("TypeError");
+		expect(nameless.error?.evalue).toContain("required keyword-only argument: 'name'");
+		expect(requestTypes).toEqual(["rlm.run"]);
+
+		const called = await manager.execute("await rlm('child work')");
+		expect(called.status).toBe("error");
+		expect(called.error?.ename).toBe("TypeError");
+		expect(called.error?.evalue).toContain("await rlm.spawn(");
+	}, 30_000);
+
 	it("dispose sends the protocol shutdown so live bash children die with the kernel", async () => {
-		manager = new ReplKernelManager({ python: python as string, cwd: dir });
+		// bash() never picks a shell off PATH, so the host has to inject one the way
+		// IpythonKernelProvisioner does; on Windows there is no /bin/sh to fall back to.
+		const kernelShell = resolveKernelShell({});
+		manager = new ReplKernelManager({
+			python: python as string,
+			cwd: dir,
+			env: { PRIME_AGENT_BASH_SHELL: kernelShell.shell, PRIME_AGENT_BASH_SHELL_ISSUE: kernelShell.issue },
+		});
 		const r = await manager.execute("from rlm import bash\nh = bash('sleep 600')\nh.pid");
 		expect(r.status).toBe("ok");
 		const pid = Number(r.result);

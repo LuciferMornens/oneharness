@@ -2,7 +2,18 @@
 // (`python -m rlm.repl`) — requests on stdin, events on stdout, stderr kept as
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
 import type { ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import {
+	chmodSync,
+	closeSync,
+	existsSync,
+	fchmodSync,
+	mkdirSync,
+	openSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
@@ -63,6 +74,10 @@ const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
 const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 const MAX_KERNEL_STDERR_LOG_BYTES = 5 * 1024 * 1024;
 const KERNEL_STDERR_LOG_BUDGET_MARKER = "[stderr log budget exhausted]\n";
+// Owner-only directory for the kernel stderr log, matching the other private session artifacts.
+const KERNEL_STDERR_LOG_DIR_MODE = 0o700;
+// Owner-only file bits; kernel stderr can carry exception payloads.
+const KERNEL_STDERR_LOG_MODE = 0o600;
 
 /** fs.writeSync may write fewer bytes than asked (partial ENOSPC, signals); loop until done. */
 function writeFullySync(fd: number, data: Buffer): void {
@@ -250,10 +265,13 @@ export class ReplKernelManager {
 		const path = this.options.stderrLogPath;
 		if (!path) return undefined;
 		try {
-			mkdirSync(dirname(path), { recursive: true });
+			mkdirSync(dirname(path), { recursive: true, mode: KERNEL_STDERR_LOG_DIR_MODE });
 			let size = existsSync(path) ? statSync(path).size : 0;
 			if (size > MAX_KERNEL_STDERR_LOG_BYTES) {
 				try {
+					// Tighten before the move: a renamed log keeps its mode, and the
+					// rotated file holds the exception payloads worth protecting.
+					chmodSync(path, KERNEL_STDERR_LOG_MODE);
 					// Drop any prior .old first: rename fails on Windows if it exists.
 					rmSync(`${path}.old`, { force: true });
 					renameSync(path, `${path}.old`);
@@ -263,7 +281,15 @@ export class ReplKernelManager {
 					this.appendKernelDiagnostic(`cannot rotate kernel stderr log: ${errorMessage(error)}`);
 				}
 			}
-			return { fd: openSync(path, "a"), budget: Math.max(0, MAX_KERNEL_STDERR_LOG_BYTES - size) };
+			const fd = openSync(path, "a", KERNEL_STDERR_LOG_MODE);
+			// Exact bits despite the umask; tightens a pre-existing loose log.
+			try {
+				fchmodSync(fd, KERNEL_STDERR_LOG_MODE);
+			} catch (error) {
+				closeSync(fd);
+				throw error;
+			}
+			return { fd, budget: Math.max(0, MAX_KERNEL_STDERR_LOG_BYTES - size) };
 		} catch (error) {
 			this.appendKernelDiagnostic(`cannot open kernel stderr log: ${errorMessage(error)}`);
 			return undefined;
@@ -467,6 +493,24 @@ export class ReplKernelManager {
 			} catch (error) {
 				this.appendKernelDiagnostic(`kernel stderr log close failed: ${errorMessage(error)}`);
 			}
+		});
+		// A pipe write into a dead kernel surfaces as an 'error' event on the
+		// stream (write EPIPE); without a listener Node rethrows it and takes
+		// down the whole worker. The pending writeLine rejection and the child
+		// 'exit' handler below own the fallout, so this only records the
+		// diagnosis. Read-side pipe errors on stdout/stderr land the same way
+		// and need the same guard.
+		child.stdin?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stdin error: ${errorMessage(error)}`);
+		});
+		child.stdout?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stdout error: ${errorMessage(error)}`);
+		});
+		child.stderr?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stderr error: ${errorMessage(error)}`);
 		});
 		child.once("exit", () => {
 			// One turn for the poll phase to deliver the bytes the kernel wrote

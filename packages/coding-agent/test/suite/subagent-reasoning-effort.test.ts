@@ -141,13 +141,13 @@ describe("subagent reasoning effort", () => {
 		});
 		try {
 			await expect(harness.session.runRlmChild("bad effort", { effort: "ultra" })).rejects.toThrow(
-				"rlm.run effort must be one of off, minimal, low, medium, high, xhigh, max",
+				"rlm.spawn effort must be one of off, minimal, low, medium, high, xhigh, max",
 			);
 			await expect(harness.session.runRlmChild("bad type", { effort: 3 })).rejects.toThrow(
-				"rlm.run effort must be a string",
+				"rlm.spawn effort must be a string",
 			);
 			await expect(harness.session.runRlmChild("unknown option", { temperature: 0 })).rejects.toThrow(
-				"Unsupported rlm.run kwargs: temperature",
+				"Unsupported rlm.spawn kwargs: temperature",
 			);
 			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
 		} finally {
@@ -191,7 +191,7 @@ describe("subagent reasoning effort", () => {
 					effort: "high",
 					thinking: "xhigh",
 				}),
-			).rejects.toThrow('rlm.run effort and thinking disagree: "high" vs "xhigh"');
+			).rejects.toThrow('rlm.spawn effort and thinking disagree: "high" vs "xhigh"');
 		} finally {
 			harness.cleanup();
 		}

@@ -19,7 +19,7 @@ import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefi
 import { McpManager } from "./mcp/mcp-manager.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
-import { findInitialModel } from "./model-resolver.js";
+import { findInitialModel, findSessionModelWithReadinessWait } from "./model-resolver.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
@@ -167,7 +167,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const mcpManager =
 		options.mcpManager ??
 		new McpManager({ authStorage, getUserServers: () => settingsManager.getGlobalMcpServers() });
-	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
+	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerAllProviders());
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({
@@ -189,8 +189,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let modelFallbackMessage: string | undefined;
 
 	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
+		// The saved model may be missing only because the Prime Inference
+		// catalog/auth refresh has not settled yet (e.g. right after a daemon
+		// restart). Give the pending refreshes a bounded window, then retry the
+		// lookup once before falling back to another model.
+		const restoredModel = await findSessionModelWithReadinessWait(
+			modelRegistry,
+			existingSession.model.provider,
+			existingSession.model.modelId,
+		);
+		if (restoredModel) {
 			model = restoredModel;
 		}
 		if (!model) {
@@ -293,16 +301,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
+			const auth = await modelRegistry.getApiKeyAndHeaders(model, options?.headers);
 			if (!auth.ok) {
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			return streamSimple(model, context, {
+			const requestModel = auth.requestModel ?? model;
+			return streamSimple(requestModel, context, {
 				...options,
 				apiKey: auth.apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
-				headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
+				headers: auth.headers,
 			});
 		},
 		onPayload: async (payload, _model) => {

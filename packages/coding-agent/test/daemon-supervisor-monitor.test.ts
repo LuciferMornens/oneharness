@@ -150,7 +150,9 @@ interface SupervisorMonitorHarness {
 	clients: Set<{ authenticated: boolean }>;
 	supervisorClaims: Map<object, object>;
 	shuttingDown: boolean;
+	supervisorAbsentSince?: number;
 	supervisorMonitorTimer?: ReturnType<typeof setTimeout>;
+	supervisorAvailabilityCheckSettled?: Promise<void>;
 	canConnectToSupervisor: (socketPath: string) => Promise<boolean>;
 	launchReplacementSupervisor: (socketPath: string) => Promise<void>;
 	scheduleSupervisorAvailabilityCheck: (socketPath: string, delayMs: number) => void;
@@ -302,6 +304,18 @@ function createHarness(canConnect: () => Promise<boolean>): SupervisorMonitorHar
 		canConnectToSupervisor: vi.fn(canConnect),
 		launchReplacementSupervisor: vi.fn(async () => undefined),
 	}) as SupervisorMonitorHarness;
+}
+
+/**
+ * Fires the armed availability check and waits for its real async chain (registry
+ * stat, probe, relaunch) to finish, so assertions never depend on how much work
+ * the scheduler happened to fit into a clock advance.
+ */
+async function settleSupervisorAvailabilityCheck(daemon: SupervisorMonitorHarness, advanceMs: number): Promise<void> {
+	const settled = daemon.supervisorAvailabilityCheckSettled;
+	expect(settled).toBeDefined();
+	await vi.advanceTimersByTimeAsync(advanceMs);
+	await settled;
 }
 
 describe("daemon worker supervisor monitoring", () => {
@@ -498,6 +512,7 @@ describe("daemon worker supervisor monitoring", () => {
 			cronStore: { list: () => [] },
 			rosterReporter: {
 				lastComposed: new Map(),
+				lastComposedSource: new Map(),
 				lastComposedJson: new Map(),
 				queuedChildren: new Map(),
 				removedAgentIds: new Map(),
@@ -1192,18 +1207,10 @@ describe("daemon worker supervisor monitoring", () => {
 
 	it("does not poll a healthy supervisor after the startup check", async () => {
 		vi.useFakeTimers();
-		let resolveProbe: () => void = () => undefined;
-		const probeCompleted = new Promise<void>((resolve) => {
-			resolveProbe = resolve;
-		});
-		const daemon = createHarness(async () => {
-			resolveProbe();
-			return true;
-		});
+		const daemon = createHarness(async () => true);
 
 		daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 1500);
-		await vi.advanceTimersByTimeAsync(1500);
-		await probeCompleted;
+		await settleSupervisorAvailabilityCheck(daemon, 1500);
 		expect(daemon.canConnectToSupervisor).toHaveBeenCalledOnce();
 
 		await vi.advanceTimersByTimeAsync(60_000);
@@ -1223,30 +1230,50 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(daemon.canConnectToSupervisor).not.toHaveBeenCalled();
 	});
 
+	it("keeps the supervisor monitor armed after a replacement binds but exits before claiming", async () => {
+		vi.useFakeTimers();
+		// The supervisor socket is dead, comes up with the replacement launch,
+		// then dies again before the replacement ever claims the worker.
+		const probeResults = [false, true, false, false];
+		let probeIndex = 0;
+		const daemon = createHarness(async () => {
+			const result = probeResults[Math.min(probeIndex, probeResults.length - 1)];
+			probeIndex += 1;
+			return result ?? false;
+		});
+
+		daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 1500);
+		await settleSupervisorAvailabilityCheck(daemon, 1500);
+		expect(daemon.canConnectToSupervisor).toHaveBeenCalledTimes(2);
+		expect(daemon.launchReplacementSupervisor).toHaveBeenCalledOnce();
+		// The replacement binding mid-launch restarts the orphan window...
+		expect(daemon.supervisorAbsentSince).toBeUndefined();
+		// ...but a bind is not an authenticated claim: the monitor must stay armed
+		// instead of orphaning the worker if the replacement exits unclaimed.
+		expect(daemon.supervisorMonitorTimer).toBeDefined();
+
+		await settleSupervisorAvailabilityCheck(daemon, 5000);
+		expect(daemon.launchReplacementSupervisor).toHaveBeenCalledTimes(2);
+		expect(daemon.canConnectToSupervisor).toHaveBeenCalledTimes(4);
+		expect(daemon.supervisorMonitorTimer).toBeDefined();
+	});
+
 	it("retries when shutdown admission lookup fails", async () => {
 		vi.useFakeTimers();
-		let resolveProbe: () => void = () => undefined;
-		const probeCompleted = new Promise<void>((resolve) => {
-			resolveProbe = resolve;
-		});
-		const daemon = createHarness(async () => {
-			resolveProbe();
-			return true;
-		});
+		const daemon = createHarness(async () => true);
 		const registryDir = process.env[supervisorRegistryDirEnv];
 		if (!registryDir) throw new Error("Supervisor registry test directory was not set");
 		rmSync(registryDir, { recursive: true, force: true });
 		writeFileSync(registryDir, "not a directory");
 
 		daemon.scheduleSupervisorAvailabilityCheck("/tmp/supervisor.sock", 0);
-		await vi.advanceTimersByTimeAsync(0);
+		await settleSupervisorAvailabilityCheck(daemon, 0);
 		expect(daemon.canConnectToSupervisor).not.toHaveBeenCalled();
 		expect(daemon.supervisorMonitorTimer).toBeDefined();
 
 		rmSync(registryDir, { force: true });
 		mkdirSync(registryDir, { recursive: true });
-		await vi.advanceTimersByTimeAsync(5000);
-		await probeCompleted;
+		await settleSupervisorAvailabilityCheck(daemon, 5000);
 		expect(daemon.canConnectToSupervisor).toHaveBeenCalledOnce();
 	});
 
@@ -4559,6 +4586,7 @@ describe("daemon worker supervisor monitoring", () => {
 			await prepare;
 			await expect(client.request({ type: "abort", activeSessionId: "missing" })).resolves.toMatchObject({
 				error: "Daemon is preparing an update restart",
+				errorInfo: { code: "update_restarting" },
 			});
 		} finally {
 			client.close();

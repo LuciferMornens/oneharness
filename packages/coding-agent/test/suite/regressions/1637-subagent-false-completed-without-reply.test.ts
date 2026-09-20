@@ -14,15 +14,16 @@ function completedWithoutReplyMessages(messages: readonly unknown[]): unknown[] 
 			(message as { role?: unknown }).role === "custom" &&
 			(customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE || customType === AGENT_MESSAGE_CUSTOM_TYPE) &&
 			typeof content === "string" &&
-			content.includes("completed without sending a reply")
+			content.includes("[child-exited: no-reply")
 		);
 	});
 }
 
-function noticeContent(messages: readonly unknown[]): string {
+/** The child id lives in the notice details; upstream's bracket header carries only the name. */
+function noticeChildId(messages: readonly unknown[]): string {
 	const notices = completedWithoutReplyMessages(messages);
-	const content = (notices[0] as { content?: unknown } | undefined)?.content;
-	return typeof content === "string" ? content : "";
+	const details = (notices[0] as { details?: { childId?: unknown } } | undefined)?.details;
+	return typeof details?.childId === "string" ? details.childId : "";
 }
 
 describe("#1637 still-live RLM children are not marked completed without reply", () => {
@@ -111,7 +112,7 @@ describe("#1637 still-live RLM children are not marked completed without reply",
 
 		releaseNested(fauxAssistantMessage("nested finished"));
 		await expect.poll(() => completedWithoutReplyMessages(parent!.session.messages)).toHaveLength(1);
-		expect(noticeContent(parent.session.messages)).toContain(spawned.rlm_child_id);
+		expect(noticeChildId(parent.session.messages)).toBe(spawned.rlm_child_id);
 		expect(completeChild).toHaveBeenCalledWith(spawned.rlm_child_id, child.session);
 	});
 
@@ -156,6 +157,6 @@ describe("#1637 still-live RLM children are not marked completed without reply",
 		const spawned = await parent.session.runRlmChild("finish without replying", { name: "one-turn-worker" });
 		await expect.poll(() => completedWithoutReplyMessages(parent!.session.messages).length).toBeGreaterThan(0);
 		expect(completedWithoutReplyMessages(parent.session.messages)).toHaveLength(1);
-		expect(noticeContent(parent.session.messages)).toContain(spawned.rlm_child_id);
+		expect(noticeChildId(parent.session.messages)).toBe(spawned.rlm_child_id);
 	});
 });
