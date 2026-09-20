@@ -48,14 +48,14 @@ class ShellResolutionTest(unittest.TestCase):
         for posix in (True, False):
             with self.subTest(posix=posix):
                 with mock.patch.object(bash_module, "_IS_POSIX", posix):
-                    with mock.patch.object(bash_module.shutil, "which") as which:
+                    with mock.patch("shutil.which") as which:
                         with self.assertRaisesRegex(RuntimeError, issue):
                             bash_module._shell()
                         which.assert_not_called()
 
     def test_windows_without_injected_shell_raises_teaching_error(self):
         with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module.shutil, "which") as which:
+            with mock.patch("shutil.which") as which:
                 with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
                     bash_module._shell()
                 which.assert_not_called()
