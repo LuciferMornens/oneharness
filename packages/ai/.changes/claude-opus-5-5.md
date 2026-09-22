@@ -1,0 +1,2 @@
+- Added Claude Opus 5.5 (`claude-opus-5-5`) to the Anthropic provider for API-key and OAuth logins, with always-on adaptive thinking, `xhigh`/`max` effort, and its full 128k default output limit.
+- Fixed Claude Opus 5.5 and Fable/Mythos 5.1 requests failing with a 400 after compaction on Anthropic accounts that enforce preserved thinking, by opting into dropping thinking blocks bound to an earlier conversation prefix.

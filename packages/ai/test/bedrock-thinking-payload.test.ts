@@ -323,13 +323,29 @@ describe("Bedrock thinking payload", () => {
 		expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "xhigh" });
 	});
 
-	it("drops temperature for Claude Fable 5 (sampling params are rejected)", async () => {
-		const model = getModel("amazon-bedrock", "global.anthropic.claude-fable-5");
+	it.each(["global.anthropic.claude-fable-5", "global.anthropic.claude-opus-5-5"])(
+		"drops temperature for always-on %s without a reasoning selection",
+		async (id) => {
+			const model: Model<"bedrock-converse-stream"> = {
+				...getModel("amazon-bedrock", "global.anthropic.claude-opus-5"),
+				id,
+				name: id,
+			};
 
-		const payload = await capturePayload(model, { reasoning: "high", temperature: 0.5 });
+			let payload: BedrockThinkingPayload | undefined;
+			await streamBedrock(model, makeContext(), {
+				temperature: 0.5,
+				signal: AbortSignal.abort(),
+				onPayload: (value) => {
+					payload = value as BedrockThinkingPayload;
+					return value;
+				},
+			}).result();
 
-		expect(payload.inferenceConfig?.temperature).toBeUndefined();
-	});
+			expect(payload).toBeDefined();
+			expect(payload?.inferenceConfig?.temperature).toBeUndefined();
+		},
+	);
 
 	it("keeps temperature and omits thinking when a Fable-named model is non-reasoning", async () => {
 		const model: Model<"bedrock-converse-stream"> = {

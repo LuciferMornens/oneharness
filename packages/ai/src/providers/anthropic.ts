@@ -5,6 +5,7 @@ import type {
 	MessageCreateParamsStreaming,
 	MessageParam,
 	RawMessageStreamEvent,
+	ThinkingConfigAdaptive,
 } from "@anthropic-ai/sdk/resources/messages.js";
 import {
 	type AnthropicCacheCreationUsage,
@@ -182,6 +183,19 @@ export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
 const FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
+const THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01";
+
+/**
+ * Thinking blocks from these models are bound to the conversation prefix that
+ * produced them. Keep-tail compaction replays retained turns' blocks after a new
+ * summary, which enforced accounts reject with a 400 unless the request opts into
+ * dropping mismatched blocks. Only the Claude API offers the binding controls.
+ */
+function usesPreservedThinking(model: Model<"anthropic-messages">): boolean {
+	return (
+		model.provider === "anthropic" && /claude-(?:opus-5[.-]5|fable-5[.-]1|mythos-5[.-]1)/.test(model.id.toLowerCase())
+	);
+}
 
 function getAnthropicCompat(model: Model<"anthropic-messages">): Required<AnthropicMessagesCompat> {
 	return {
@@ -205,7 +219,7 @@ export interface AnthropicOptions extends StreamOptions {
 	 * Controls how much thinking Claude allocates:
 	 * - "max": Always thinks with no constraints (Opus 4.6+, Sonnet 4.6, Fable/Mythos)
 	 * - "xhigh": Highest reasoning level (Opus 4.7+, Fable 5, Mythos 5)
-	 * - "high": Always thinks, deep reasoning (default)
+	 * - "high": Always thinks, deep reasoning (API default; Opus 5.5 defaults to "medium")
 	 * - "medium": Moderate thinking, may skip for simple queries
 	 * - "low": Minimal thinking, skips for simple tasks
 	 * Ignored for older models.
@@ -491,6 +505,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		try {
 			let client: Anthropic;
 			let isOAuth: boolean;
+			// An injected client carries its own headers, so the binding beta can't be added.
+			const bindThinking = !options?.client && usesPreservedThinking(model);
 
 			if (options?.client) {
 				client = options.client;
@@ -512,6 +528,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					apiKey,
 					options?.thinkingEnabled === true && (options.interleavedThinking ?? true),
 					shouldUseFineGrainedToolStreamingBeta(model, context),
+					bindThinking,
 					options?.headers,
 					copilotDynamicHeaders,
 					options?.sessionId,
@@ -525,7 +542,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				cacheControl && usesAnthropicCachePricing
 					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
 					: undefined;
-			let params = buildParams(model, context, isOAuth, options, cacheControl);
+			let params = buildParams(model, context, isOAuth, bindThinking, options, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
@@ -879,6 +896,7 @@ function createClient(
 	apiKey: string,
 	interleavedThinking: boolean,
 	useFineGrainedToolStreamingBeta: boolean,
+	thinkingBinding: boolean,
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
@@ -892,6 +910,10 @@ function createClient(
 	}
 	if (needsInterleavedBeta) {
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
+	}
+	// The header alone selects the beta default (drop_block) when no thinking param is sent.
+	if (thinkingBinding) {
+		betaFeatures.push(THINKING_BINDING_BETA);
 	}
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -990,6 +1012,7 @@ function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
 	isOAuthToken: boolean,
+	thinkingBinding: boolean,
 	options?: AnthropicOptions,
 	cacheControl?: CacheControlEphemeral,
 ): MessageCreateParamsStreaming {
@@ -1071,7 +1094,15 @@ function buildParams(
 				// older Claude 4 models (whose API default is also "summarized").
 				const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
 				// Adaptive thinking: Claude decides when and how much to think.
-				params.thinking = { type: "adaptive", display };
+				// The Anthropic SDK types lag the beta block_binding field.
+				const thinking: ThinkingConfigAdaptive & { block_binding?: { prefix_mismatch_behavior: "drop_block" } } = {
+					type: "adaptive",
+					display,
+				};
+				if (thinkingBinding) {
+					thinking.block_binding = { prefix_mismatch_behavior: "drop_block" };
+				}
+				params.thinking = thinking;
 				if (options.effort) {
 					// The Anthropic SDK types can lag newly supported effort values such as "xhigh"/"max".
 					params.output_config =

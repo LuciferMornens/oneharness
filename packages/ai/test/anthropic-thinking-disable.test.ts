@@ -262,30 +262,36 @@ describe("Anthropic thinking disable payload", () => {
 		expect(payload.output_config).toBeUndefined();
 	});
 
-	it("omits disabled thinking for always-on models even in direct provider options", async () => {
-		const model: Model<"anthropic-messages"> = {
-			...getModel("anthropic", "claude-fable-5"),
-			baseUrl: "http://127.0.0.1:9",
-		};
-		let payload: AnthropicThinkingPayload | undefined;
-		await streamAnthropic(model, makePayloadCaptureContext(), {
-			apiKey: "fake-key",
-			thinkingEnabled: false,
-			onPayload: (value) => {
-				payload = value as AnthropicThinkingPayload;
-				return value;
-			},
-		}).result();
+	it.each(["claude-fable-5", "claude-opus-5-5"] as const)(
+		"omits disabled thinking for always-on %s even in direct provider options",
+		async (id) => {
+			const model: Model<"anthropic-messages"> = {
+				...getModel("anthropic", id),
+				baseUrl: "http://127.0.0.1:9",
+			};
+			let payload: AnthropicThinkingPayload | undefined;
+			await streamAnthropic(model, makePayloadCaptureContext(), {
+				apiKey: "fake-key",
+				thinkingEnabled: false,
+				onPayload: (value) => {
+					payload = value as AnthropicThinkingPayload;
+					return value;
+				},
+			}).result();
 
-		expect(payload?.thinking).toBeUndefined();
-	});
+			expect(payload?.thinking).toBeUndefined();
+		},
+	);
 
-	it("drops temperature for Claude Fable 5 (sampling params are rejected)", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { temperature: 0.5 });
+	it.each(["claude-fable-5", "claude-opus-5-5"] as const)(
+		"drops temperature for %s (sampling params are rejected)",
+		async (id) => {
+			const payload = await capturePayload(getModel("anthropic", id), { temperature: 0.5 });
 
-		expect(payload.temperature).toBeUndefined();
-		expect(payload.thinking).toBeUndefined();
-	});
+			expect(payload.temperature).toBeUndefined();
+			expect(payload.thinking).toBeUndefined();
+		},
+	);
 
 	it("uses adaptive thinking with effort=xhigh for Claude Fable 5", async () => {
 		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { reasoning: "xhigh" });
@@ -408,6 +414,24 @@ describe("Anthropic request wire contract", () => {
 			cacheRetention: "none",
 		});
 		expect(toolsOf(apiKey.body).map((entry) => entry.name)).toEqual(["todowrite", "find", "my_custom_tool"]);
+	});
+
+	it.each([
+		{ id: "claude-opus-5-5", apiKey: "sk-ant-api-fake-token", bound: true },
+		{ id: "claude-opus-5-5", apiKey: "sk-ant-oat-fake-token", bound: true },
+		{ id: "claude-fable-5-1", apiKey: "sk-ant-api-fake-token", bound: true },
+		{ id: "claude-opus-5", apiKey: "sk-ant-api-fake-token", bound: false },
+	] as const)("sets drop_block thinking binding for $id ($apiKey): $bound", async ({ id, apiKey, bound }) => {
+		const request = await captureAnthropicRequest(
+			getModel("anthropic", id),
+			{ messages: [{ role: "user", content: "Hi", timestamp: 1 }] },
+			{ apiKey, cacheRetention: "none", thinkingEnabled: true, effort: "high" },
+		);
+		const betas = String(request.headers["anthropic-beta"] ?? "").split(",");
+		expect(betas.includes("thinking-binding-controls-2026-08-01")).toBe(bound);
+		expect((request.body.thinking as { block_binding?: unknown }).block_binding).toEqual(
+			bound ? { prefix_mismatch_behavior: "drop_block" } : undefined,
+		);
 	});
 
 	it("sends Copilot bearer auth, Copilot headers, and a valid Anthropic Messages payload", async () => {

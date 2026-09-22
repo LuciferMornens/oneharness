@@ -545,6 +545,11 @@ function isAdaptiveClaudeModel(modelId: string, modelName?: string): boolean {
 	);
 }
 
+// Opus 5.5 rejects thinking.type "disabled" at every effort level.
+function isAlwaysThinkingOpusId(modelId: string): boolean {
+	return /opus-5[.-]5/.test(modelId.toLowerCase());
+}
+
 function isNativeAnthropicClaudeRoute(model: Model<any>): boolean {
 	if (model.api !== "anthropic-messages") return false;
 	const claudeRoute = model.id.toLowerCase().includes("claude") || model.name.toLowerCase().includes("claude");
@@ -864,7 +869,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { off: null });
 	}
 	// Per-family effort support per the Anthropic effort docs. Opus 4.6 / Sonnet 4.6
-	// have no xhigh; Fable 5 / Mythos 5 / Mythos Preview think every turn (off: null).
+	// have no xhigh; Fable 5 / Mythos 5 / Opus 5.5 / Mythos Preview think every turn (off: null).
 	if (
 		nativeAnthropicRoute &&
 		(model.id.includes("opus-4-6") ||
@@ -885,7 +890,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
 	}
-	if (nativeAnthropicRoute && (model.id.includes("fable-5") || model.id.includes("mythos-5"))) {
+	if (
+		nativeAnthropicRoute &&
+		(model.id.includes("fable-5") || model.id.includes("mythos-5") || isAlwaysThinkingOpusId(model.id))
+	) {
 		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh", max: "max" });
 	}
 	if (nativeAnthropicRoute && model.id.includes("mythos-preview")) {
@@ -2917,6 +2925,37 @@ function mergeCatalogModels(allModels: Model<any>[], extra: Model<any>[]): void 
 	}
 }
 
+// Anthropic launch models not yet on models.dev. Upstream entries take priority.
+function getAnthropicLaunchModels(): Model<"anthropic-messages">[] {
+	return [
+		{
+			id: "claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com",
+			provider: "anthropic",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 4,
+				output: 20,
+				cacheRead: 0.2,
+				cacheWrite: 5,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		},
+	];
+}
+
+function addMissingAnthropicLaunchModels(allModels: Model<any>[]): void {
+	for (const model of getAnthropicLaunchModels()) {
+		if (!allModels.some((existing) => existing.provider === model.provider && existing.id === model.id)) {
+			allModels.push(model);
+		}
+	}
+}
+
 function mergeStaticCatalogModels(allModels: Model<any>[]): void {
 	mergeCatalogModels(allModels, [
 		...getGrokSubscriptionModels(),
@@ -2931,6 +2970,7 @@ async function generateModels() {
 	if (process.argv.includes("--preserve-catalog")) {
 		const preservedModels = getExistingCatalogModels();
 		mergeStaticCatalogModels(preservedModels);
+		addMissingAnthropicLaunchModels(preservedModels);
 		writeGeneratedModels(preservedModels, true);
 		return;
 	}
@@ -3073,6 +3113,8 @@ async function generateModels() {
 			maxTokens: 128000,
 		});
 	}
+
+	addMissingAnthropicLaunchModels(allModels);
 
 	// Add missing Claude Sonnet 4.6
 	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-sonnet-4-6")) {

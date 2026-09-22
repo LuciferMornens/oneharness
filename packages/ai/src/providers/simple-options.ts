@@ -4,7 +4,7 @@ import type { Api, Model, SimpleStreamOptions, StreamOptions, ThinkingBudgets, T
 const DEFAULT_MAX_OUTPUT_TOKENS = 32000;
 
 /**
- * Claude Fable/Mythos 5.x and GPT-6 run adaptive thinking that is always on and
+ * Claude Fable/Mythos 5.x, Claude Opus 5.5 and GPT-6 run adaptive thinking that is always on and
  * billed against the output limit, with no separate thinking budget the harness
  * could reserve room from. A 32k default lets a high-effort turn spend the whole
  * limit on thinking and stop with `length` before any text or tool call, so these
@@ -12,7 +12,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 32000;
  */
 function usesFullOutputLimit(model: Model<Api>): boolean {
 	if (getReasoningCapabilities(model)?.control !== "effort") return false;
-	return /claude-(?:fable|mythos)-5|gpt-6/.test(model.id.toLowerCase());
+	return /claude-(?:fable-5|mythos-5|opus-5[.-]5)|gpt-6/.test(model.id.toLowerCase());
 }
 
 export function resolveDefaultMaxTokens(model: Model<Api>): number | undefined {

@@ -4,8 +4,8 @@ import { buildBaseOptions, resolveDefaultMaxTokens } from "../src/providers/simp
 import type { Model } from "../src/types.js";
 
 describe("default max output tokens", () => {
-	it("gives Claude Fable 5.1 its full 128k output limit", () => {
-		const model = getModel("anthropic", "claude-fable-5-1");
+	it.each(["claude-fable-5-1", "claude-opus-5-5"] as const)("gives always-on %s its full 128k output limit", (id) => {
+		const model = getModel("anthropic", id);
 		expect(model.maxTokens).toBe(128000);
 		expect(resolveDefaultMaxTokens(model)).toBe(128000);
 		expect(buildBaseOptions(model).maxTokens).toBe(128000);
